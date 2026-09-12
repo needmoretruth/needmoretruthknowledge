@@ -84,6 +84,7 @@ nmtk_i18n::messages! {
     ColumnEntries { en: "entries", ko: "항목" },
     ColumnChange { en: "change", ko: "변화" },
     LabelHolds { en: "Alice holds", ko: "앨리스 보유" },
+    LabelWholeState { en: "What each ledger stores in all — how many entries, and how many bytes.", ko: "각 원장이 통째로 저장하는 것 — 항목 수와 바이트 수." },
     LabelAccepted { en: "accepted", ko: "받아들임" },
     LabelRejected { en: "rejected", ko: "거절함" },
     LabelStopped { en: "stopped it", ko: "막았음" },

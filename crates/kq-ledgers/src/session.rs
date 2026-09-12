@@ -11,7 +11,7 @@
 use nmtk_core::{Language, format};
 use nmtk_kq::knob::{Knob, KnobValue};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
-use nmtk_kq::text::pad;
+use nmtk_kq::text::{column, pad, rpad};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_ledger::{
     Address, Amount, ApplyOutcome, DoubleSpendReport, Genesis, Key, Model, Scenario, SideBySide,
@@ -436,6 +436,13 @@ impl Session {
             ]));
             lines.push(Line::from(""));
         }
+        // The counts under here are the whole ledger's, not Alice's. Sitting straight under
+        // "Alice holds 20", "coins 3" read as three coins of hers.
+        lines.push(Line::from(Span::styled(
+            Msg::LabelWholeState.text(language).to_string(),
+            theme.muted(),
+        )));
+        lines.push(Line::from(""));
         for model in Model::ALL {
             let fact = facts.get(model);
             lines.push(Line::from(Span::styled(
@@ -447,11 +454,13 @@ impl Session {
                 // The kind comes before the number so no language has to agree a plural: "coins 3"
                 // and "lines 1" both read, where "1 lines" does not.
                 Span::styled(
-                    pad(phrases::entry_kind(fact.entry_kind).text(language), 14),
+                    column(phrases::entry_kind(fact.entry_kind).text(language), 14),
                     theme.muted(),
                 ),
-                Span::styled(pad(&format::count(fact.entry_count as u64), 6), theme.plain()),
-                Span::styled(format::bytes(fact.state_size_bytes), theme.plain()),
+                // Right-aligned so the numbers sit under each other: 192, 36 and 207 left-aligned
+                // do not compare, which is the one thing this panel exists for.
+                Span::styled(rpad(&format::count(fact.entry_count as u64), 4), theme.plain()),
+                Span::styled(rpad(&format::bytes(fact.state_size_bytes), 12), theme.plain()),
             ]));
             if let Some(reports) = double {
                 lines.push(verdict_line(reports.get(model), language, theme));
@@ -749,6 +758,24 @@ mod tests {
     fn set_amount(session: &mut Session, amount: Amount) {
         if let KnobValue::Count { current, .. } = &mut session.knobs[0].value {
             *current = amount;
+        }
+    }
+
+    /// "Alice holds 20" sat directly above "coins 3", and a reviewer read the three as hers.
+    #[test]
+    fn the_panel_says_whose_the_counts_under_the_balance_are() {
+        let mut session = Session::new();
+        session.perform(0, SendWholeCoin);
+        for language in Language::ALL {
+            let lines = session.ledger_lines(*language, Theme::new(true));
+            let text: String = lines
+                .iter()
+                .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("=== {language} ===\n{text}");
+            let head: String = Msg::LabelWholeState.text(*language).chars().take(12).collect();
+            assert!(text.contains(&head), "nothing says whose the counts are:\n{text}");
         }
     }
 
