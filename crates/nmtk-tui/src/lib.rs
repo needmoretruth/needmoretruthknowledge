@@ -12,6 +12,7 @@ mod logo;
 mod settings_screen;
 mod subject;
 pub mod theme;
+pub mod widgets;
 
 use std::io;
 use std::time::Duration;
