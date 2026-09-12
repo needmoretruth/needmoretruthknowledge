@@ -1,0 +1,17 @@
+[package]
+name = "nmtk-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nmtk-core = { workspace = true }
+nmtk-i18n = { workspace = true }
+nmtk-pow = { workspace = true }
+nmtk-ledger = { workspace = true }
+nmtk-transformer = { workspace = true }
+nmtk-zk = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
