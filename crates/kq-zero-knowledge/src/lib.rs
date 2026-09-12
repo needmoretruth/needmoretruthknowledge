@@ -131,14 +131,17 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_translation_falls_back_to_english_rather_than_blank() {
+    fn korean_is_never_blank_either() {
+        // A line with no Korean falls back to the English, which still reads. A blank does not.
         for msg in Msg::ALL {
-            assert_eq!(
-                msg.text(Language::Korean),
-                msg.text(Language::English),
-                "{msg:?} should still be falling back to English"
-            );
+            assert!(!msg.text(Language::Korean).trim().is_empty(), "{msg:?} is blank in Korean");
         }
+    }
+
+    #[test]
+    fn the_quest_is_named_in_both_languages() {
+        assert_eq!(ZeroKnowledge.title(Language::English), "Zero-knowledge proofs");
+        assert_eq!(ZeroKnowledge.title(Language::Korean), "영지식 증명");
     }
 
     #[test]

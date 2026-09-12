@@ -1037,6 +1037,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "kq-ledgers",
+ "kq-proof-of-work",
  "kq-zero-knowledge",
  "nmtk-core",
  "nmtk-i18n",

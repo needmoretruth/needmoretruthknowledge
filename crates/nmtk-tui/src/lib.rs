@@ -27,6 +27,7 @@ use crate::app::{App, Screen};
 /// Every quest the program ships with, newest version and older ones alike.
 fn catalogue() -> Catalogue {
     Catalogue::new(vec![
+        Box::new(kq_proof_of_work::ProofOfWork),
         Box::new(kq_ledgers::Ledgers),
         Box::new(kq_zero_knowledge::ZeroKnowledge),
     ])
