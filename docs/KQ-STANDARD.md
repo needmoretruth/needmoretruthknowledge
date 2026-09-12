@@ -67,6 +67,11 @@ on when the thing it was about to describe has happened. Two methods keep that h
 | `can_advance()` | Enter does something right now. False while a run is being waited on. |
 | `at_end()` | This stage has said everything it has to say. |
 
+**Walking to another stage stops the work and keeps the numbers.** One heavy run at a time is a
+hard rule, so entering a stage stops whatever the last one started. What that run *measured* is
+not the run: a recap reached with Tab has to show the reader their own numbers, and `r` on a stage
+is the only thing that throws them away.
+
 Both are false in the middle of a run, and the shell needs to tell those apart: at the end of a
 stage Enter walks into the next one, and in the middle of a run it does nothing, which is what the
 reader is being told. A quest never walks itself into the next stage — only the shell knows there
@@ -173,6 +178,9 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
 - **What the quest says must match what the engine said.** If prose names a reason — "the coin is
   already gone" — a test asserts the engine really returns that reason. Prose that drifts from the
   machine is the worst bug this program can have, because it is invisible.
+- **A number column carries one unit, chosen from its largest value.** A column reading 166 µs,
+  21 µs and 27.5 ms invites the reader to compare 166 with 27.5 and conclude that the slowest row
+  is the fastest.
 - **Never make a language agree a plural.** Write `coins 3`, not `3 coins`; `lines 1` reads, `1
   lines` does not.
 - **Label first, value after.** `gap 3.2s`, `attacker's share 51.0%`. English tolerates either
@@ -183,7 +191,12 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
 - Black and white. Red, yellow, blue and green carry **state only**: `State::{Good, Bad, Working,
   Chosen}`, each with a one-column mark (`+ x ~ >`) so the screen reads with colour off.
 - **Korean and Japanese glyphs take two columns.** Never use `str::len()` or `format!("{:<10}")` on
-  anything a reader will see. Use `nmtk_kq::text::{width, pad, truncate, wrap}`.
+  anything a reader will see. Use `nmtk_kq::text::{width, pad, column, truncate, wrap}`.
+- **A table column is built with `column`, never with `pad`.** `pad` widens and never narrows, so
+  a label wider than its column runs straight into the value beside it. Korean reaches that width
+  on labels English never does, which is why this is written down rather than left to judgement.
+- **Measure a column from the words that will be in it**, in the language on screen, rather than
+  from a constant that happened to fit in English.
 - The smallest screen is **80×24**. Anything smaller gets a message, not a broken layout.
 - A row that will not fit **drops whole items rather than cutting one in half**. Half a word is
   worse than a missing word.
@@ -216,7 +229,14 @@ Say(Msg)        // one sentence
 Ask(Msg)        // something the reader has to do before pressing Enter
 Run(Deed)       // real work, started the moment the step is reached
 Await(Until)    // the conversation waits; the run's own beats are the answer
+Tell(Topic)     // one sentence, chosen from what the run actually did
 ```
+
+**A sentence after a run is a `Tell`, not a `Say`, whenever it says what happened.** An `Ask` is a
+suggestion, not a gate: the reader is free to set something else, and often does. A `Say` written
+for the suggested values then states a result that did not occur — "Smaller, faster, and worse"
+over a model the reader had just made bigger. A `Tell` reads the numbers instead, and says so when
+the run was not the one the conversation asked for.
 
 A `Run` followed by an `Await` is one move: the reader presses Enter once and the waiting begins,
 because a key whose only effect is to skip the answer is not worth offering.
