@@ -70,13 +70,18 @@ pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64], label:
     let low = finite.iter().copied().fold(f64::INFINITY, f64::min);
     let high = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let span = (high - low).max(f64::EPSILON);
+
     let scaled: Vec<u64> =
         finite.iter().map(|v| (((v - low) / span) * 100.0).round() as u64).collect();
+    // First value to last, not smallest to largest: a loss that fell from 3.3 to 0.4 should read
+    // that way round, and "0.4 → 3.3" says the opposite of what happened.
+    let first = finite.first().copied().unwrap_or(low);
+    let last = finite.last().copied().unwrap_or(high);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(label.to_string(), theme.muted()),
             Span::styled(
-                format!("   {}  \u{2192}  {}", short(low), short(high)),
+                format!("   {}  \u{2192}  {}", short(first), short(last)),
                 theme.muted(),
             ),
         ])),

@@ -809,6 +809,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kq-transformer"
+version = "0.0.1"
+dependencies = [
+ "nmtk-core",
+ "nmtk-i18n",
+ "nmtk-kq",
+ "nmtk-transformer",
+ "ratatui",
+]
+
+[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1016,6 +1027,7 @@ dependencies = [
  "crossterm",
  "kq-ledgers",
  "kq-proof-of-work",
+ "kq-transformer",
  "nmtk-core",
  "nmtk-i18n",
  "nmtk-kq",

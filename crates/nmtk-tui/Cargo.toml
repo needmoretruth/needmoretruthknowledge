@@ -12,5 +12,6 @@ nmtk-i18n = { workspace = true }
 nmtk-kq = { workspace = true }
 kq-ledgers = { workspace = true }
 kq-proof-of-work = { workspace = true }
+kq-transformer = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

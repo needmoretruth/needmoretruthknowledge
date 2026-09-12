@@ -7,8 +7,7 @@
 
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
-use nmtk_kq::meta::StageKind;
-use nmtk_kq::session::{Action, KqSession, Reaction, RunState};
+use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::text::{char_width, pad, truncate, width as cells};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::widgets;
@@ -63,6 +62,169 @@ const ATTACK_PLAIN_SGD: usize = 2;
 /// state colours are kept for state.
 const SHADES: [&str; 5] = [" ", "░", "▒", "▓", "█"];
 
+/// Where each stage sits. The order here is the order `lib.rs` declares them in.
+#[cfg(test)]
+const STAGE_QUESTION: usize = 0;
+#[cfg(test)]
+const STAGE_PIECES: usize = 1;
+const STAGE_TRAIN: usize = 2;
+const STAGE_TUNE: usize = 3;
+const STAGE_BREAK: usize = 4;
+const STAGE_RECAP: usize = 5;
+
+/// The most events one stage reports. A loss falls continuously; a conversation does not.
+const EVENT_CAP: usize = 24;
+
+/// The losses worth stopping to mention, highest first. Crossing one is news; the thousand steps
+/// between two of them are not.
+const MILESTONES: [f32; 5] = [3.0, 2.0, 1.0, 0.5, 0.2];
+
+/// One move in a stage's conversation.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Say(Msg),
+    Ask(Msg),
+    Run(Deed),
+    /// The conversation waits here until the run has got somewhere.
+    Await(Until),
+}
+
+/// Work a step starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deed {
+    /// Train with whatever the tuning knobs say.
+    Train,
+    /// Train with the attack the reader chose, which is the same code and worse numbers.
+    Attack,
+}
+
+/// What a waiting step is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    Steps(usize),
+    Finished,
+}
+
+use Deed::{Attack, Train};
+use Step::{Ask, Await, Run, Say};
+
+/// The one question a language model answers.
+const QUESTION: &[Step] = &[
+    Say(Msg::QuestionOne),
+    Say(Msg::QuestionTwo),
+    Say(Msg::QuestionThree),
+    Say(Msg::QuestionFour),
+    Say(Msg::QuestionFive),
+];
+
+/// What the model is made of, with every word on the panel given a meaning.
+const PIECES: &[Step] = &[
+    Say(Msg::PiecesOne),
+    Say(Msg::PiecesTwo),
+    Say(Msg::PiecesThree),
+    Say(Msg::PiecesFour),
+    Say(Msg::PiecesFive),
+    Say(Msg::PiecesSix),
+    Say(Msg::PiecesSeven),
+    Say(Msg::PiecesWidth),
+    Say(Msg::PiecesHeads),
+    Say(Msg::PiecesLayers),
+    Say(Msg::PiecesWindow),
+    Say(Msg::PiecesCount),
+    Say(Msg::PiecesPromise),
+];
+
+/// The run itself, with the conversation waiting on the loss.
+const TRAIN: &[Step] = &[
+    Say(Msg::TrainOne),
+    Ask(Msg::TrainAsk),
+    Run(Train),
+    Await(Until::Steps(1)),
+    Say(Msg::TrainLoss),
+    Say(Msg::TrainScale),
+    Await(Until::Steps(300)),
+    Say(Msg::TrainAnswer),
+    Say(Msg::TrainNoise),
+    Await(Until::Finished),
+    Say(Msg::TrainDone),
+    Say(Msg::TrainGrid),
+    Say(Msg::TrainGridRead),
+];
+
+/// The reader's own shape, answered by a real run.
+const TUNE: &[Step] = &[
+    Say(Msg::SettingsOne),
+    Say(Msg::SettingsTwo),
+    Say(Msg::SettingsThree),
+    Say(Msg::SettingsFour),
+    Say(Msg::SettingsFive),
+    Say(Msg::SettingsSix),
+    Say(Msg::SettingsSeven),
+    Ask(Msg::SettingsAsk),
+    Run(Train),
+    Await(Until::Finished),
+    Say(Msg::SettingsSmaller),
+    Say(Msg::SettingsRefused),
+];
+
+/// Three ways to make the same code fail, each run for real.
+const BREAK: &[Step] = &[
+    Say(Msg::BreakOne),
+    Say(Msg::BreakTwo),
+    Say(Msg::BreakThree),
+    Say(Msg::BreakFour),
+    Ask(Msg::BreakAskRunaway),
+    Run(Attack),
+    Await(Until::Finished),
+    Say(Msg::BreakAfterRunaway),
+    Say(Msg::BreakWarmupOne),
+    Say(Msg::BreakWarmupTwo),
+    Say(Msg::BreakWarmupThree),
+    Ask(Msg::BreakAskWarmup),
+    Run(Attack),
+    Await(Until::Finished),
+    Say(Msg::BreakAfterWarmup),
+    Say(Msg::BreakSgdOne),
+    Say(Msg::BreakSgdTwo),
+    Say(Msg::BreakSgdThree),
+    Ask(Msg::BreakAskSgd),
+    Run(Attack),
+    Await(Until::Finished),
+    Say(Msg::BreakAfterSgd),
+    Ask(Msg::BreakAskSgdAgain),
+    Run(Attack),
+    Await(Until::Finished),
+    Say(Msg::BreakLesson),
+];
+
+/// What the reader now knows, beside the numbers they made.
+const RECAP: &[Step] = &[
+    Say(Msg::RecapOne),
+    Say(Msg::RecapTwo),
+    Say(Msg::RecapThree),
+    Say(Msg::RecapFour),
+    Say(Msg::RecapFive),
+    Say(Msg::RecapSix),
+    Say(Msg::RecapSeven),
+];
+
+const SCRIPTS: [&[Step]; 6] = [QUESTION, PIECES, TRAIN, TUNE, BREAK, RECAP];
+
+/// Something that happened, kept as numbers so it can be said again in any language.
+enum Happening {
+    Started { weights: usize, steps: usize },
+    Loss { loss: f32, step: usize },
+    GotIt { step: usize },
+    Ended { loss: f32, seconds: f64, fell: bool },
+    Refused(Msg),
+}
+
+/// One happening, filed against the step the reader was on when it happened.
+struct Logged {
+    step: usize,
+    what: Happening,
+}
+
 /// A run the reader started, and whether its settings were the sensible ones.
 struct Finished {
     snapshot: TrainingSnapshot,
@@ -70,7 +232,18 @@ struct Finished {
 }
 
 pub struct Session {
-    stage: StageKind,
+    stage: usize,
+    /// How many steps of this stage have been revealed.
+    revealed: usize,
+    /// Everything that happened in this stage, oldest first.
+    log: Vec<Logged>,
+    /// Which loss milestone has already been mentioned.
+    milestone: usize,
+    /// Whether this run's arrival and its ending have been said yet.
+    said_got_it: bool,
+    said_ended: bool,
+    /// The loss of the run's first measured step, to say whether it ever fell.
+    first_loss: Option<f32>,
     /// What this machine chose for itself before the reader touched anything.
     machine_default: TrainingConfig,
     tune: Vec<Knob>,
@@ -100,7 +273,13 @@ impl Session {
     pub fn new(machine: &MachineProfile) -> Self {
         let machine_default = TrainingConfig::for_machine(machine);
         let mut session = Self {
-            stage: StageKind::Brief,
+            stage: 0,
+            revealed: 0,
+            log: Vec::new(),
+            milestone: 0,
+            said_got_it: false,
+            said_ended: false,
+            first_loss: None,
             machine_default,
             tune: tune_knobs(&machine_default),
             attack: attack_knobs(),
@@ -243,9 +422,9 @@ impl Session {
 
     fn stage_knobs(&self) -> &[Knob] {
         match self.stage {
-            StageKind::Run => &self.view,
-            StageKind::Tune => &self.tune,
-            StageKind::Break => &self.attack,
+            STAGE_TRAIN => &self.view,
+            STAGE_TUNE => &self.tune,
+            STAGE_BREAK => &self.attack,
             _ => &[],
         }
     }
@@ -253,9 +432,9 @@ impl Session {
     fn stage_knobs_mut(&mut self) -> Option<&mut Knob> {
         let chosen = self.chosen;
         match self.stage {
-            StageKind::Run => self.view.get_mut(chosen),
-            StageKind::Tune => self.tune.get_mut(chosen),
-            StageKind::Break => self.attack.get_mut(chosen),
+            STAGE_TRAIN => self.view.get_mut(chosen),
+            STAGE_TUNE => self.tune.get_mut(chosen),
+            STAGE_BREAK => self.attack.get_mut(chosen),
             _ => None,
         }
     }
@@ -319,7 +498,7 @@ impl Session {
     /// A knob's value as words where it has words, and as a number where it does not.
     fn knob_value_text(&self, index: usize, knob: &Knob, language: Language) -> String {
         match self.stage {
-            StageKind::Run => {
+            STAGE_TRAIN => {
                 let attention = self.attention();
                 let heads = attention.map_or(self.tuned().heads, |a| a.heads).max(1);
                 let chosen = choice_of(knob);
@@ -331,7 +510,7 @@ impl Session {
                     chosen % heads + 1
                 )
             }
-            StageKind::Break if index == BREAK_ATTACK => match choice_of(knob) {
+            STAGE_BREAK if index == BREAK_ATTACK => match choice_of(knob) {
                 ATTACK_NO_WARMUP => Msg::AttackNoWarmup.text(language).to_string(),
                 ATTACK_PLAIN_SGD => Msg::AttackPlainSgd.text(language).to_string(),
                 _ => Msg::AttackRunaway.text(language).to_string(),
@@ -403,7 +582,10 @@ impl Session {
     /// The model's own answer, with the mark that says whether it is the sentence yet.
     fn answer_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let Some(snapshot) = &self.latest else {
-            return vec![Line::from(Span::styled(Msg::RunIdle.text(language), theme.muted()))];
+            return vec![Line::from(Span::styled(
+                Msg::StatusPaused.text(language),
+                theme.muted(),
+            ))];
         };
         if snapshot.completion.is_empty() {
             return vec![
@@ -473,12 +655,25 @@ impl Session {
         ])];
         // Two columns go to the row label, and the newest positions are the interesting ones.
         let columns = width.saturating_sub(2).min(attention.length);
-        let rows = height.saturating_sub(2).min(attention.length);
+        let rows = height.saturating_sub(3).min(attention.length);
         if columns == 0 || rows == 0 {
             return lines;
         }
         let first_key = attention.length - columns;
         let first_query = attention.length - rows;
+        // Say when there is more than fits. A grid that silently drops half its rows reads as the
+        // whole thing, and a reader who trusts it has been told something false.
+        if rows < attention.length || columns < attention.length {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} {rows} / {}   {}",
+                    Msg::AttentionNewest.text(language),
+                    attention.length,
+                    Msg::AttentionMarks.text(language)
+                ),
+                theme.muted(),
+            )));
+        }
         let header: String =
             (first_key..attention.length).map(|k| visible(attention.tokens.get(k))).collect();
         lines.push(Line::from(Span::styled(format!("  {header}"), theme.muted())));
@@ -549,14 +744,14 @@ impl Session {
         );
         widgets::stats(frame, table, theme, &rows);
         frame.render_widget(
-            Paragraph::new(self.note(Msg::RunIdle, footer.width as usize, language, theme)),
+            Paragraph::new(Vec::<Line>::new()),
             footer,
         );
     }
 
     fn render_run(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         if self.latest.is_none() {
-            let mut lines = self.note(Msg::RunIdle, area.width as usize, language, theme);
+            let mut lines: Vec<Line> = Vec::new();
             if let Some(error) = self.refused {
                 lines.extend(self.refusal_lines(error, language, theme));
             }
@@ -593,26 +788,27 @@ impl Session {
         if area.height == 0 {
             return;
         }
+        // The curve names itself now, so this row is only the run's state.
         let [label, line] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        let state = self.run_state();
-        let status = match state {
+        let status = match self.run_state() {
             RunState::Running => Some((Msg::StatusRunning, State::Working)),
             RunState::Paused => Some((Msg::StatusPaused, State::Chosen)),
             RunState::Done => Some((Msg::StatusFinished, State::Good)),
             RunState::Idle => None,
         };
-        let mut spans = vec![Span::styled(Msg::LabelCurve.text(language), theme.muted())];
         if let Some((message, state)) = status {
-            spans.push(Span::styled(
-                format!("   {} {}", state.mark(), message.text(language)),
-                theme.state(state),
-            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("{} {}", state.mark(), message.text(language)),
+                    theme.state(state),
+                ))),
+                label,
+            );
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), label);
         let history = self.latest.as_ref().map(|s| s.loss_history.as_slice()).unwrap_or(&[]);
         let points = thin(history, line.width as usize);
-        widgets::curve(frame, line, theme, &points);
+        widgets::curve(frame, line, theme, &points, Msg::LabelCurve.text(language));
     }
 
     fn render_tune(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
@@ -652,7 +848,7 @@ impl Session {
             ),
         ]));
         lines.push(Line::from(""));
-        lines.extend(self.note(Msg::TuneGo, area.width as usize, language, theme));
+
         if let Some(error) = self.refused {
             lines.extend(self.refusal_lines(error, language, theme));
         }
@@ -729,14 +925,6 @@ impl Session {
                 }
                 _ => lines.extend(self.answer_lines(area.width as usize, language, theme)),
             }
-            lines.push(Line::from(""));
-            lines.extend(self.note(Msg::BreakRecover, area.width as usize, language, theme));
-        } else if broken {
-            lines.extend(self.note(Msg::BreakHint, area.width as usize, language, theme));
-        } else {
-            for chunk in wrap(Msg::BreakRecovered.text(language), area.width as usize) {
-                lines.push(Line::from(Span::styled(chunk, theme.good())));
-            }
         }
         if let Some(error) = self.refused {
             lines.extend(self.refusal_lines(error, language, theme));
@@ -750,7 +938,10 @@ impl Session {
         let finished = self.honest.as_ref().or(self.broken.as_ref());
         let Some(finished) = finished else {
             frame.render_widget(
-                Paragraph::new(self.note(Msg::RecapNothing, area.width as usize, language, theme)),
+                Paragraph::new(Line::from(Span::styled(
+                    Msg::RecapNothing.text(language),
+                    theme.muted(),
+                ))),
                 area,
             );
             return;
@@ -837,19 +1028,6 @@ impl Session {
     }
 
     /// A sentence of guidance, wrapped to the panel.
-    fn note(
-        &self,
-        message: Msg,
-        width: usize,
-        language: Language,
-        theme: Theme,
-    ) -> Vec<Line<'static>> {
-        wrap(message.text(language), width)
-            .into_iter()
-            .map(|chunk| Line::from(Span::styled(chunk, theme.muted())))
-            .collect()
-    }
-
     fn refusal_lines(
         &self,
         error: StartError,
@@ -889,16 +1067,200 @@ impl Session {
     }
 }
 
+impl Session {
+    fn script(&self) -> &'static [Step] {
+        SCRIPTS[self.stage.min(SCRIPTS.len() - 1)]
+    }
+
+    /// Back to the first sentence of this stage, with nothing running and nothing said.
+    fn restart(&mut self) {
+        self.stop();
+        self.revealed = 0;
+        self.log.clear();
+        self.forget_run();
+        self.refused = None;
+    }
+
+    /// Forgets what has been said about the run in progress, without touching finished ones.
+    fn forget_run(&mut self) {
+        self.milestone = 0;
+        self.said_got_it = false;
+        self.said_ended = false;
+        self.first_loss = None;
+    }
+
+    fn satisfied(&self, until: Until) -> bool {
+        match until {
+            Until::Steps(wanted) => self.latest.as_ref().is_some_and(|s| s.step >= wanted),
+            // A refused run never finishes, so a refusal has to end the wait too, or the
+            // conversation stops for good behind a message nobody can press past.
+            Until::Finished => {
+                self.refused.is_some()
+                    || self.latest.as_ref().is_some_and(|s| s.state == TrainingState::Finished)
+            }
+        }
+    }
+
+    /// Reveals the next step and starts whatever it asks for.
+    fn advance(&mut self) -> bool {
+        let script = self.script();
+        if self.revealed + 1 >= script.len() {
+            return false;
+        }
+        self.revealed += 1;
+        if let Run(deed) = script[self.revealed] {
+            self.forget_run();
+            let config = match deed {
+                Train => self.tuned(),
+                Attack => self.attacked(),
+            };
+            // Always a fresh run. The old version answered Enter during training by doing nothing
+            // at all, so a reader who changed a value and pressed Enter watched the old model
+            // finish and concluded the key was broken.
+            self.start(config);
+            match self.refused {
+                Some(error) => {
+                    let message = phrases::start_error(error);
+                    self.say(Happening::Refused(message));
+                }
+                None => {
+                    let steps = config.steps;
+                    let weights = config.parameter_count();
+                    self.say(Happening::Started { weights, steps });
+                }
+            }
+            // A run and the wait for it are one move.
+            if matches!(script.get(self.revealed + 1), Some(Await(_))) {
+                self.revealed += 1;
+            }
+        }
+        true
+    }
+
+    fn say(&mut self, what: Happening) {
+        if self.log.len() < EVENT_CAP {
+            self.log.push(Logged { step: self.revealed, what });
+        }
+    }
+
+    /// Reads the run and turns anything new into beats.
+    fn notice(&mut self) {
+        let Some(snapshot) = &self.latest else { return };
+        let step = snapshot.step;
+        let loss = snapshot.loss;
+        let finished = snapshot.state == TrainingState::Finished;
+        let right = snapshot.completion.trim_start().starts_with(EXPANSION);
+        let seconds = snapshot.elapsed.as_secs_f64();
+
+        if self.first_loss.is_none() && loss.is_finite() && step > 0 {
+            self.first_loss = Some(loss);
+        }
+        while self.milestone < MILESTONES.len() && loss.is_finite() && loss < MILESTONES[self.milestone] {
+            self.milestone += 1;
+            self.say(Happening::Loss { loss, step });
+        }
+        if right && !self.said_got_it {
+            self.said_got_it = true;
+            self.say(Happening::GotIt { step });
+        }
+        if finished && !self.said_ended {
+            self.said_ended = true;
+            let fell = match self.first_loss {
+                Some(first) => loss.is_finite() && loss < first,
+                None => false,
+            };
+            self.say(Happening::Ended { loss, seconds, fell });
+        }
+    }
+
+    /// One happening, said in the reader's language.
+    fn beat_for(&self, what: &Happening, language: Language) -> Beat {
+        match what {
+            Happening::Started { weights, steps } => Beat::event(format!(
+                "{}  ·  {} {}  ·  {} {}",
+                Msg::EventStarted.text(language),
+                Msg::LabelWeights.text(language),
+                format::count(*weights as u64),
+                Msg::KnobSteps.text(language),
+                format::count(*steps as u64),
+            )),
+            Happening::Loss { loss, step } => Beat::event(format!(
+                "{} {loss:.3}  ·  {} {}",
+                Msg::EventLoss.text(language),
+                Msg::EventStep.text(language),
+                format::count(*step as u64),
+            )),
+            Happening::GotIt { step } => Beat::outcome(
+                State::Good,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventGotIt.text(language),
+                    Msg::EventStep.text(language),
+                    format::count(*step as u64),
+                ),
+            ),
+            Happening::Ended { loss, seconds, fell } => {
+                let mut text = format!(
+                    "{}  ·  {} {}",
+                    Msg::EventFinished.text(language),
+                    Msg::EventLoss.text(language),
+                    if loss.is_finite() {
+                        format!("{loss:.3}")
+                    } else {
+                        Msg::NotANumber.text(language).to_string()
+                    },
+                );
+                text.push_str(&format!(
+                    "  ·  {} {seconds:.0}s",
+                    Msg::EventSeconds.text(language)
+                ));
+                if !*fell {
+                    text.push_str(&format!("  ·  {}", Msg::EventNeverFell.text(language)));
+                }
+                Beat::outcome(if *fell { State::Good } else { State::Bad }, text)
+            }
+            Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+        }
+    }
+}
+
 impl KqSession for Session {
-    fn stage(&self) -> StageKind {
+    fn stage(&self) -> usize {
         self.stage
     }
 
-    fn go_to(&mut self, stage: StageKind) {
-        // The run belongs to the session, not to the stage, so walking away and coming back finds
-        // it exactly where it was.
+    fn go_to(&mut self, stage: usize) {
+        if stage >= SCRIPTS.len() || stage == self.stage {
+            return;
+        }
         self.stage = stage;
         self.chosen = 0;
+        // One heavy run at a time. A stage that leaves a trainer behind steals the cores from
+        // whatever the next stage is about to measure.
+        self.restart();
+    }
+
+    fn transcript(&self, language: Language) -> Vec<Beat> {
+        let script = self.script();
+        let mut beats = Vec::new();
+        for (index, step) in script.iter().enumerate().take(self.revealed + 1) {
+            match step {
+                Say(message) => beats.push(Beat::say(message.text(language))),
+                Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Run(_) | Await(_) => {}
+            }
+            for logged in self.log.iter().filter(|logged| logged.step == index) {
+                beats.push(self.beat_for(&logged.what, language));
+            }
+        }
+        beats
+    }
+
+    fn can_advance(&self) -> bool {
+        match self.script().get(self.revealed) {
+            Some(Await(until)) => self.satisfied(*until),
+            _ => self.revealed + 1 < self.script().len() || self.stage + 1 < SCRIPTS.len(),
+        }
     }
 
     fn knobs(&self) -> &[Knob] {
@@ -915,25 +1277,21 @@ impl KqSession for Session {
                 self.go_to(stage);
                 Reaction::Handled
             }
-            Action::Go => match self.stage {
-                StageKind::Run | StageKind::Tune => {
-                    if self.handle.is_some() {
-                        return Reaction::Handled;
-                    }
-                    let config = self.tuned();
-                    self.start(config);
-                    Reaction::Handled
+            Action::Go => {
+                if let Some(Await(until)) = self.script().get(self.revealed)
+                    && !self.satisfied(*until)
+                {
+                    return Reaction::Ignored;
                 }
-                StageKind::Break => {
-                    if self.handle.is_some() {
-                        return Reaction::Handled;
-                    }
-                    let config = self.attacked();
-                    self.start(config);
+                if self.advance() {
                     Reaction::Handled
+                } else if self.stage + 1 < SCRIPTS.len() {
+                    self.go_to(self.stage + 1);
+                    Reaction::Handled
+                } else {
+                    Reaction::Ignored
                 }
-                _ => Reaction::Ignored,
-            },
+            }
             Action::PauseOrResume => match &self.handle {
                 Some(handle) => {
                     if handle.is_paused() {
@@ -946,11 +1304,10 @@ impl KqSession for Session {
                 None => Reaction::Ignored,
             },
             Action::Reset => {
-                self.stop();
-                self.refused = None;
-                if self.stage == StageKind::Break {
+                if self.stage == STAGE_BREAK {
                     self.recover();
                 }
+                self.restart();
                 Reaction::Handled
             }
             Action::Next => self.move_choice(1),
@@ -994,24 +1351,31 @@ impl KqSession for Session {
     }
 
     fn tick(&mut self) {
-        let Some(handle) = &self.handle else { return };
-        // One cheap copy out from behind the lock. No work happens here.
-        let snapshot = handle.snapshot();
-        let done = snapshot.state == TrainingState::Finished;
-        let rate = self.running_config.map_or(0.0, |c| c.learning_rate);
-        let broken = self.running_broken;
-        self.latest = Some(snapshot);
-        if done {
-            // The worker has left; joining it costs nothing and gives the weights back.
-            self.handle = None;
-            if let Some(snapshot) = self.latest.clone() {
-                let finished = Finished { snapshot, rate };
-                if broken {
-                    self.broken = Some(finished);
-                } else {
-                    self.honest = Some(finished);
+        if let Some(handle) = &self.handle {
+            // One cheap copy out from behind the lock. No work happens here.
+            let snapshot = handle.snapshot();
+            let done = snapshot.state == TrainingState::Finished;
+            let rate = self.running_config.map_or(0.0, |c| c.learning_rate);
+            let broken = self.running_broken;
+            self.latest = Some(snapshot);
+            if done {
+                // The worker has left; joining it costs nothing and gives the weights back.
+                self.handle = None;
+                if let Some(snapshot) = self.latest.clone() {
+                    let finished = Finished { snapshot, rate };
+                    if broken {
+                        self.broken = Some(finished);
+                    } else {
+                        self.honest = Some(finished);
+                    }
                 }
             }
+        }
+        self.notice();
+        if let Some(Await(until)) = self.script().get(self.revealed)
+            && self.satisfied(*until)
+        {
+            self.advance();
         }
     }
 
@@ -1026,55 +1390,13 @@ impl KqSession for Session {
         }
     }
 
-    fn explain(&self, language: Language) -> Vec<Line<'static>> {
-        let paragraphs: &[Msg] = match self.stage {
-            StageKind::Brief => &[
-                Msg::BriefOpening,
-                Msg::BriefEmbedding,
-                Msg::BriefPosition,
-                Msg::BriefAttention,
-                Msg::BriefWeights,
-                Msg::BriefPromise,
-            ],
-            StageKind::Run => &[
-                Msg::RunExplainStart,
-                Msg::RunExplainLoss,
-                Msg::RunExplainAnswer,
-                Msg::RunExplainAttention,
-            ],
-            StageKind::Tune => &[
-                Msg::TuneExplainShape,
-                Msg::TuneExplainRate,
-                Msg::TuneExplainDivide,
-                Msg::TuneHint,
-            ],
-            StageKind::Break => &[
-                Msg::BreakExplainRate,
-                Msg::BreakExplainWarmup,
-                Msg::BreakExplainSgd,
-                Msg::BreakRecover,
-            ],
-            StageKind::Recap => {
-                &[Msg::RecapExplainOne, Msg::RecapExplainTwo, Msg::RecapExplainThree]
-            }
-        };
-        let mut lines = Vec::new();
-        for (index, message) in paragraphs.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(message.text(language)));
-        }
-        lines
-    }
-
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let title = match self.stage {
-            StageKind::Brief => Msg::Title,
-            StageKind::Run => Msg::RunTitle,
-            StageKind::Tune => Msg::TuneTitle,
-            StageKind::Break => Msg::BreakTitle,
-            StageKind::Recap => Msg::RecapTitle,
+            STAGE_TRAIN => Msg::RunTitle,
+            STAGE_TUNE => Msg::TuneTitle,
+            STAGE_BREAK => Msg::BreakTitle,
+            STAGE_RECAP => Msg::RecapTitle,
+            _ => Msg::Title,
         };
         let block = theme.titled_panel(title.text(language));
         let inner = block.inner(area);
@@ -1083,20 +1405,20 @@ impl KqSession for Session {
             return;
         }
         match self.stage {
-            StageKind::Brief => self.render_brief(frame, inner, theme, language),
-            StageKind::Run => self.render_run(frame, inner, theme, language),
-            StageKind::Tune => self.render_tune(frame, inner, theme, language),
-            StageKind::Break => self.render_break(frame, inner, theme, language),
-            StageKind::Recap => self.render_recap(frame, inner, theme, language),
+            STAGE_TRAIN => self.render_run(frame, inner, theme, language),
+            STAGE_TUNE => self.render_tune(frame, inner, theme, language),
+            STAGE_BREAK => self.render_break(frame, inner, theme, language),
+            STAGE_RECAP => self.render_recap(frame, inner, theme, language),
+            _ => self.render_brief(frame, inner, theme, language),
         }
     }
 
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)> {
         match self.stage {
-            StageKind::Run => vec![("←→", Msg::KeyViewHead.text(language))],
-            StageKind::Tune => vec![("←→", Msg::KeyChangeValue.text(language))],
-            StageKind::Break => vec![
-                ("←→", Msg::KeyChangeValue.text(language)),
+            STAGE_TRAIN => vec![("←→", Msg::KeyViewHead.text(language))],
+            STAGE_TUNE => vec![("↑↓ ←→", Msg::KeyChangeValue.text(language))],
+            STAGE_BREAK => vec![
+                ("↑↓ ←→", Msg::KeyChangeValue.text(language)),
                 ("r", Msg::KeyRecover.text(language)),
             ],
             _ => Vec::new(),
@@ -1415,6 +1737,13 @@ mod tests {
         session.running_config = Some(session.tuned());
     }
 
+    /// Presses Enter until the stage runs out of steps it can take without waiting.
+    fn walk(session: &mut Session) {
+        for _ in 0..session.script().len() {
+            session.on(Action::Go);
+        }
+    }
+
     fn draw(session: &Session, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
         terminal
@@ -1437,35 +1766,68 @@ mod tests {
     }
 
     #[test]
-    fn it_opens_on_the_brief_and_walks_to_every_stage() {
+    fn it_opens_on_one_sentence_and_walks_to_every_stage() {
         let mut session = Session::new(&machine());
-        assert_eq!(session.stage(), StageKind::Brief);
-        for stage in StageKind::ALL {
+        assert_eq!(session.stage(), STAGE_QUESTION);
+        assert_eq!(session.transcript(Language::ENGLISH).len(), 1, "a wall of text on opening");
+        for stage in 0..SCRIPTS.len() {
             assert_eq!(session.on(Action::Stage(stage)), Reaction::Handled);
             assert_eq!(session.stage(), stage);
-            assert!(!session.explain(Language::ENGLISH).is_empty(), "{stage:?} explains nothing");
+            assert!(
+                !session.transcript(Language::ENGLISH).is_empty(),
+                "stage {stage} says nothing"
+            );
+        }
+        session.close();
+    }
+
+    #[test]
+    fn every_beat_of_every_stage_is_short_in_both_languages() {
+        for (stage, script) in SCRIPTS.iter().enumerate() {
+            for language in Language::ALL {
+                for step in *script {
+                    let text = match step {
+                        Say(message) | Ask(message) => message.text(*language),
+                        _ => continue,
+                    };
+                    assert!(
+                        text.chars().count() <= 160,
+                        "stage {stage} in {language} says too much at once: {text:?}"
+                    );
+                    assert!(!text.is_empty(), "stage {stage} has a blank beat in {language}");
+                }
+            }
+        }
+    }
+
+    /// The words that name layers, heads, width and window have to exist: a reader who is shown
+    /// four numbers and told what none of them mean has been shown nothing.
+    #[test]
+    fn the_four_numbers_on_the_panel_are_each_given_a_meaning() {
+        for message in [Msg::PiecesWidth, Msg::PiecesHeads, Msg::PiecesLayers, Msg::PiecesWindow] {
+            assert!(PIECES.iter().any(|step| matches!(step, Say(m) if *m == message)));
         }
     }
 
     #[test]
     fn only_the_stages_with_something_to_turn_have_knobs() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Brief);
+        session.go_to(STAGE_PIECES);
         assert!(session.knobs().is_empty());
         assert_eq!(session.chosen_knob(), None);
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         assert_eq!(session.knobs().len(), 5);
         assert_eq!(session.chosen_knob(), Some(0));
-        session.go_to(StageKind::Break);
+        session.go_to(STAGE_BREAK);
         assert_eq!(session.knobs().len(), 2);
-        session.go_to(StageKind::Recap);
+        session.go_to(STAGE_RECAP);
         assert!(session.knobs().is_empty());
     }
 
     #[test]
     fn the_reader_moves_through_the_knobs_and_wraps() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         for expected in [1, 2, 3, 4, 0] {
             session.on(Action::Next);
             assert_eq!(session.chosen_knob(), Some(expected));
@@ -1477,7 +1839,7 @@ mod tests {
     #[test]
     fn a_typed_number_changes_the_model_that_would_be_built() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         let before = session.weights_now().expect("the machine's own settings build");
         for c in "128".chars() {
             session.on(Action::Type(c));
@@ -1497,7 +1859,7 @@ mod tests {
     #[test]
     fn settings_that_do_not_describe_a_model_say_so_instead_of_a_number() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         // Three heads do not divide the default width of 64.
         session.on(Action::Next);
         for c in "3".chars() {
@@ -1510,7 +1872,7 @@ mod tests {
     #[test]
     fn the_attack_raises_the_learning_rate_and_r_puts_it_back() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Break);
+        session.go_to(STAGE_BREAK);
         let sensible = session.tuned().learning_rate;
         let attacked = session.attacked().learning_rate;
         assert!(
@@ -1524,7 +1886,7 @@ mod tests {
     #[test]
     fn each_attack_changes_one_thing_and_the_multiplier_reaches_all_three() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Break);
+        session.go_to(STAGE_BREAK);
         session.on(Action::Reset);
         let sensible = session.tuned();
         assert_eq!(session.attacked(), sensible, "recovered settings are the sensible ones");
@@ -1551,16 +1913,12 @@ mod tests {
     }
 
     #[test]
-    fn a_run_belongs_to_the_session_rather_than_to_a_stage() {
+    fn walking_into_the_training_stage_and_pressing_enter_starts_a_real_run() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Run);
-        session.on(Action::Go);
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
         assert!(session.handle.is_some(), "Enter did not start a run");
-        session.go_to(StageKind::Brief);
-        session.tick();
-        session.go_to(StageKind::Recap);
-        session.tick();
-        assert!(session.handle.is_some(), "walking away stopped the run");
+        assert!(!session.can_advance(), "the conversation ran past the run it is about");
         std::thread::sleep(TEST_PATIENCE);
         session.tick();
         assert!(session.latest.as_ref().is_some_and(|s| s.total_steps > 0));
@@ -1568,11 +1926,44 @@ mod tests {
         assert!(session.handle.is_none(), "close left a worker behind");
     }
 
+    /// Leaving a stage stops its run. One trainer at a time, or two runs halve each other and
+    /// every number either of them reports is wrong.
+    #[test]
+    fn walking_out_of_the_training_stage_stops_the_trainer() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        assert!(session.handle.is_some());
+        session.go_to(STAGE_RECAP);
+        assert!(session.handle.is_none(), "a trainer was left running behind another stage");
+        session.close();
+    }
+
+    /// The old version answered Enter during training by doing nothing, so a reader who changed a
+    /// setting and pressed Enter watched the old model finish and concluded the key was broken.
+    #[test]
+    fn a_second_run_replaces_the_first_rather_than_being_ignored() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        let first = session.running_config.expect("a run was started");
+        session.go_to(STAGE_TUNE);
+        session.chosen = TUNE_WIDTH;
+        for c in "128".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        walk(&mut session);
+        let second = session.running_config.expect("the second run was refused");
+        assert_ne!(first.d_model, second.d_model, "the second Enter changed nothing");
+        session.close();
+    }
+
     #[test]
     fn pausing_and_resuming_reach_the_run() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Run);
-        session.on(Action::Go);
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
         assert_eq!(session.on(Action::PauseOrResume), Reaction::Handled);
         assert!(session.handle.as_ref().is_some_and(|h| h.is_paused()));
         session.on(Action::PauseOrResume);
@@ -1583,7 +1974,7 @@ mod tests {
     #[test]
     fn the_run_panel_draws_the_numbers_the_curve_and_the_answer_at_80_by_24() {
         let mut session = Session::new(&machine());
-        session.go_to(StageKind::Run);
+        session.go_to(STAGE_TRAIN);
         part_way(&mut session);
         let screen = draw(&session, 80, 24);
         assert!(screen.contains("1,200 / 2,000"), "no step count:\n{screen}");
@@ -1609,8 +2000,9 @@ mod tests {
             snapshot: session.latest.clone().expect("a run part way through"),
             rate: 0.003,
         });
-        for stage in StageKind::ALL {
+        for stage in 0..SCRIPTS.len() {
             session.go_to(stage);
+            part_way(&mut session);
             let screen = draw(&session, 80, 24);
             let panel: String = screen
                 .lines()
@@ -1619,7 +2011,7 @@ mod tests {
                 .join("");
             assert!(
                 panel.trim().chars().filter(|c| !c.is_whitespace()).count() > 20,
-                "{stage:?} drew almost nothing:\n{screen}"
+                "stage {stage} drew almost nothing:\n{screen}"
             );
         }
     }
@@ -1632,7 +2024,12 @@ mod tests {
             snapshot: session.latest.clone().expect("a run part way through"),
             rate: 0.003,
         });
-        session.go_to(StageKind::Recap);
+        let finished = Finished {
+            snapshot: session.latest.clone().expect("a run part way through"),
+            rate: 0.003,
+        };
+        session.go_to(STAGE_RECAP);
+        session.honest = Some(finished);
         let screen = draw(&session, 80, 24);
         assert!(screen.contains("3.310 -> 0.412"), "no loss from end to end:\n{screen}");
         assert!(screen.contains("need more truth knowledge"), "no answer:\n{screen}");
@@ -1641,9 +2038,9 @@ mod tests {
     #[test]
     fn a_narrow_panel_draws_rather_than_panicking() {
         let mut session = Session::new(&machine());
-        part_way(&mut session);
-        for stage in StageKind::ALL {
+        for stage in 0..SCRIPTS.len() {
             session.go_to(stage);
+            part_way(&mut session);
             for (width, height) in [(80u16, 24u16), (80, 10), (34, 24), (31, 4)] {
                 let _ = draw(&session, width, height);
             }
@@ -1664,12 +2061,12 @@ mod tests {
     #[test]
     fn the_added_keys_are_hints_rather_than_sentences() {
         let mut session = Session::new(&machine());
-        for stage in StageKind::ALL {
+        for stage in 0..SCRIPTS.len() {
             session.go_to(stage);
             for (key, hint) in session.keys(Language::ENGLISH) {
-                assert!(!key.is_empty() && cells(key) <= 2, "{stage:?}: {key:?} is not a key");
-                assert!(cells(hint) <= 20, "{stage:?}: {hint:?} is a sentence, not a hint");
-                assert!(!hint.ends_with('.'), "{stage:?}: {hint:?} is a sentence");
+                assert!(!key.is_empty() && cells(key) <= 6, "stage {stage}: {key:?} is not a key");
+                assert!(cells(hint) <= 20, "stage {stage}: {hint:?} is a sentence, not a hint");
+                assert!(!hint.ends_with('.'), "stage {stage}: {hint:?} is a sentence");
             }
         }
     }
