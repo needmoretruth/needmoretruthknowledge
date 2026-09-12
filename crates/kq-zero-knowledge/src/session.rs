@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use nmtk_core::{Language, MachineProfile, format};
-use nmtk_kq::knob::{Knob, KnobValue};
+use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::text::{self, column, pad, rpad, wrap};
-use nmtk_kq::theme::{State, Theme};
+use nmtk_kq::theme::{self, State, Theme};
 use nmtk_kq::widgets;
 use nmtk_zk::{
     DeterministicRng, ForgeryAttempt, ForgeryKind, ForgeryOutcome, Measurement, Seed, SetupKind,
@@ -21,6 +21,7 @@ use nmtk_zk::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -288,6 +289,8 @@ const MESSAGES: &[Step] = &[
     // The vocabulary before the algebra. A reviewer reached "P = x times G" without having been
     // told what a point or a G is, and stopped reading there.
     Say(Msg::SigmaOneWay),
+    Say(Msg::SigmaNotTimes),
+    Say(Msg::SigmaNotDivide),
     Say(Msg::SigmaNames),
     Run(Sigma),
     Await(Until::Finished),
@@ -295,6 +298,8 @@ const MESSAGES: &[Step] = &[
     Say(Msg::WhyStatement),
     Run(Message(1)),
     Say(Msg::WhyCommitment),
+    Say(Msg::WhatACommitmentIs),
+    Say(Msg::WhatACommitmentDoes),
     Run(Message(2)),
     Say(Msg::WhyChallenge),
     Run(Message(3)),
@@ -307,6 +312,7 @@ const MESSAGES: &[Step] = &[
 /// The reader's own circuit size and seed.
 const TUNE: &[Step] = &[
     Say(Msg::TuneOne),
+    Say(Msg::TuneCircuit),
     Say(Msg::TuneBits),
     Say(Msg::TuneWider),
     Say(Msg::TuneSeed),
@@ -346,10 +352,13 @@ const SIDES: &[Step] = &[
     Say(Msg::SidesTwo),
     Say(Msg::SidesThree),
     Say(Msg::SidesFour),
+    Say(Msg::SidesKeys),
+    Say(Msg::SidesBlinding),
     Say(Msg::SidesNullifier),
     // Where the shape came from, once its three words have been earned. A reader who has heard
     // of Zcash gets an anchor, and the quest stops borrowing a design without saying whose.
     Say(Msg::SidesZcash),
+    Say(Msg::SidesSigmaToo),
     Say(Msg::SidesFive),
     Say(Msg::SidesSix),
     Say(Msg::SidesSeven),
@@ -363,10 +372,31 @@ const SCRIPTS: [&[Step]; 7] = [WHAT, FOUR, RUN, MESSAGES, TUNE, BREAK, SIDES];
 
 /// Something that happened, kept as numbers so it can be said again in any language.
 enum Happening {
-    Measured { stage: Stage, prove: u64, verify: u64, bytes: usize, accepted: bool },
-    Attack { stage: Stage, kind: ForgeryKind, accepted: bool },
-    Message { index: usize, total: usize, step: sigma::Step, bytes: usize },
+    Measured {
+        stage: Stage,
+        prove: u64,
+        verify: u64,
+        bytes: usize,
+        accepted: bool,
+    },
+    Attack {
+        stage: Stage,
+        kind: ForgeryKind,
+        accepted: bool,
+    },
+    Message {
+        index: usize,
+        total: usize,
+        step: sigma::Step,
+        bytes: usize,
+    },
     Refused(Msg),
+    /// A typed number that fell outside the knob's range, with where it landed.
+    PulledIn {
+        to: String,
+    },
+    /// A typed number the knob could not read at all.
+    NotANumber,
 }
 
 /// One happening, filed against the step the reader was on when it happened.
@@ -391,6 +421,9 @@ pub struct Session {
     outcomes: Vec<StageOutcome>,
     failure: Option<Failure>,
     state: RunState,
+    /// The knob values the run in progress was started with, so turning one can be told apart
+    /// from pressing Enter twice.
+    running_with: Option<Settled>,
     /// Which message of the interactive protocol the reader is on.
     message: usize,
     /// Which system the recap is showing the four sides of.
@@ -435,6 +468,7 @@ impl Session {
             outcomes: Vec::new(),
             failure: None,
             state: RunState::Idle,
+            running_with: None,
             message: 0,
             focus: Stage::Halo2,
         }
@@ -506,7 +540,7 @@ impl Session {
             Topic::Spread => {
                 let slowest = measured.iter().map(|m| m.prove_nanos).max().unwrap_or(0);
                 let quickest = measured.iter().map(|m| m.prove_nanos).min().unwrap_or(0);
-                let unit = unit_for(slowest);
+                let unit = self.unit_over(&Stage::ALL, |m| m.prove_nanos);
                 let largest = measured.iter().map(|m| m.proof_bytes).max().unwrap_or(0);
                 let smallest = measured.iter().map(|m| m.proof_bytes).min().unwrap_or(0);
                 format!(
@@ -540,6 +574,21 @@ impl Session {
 
     fn outcome(&self, stage: Stage) -> Option<&StageOutcome> {
         self.outcomes.iter().find(|outcome| outcome.stage == stage)
+    }
+
+    /// The unit a column of times is written in: one unit, taken from the largest value in it.
+    ///
+    /// The table and the conversation ask this of the same runs, so one measurement cannot be
+    /// `prove 215 µs` in a beat and `0.22 ms` in the table beside it, which is two numbers for one
+    /// thing and leaves the reader to work out that they agree.
+    fn unit_over(&self, stages: &[Stage], pick: fn(&Measurement) -> u64) -> TimeUnit {
+        let largest = stages
+            .iter()
+            .filter_map(|stage| self.outcome(*stage))
+            .map(|outcome| pick(&outcome.measurement))
+            .max()
+            .unwrap_or(0);
+        unit_for(largest)
     }
 
     /// The interactive protocol's transcript, once stage one has finished.
@@ -601,16 +650,8 @@ impl Session {
 
         // One unit for the proving column and one for the verifying column, taken from the
         // slowest row in each. Per-value units made the slowest system look like the fastest.
-        let measured = |pick: fn(&Measurement) -> u64| {
-            stages
-                .iter()
-                .filter_map(|stage| self.outcome(*stage))
-                .map(|outcome| pick(&outcome.measurement))
-                .max()
-                .unwrap_or(0)
-        };
-        let prove_unit = unit_for(measured(|m| m.prove_nanos));
-        let verify_unit = unit_for(measured(|m| m.verify_nanos));
+        let prove_unit = self.unit_over(stages, |m| m.prove_nanos);
+        let verify_unit = self.unit_over(stages, |m| m.verify_nanos);
 
         let headings = [
             Msg::ColumnProve.text(language).to_string(),
@@ -683,7 +724,10 @@ impl Session {
     /// One message of the interactive protocol, laid out as a step the reader walks through.
     fn message_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let Some(transcript) = self.transcript() else {
-            let text = Msg::RunWorking;
+            // A panel that says "running" while nothing runs is the reason a reader waits two
+            // minutes for a screen that was only ever waiting for them.
+            let text =
+                if self.state == RunState::Running { Msg::RunWorking } else { Msg::RunNotYet };
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         };
         let total = transcript.lines.len();
@@ -735,7 +779,10 @@ impl Session {
     /// Every attack that was made, with the verifier's answer to each.
     fn attack_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         if self.outcomes.is_empty() {
-            let text = Msg::RunWorking;
+            // A panel that says "running" while nothing runs is the reason a reader waits two
+            // minutes for a screen that was only ever waiting for them.
+            let text =
+                if self.state == RunState::Running { Msg::RunWorking } else { Msg::RunNotYet };
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         }
         // Two cells in front of every attack carry the mark, and the verdict closes the row.
@@ -766,14 +813,13 @@ impl Session {
                 let state = if attempt.accepted { State::Bad } else { State::Good };
                 // The mark is about the system, so the word beside it is too.
                 let verdict = if attempt.accepted { Msg::VerdictBroken } else { Msg::VerdictHeld };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                    Span::styled(
-                        label_cell(phrases::forgery(attempt.kind).text(language), label_column),
-                        theme.plain(),
-                    ),
-                    Span::styled(verdict.text(language).to_string(), theme.state(state)),
-                ]));
+                lines.extend(folded_row(
+                    (&format!("{} ", state.mark()), theme.state(state)),
+                    (phrases::forgery(attempt.kind).text(language), theme.plain()),
+                    (verdict.text(language), theme.state(state)),
+                    label_column,
+                    width,
+                ));
             }
         }
 
@@ -808,42 +854,28 @@ impl Session {
         let state = if run.with_waste.accepted { State::Bad } else { State::Good };
         let verdict =
             if run.with_waste.accepted { Msg::VerdictAccepted } else { Msg::VerdictRejected };
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    label_cell(Msg::WasteHolds.text(language), label_column),
-                    theme.muted(),
-                ),
-                Span::styled(
-                    rpad(&format::count(run.true_value), WASTE_VALUE_WIDTH),
-                    theme.plain(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    label_cell(Msg::WasteOpened.text(language), label_column),
-                    theme.muted(),
-                ),
-                Span::styled(
-                    rpad(&format::count(run.with_waste.claimed_value), WASTE_VALUE_WIDTH),
-                    theme.plain(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    label_cell(Msg::WasteVerifier.text(language), label_column),
-                    theme.muted(),
-                ),
-                Span::styled(
-                    rpad(
-                        &format!("{} {}", state.mark(), verdict.text(language)),
-                        WASTE_VALUE_WIDTH,
-                    ),
-                    theme.state(state),
-                ),
-            ]),
-            Line::from(""),
-        ];
+        let row = |label: Msg, value: String, style| {
+            folded_row(
+                ("", theme.muted()),
+                (label.text(language), theme.muted()),
+                (&rpad(&value, WASTE_VALUE_WIDTH), style),
+                label_column,
+                width,
+            )
+        };
+        let mut lines = Vec::new();
+        lines.extend(row(Msg::WasteHolds, format::count(run.true_value), theme.plain()));
+        lines.extend(row(
+            Msg::WasteOpened,
+            format::count(run.with_waste.claimed_value),
+            theme.plain(),
+        ));
+        lines.extend(row(
+            Msg::WasteVerifier,
+            format!("{} {}", state.mark(), verdict.text(language)),
+            theme.state(state),
+        ));
+        lines.push(Line::from(""));
         for text in wrap(Msg::WasteNote.text(language), width) {
             lines.push(Line::from(Span::styled(text, theme.plain())));
         }
@@ -949,7 +981,10 @@ impl Session {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let Some(outcome) = self.focused() else {
-            let text = Msg::RunWorking;
+            // A panel that says "running" while nothing runs is the reason a reader waits two
+            // minutes for a screen that was only ever waiting for them.
+            let text =
+                if self.state == RunState::Running { Msg::RunWorking } else { Msg::RunNotYet };
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         };
         let views = &outcome.views;
@@ -1001,10 +1036,14 @@ impl Session {
             ),
             party_block(
                 Msg::PartyOnlooker,
+                // The size the table, the conversation and this panel say is one measurement, read
+                // here from the one field they all read. The bytes the onlooker's own view carries
+                // are everything the run put on the wire, which for the interactive protocol
+                // includes the public statement — 128 where the proof is 96.
                 format!(
                     "{} {}",
                     Msg::WordProof.text(language),
-                    format::bytes(onlooker.proof_bytes as u64)
+                    format::bytes(outcome.measurement.proof_bytes as u64)
                 ),
                 &[
                     (Msg::LabelSees, items(&onlooker.sees, language)),
@@ -1034,13 +1073,15 @@ impl Session {
             ),
         ];
 
-        let dropped = fit(&mut blocks, height);
+        // The notice is written before the rows are trimmed, because it is rows itself: a notice
+        // about dropped rows that is dropped in half says less than nothing.
+        let notice = wrap(Msg::PanelTrimmed.text(language), width);
+        let dropped = fit(&mut blocks, height, notice.len());
         let mut lines: Vec<Line<'static>> = blocks.into_iter().flatten().collect();
         if dropped {
-            lines.push(Line::from(Span::styled(
-                text::truncate(Msg::PanelTrimmed.text(language), width),
-                theme.muted(),
-            )));
+            for part in notice {
+                lines.push(Line::from(Span::styled(part, theme.muted())));
+            }
         }
         lines
     }
@@ -1101,6 +1142,63 @@ fn label_cell(label: &str, width: usize) -> String {
     format!("{} ", column(label, width.saturating_sub(1)))
 }
 
+/// One row of a label and the thing it is about, folded onto more lines rather than cut.
+///
+/// The value sits beside the label while the label fits the column it was measured into. When it
+/// does not, the label takes as many lines as it needs and its value follows underneath, in the
+/// column it would have been in. Nothing is ever cut: `The unchanged verifier sa…` is not a label,
+/// and a reader cannot guess the rest of a sentence from its first half. A label wide enough to
+/// fold is ordinary rather than rare — Korean reaches widths English never does, and at eighty
+/// columns English reaches them too.
+///
+/// `lead` is the mark in front of the row, drawn on its first line and stood in for by spaces
+/// afterwards. `label_column` is what [`label_width`] measured for this block of rows.
+fn folded_row(
+    lead: (&str, Style),
+    label: (&str, Style),
+    value: (&str, Style),
+    label_column: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let indent = text::width(lead.0);
+    let room = width.saturating_sub(indent);
+    let beside = room.saturating_sub(label_column).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // `label_cell` spends the last cell of the column on the gap after the label.
+    if text::width(label.0) >= label_column {
+        for part in wrap(label.0, room) {
+            let mut spans = Vec::new();
+            if lines.is_empty() {
+                spans.push(Span::styled(lead.0.to_string(), lead.1));
+            } else if indent > 0 {
+                spans.push(Span::styled(" ".repeat(indent), label.1));
+            }
+            spans.push(Span::styled(part, label.1));
+            lines.push(Line::from(spans));
+        }
+    }
+
+    // A value that fits is kept whole, so one padded to line up with the rows above it still does.
+    let parts = if text::width(value.0) <= beside {
+        vec![value.0.to_string()]
+    } else {
+        wrap(value.0, beside)
+    };
+    for part in parts {
+        let mut spans = Vec::new();
+        if lines.is_empty() {
+            spans.push(Span::styled(lead.0.to_string(), lead.1));
+            spans.push(Span::styled(label_cell(label.0, label_column), label.1));
+        } else {
+            spans.push(Span::styled(" ".repeat(indent + label_column), label.1));
+        }
+        spans.push(Span::styled(part, value.1));
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 /// One party: a heading carrying its one fact, then its rows.
 ///
 /// The columns are measured from the words this language actually uses, so a Korean label moves
@@ -1113,26 +1211,23 @@ fn party_block(
     language: Language,
     theme: Theme,
 ) -> Vec<Line<'static>> {
-    let text_width = columns.width.saturating_sub(columns.label).max(1);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(label_cell(name.text(language), columns.name), theme.heading()),
-        Span::styled(column(&fact, columns.width.saturating_sub(columns.name)), theme.muted()),
-    ])];
+    // The party's one fact wraps under itself like every other row: cutting it lost the reader
+    // what the sender kept, which is half of what the row was there to say.
+    let mut lines = folded_row(
+        ("", theme.heading()),
+        (name.text(language), theme.heading()),
+        (&fact, theme.muted()),
+        columns.name,
+        columns.width,
+    );
     for (label, text) in rows {
-        for (index, part) in wrap(text, text_width).into_iter().enumerate() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if index == 0 {
-                        label_cell(label.text(language), columns.label)
-                    } else {
-                        // A continuation sits under the value it continues, not under the label.
-                        " ".repeat(columns.label)
-                    },
-                    theme.muted(),
-                ),
-                Span::styled(part, theme.plain()),
-            ]));
-        }
+        lines.extend(folded_row(
+            ("", theme.muted()),
+            (label.text(language), theme.muted()),
+            (text, theme.plain()),
+            columns.label,
+            columns.width,
+        ));
     }
     lines
 }
@@ -1142,13 +1237,15 @@ fn party_block(
 ///
 /// Says whether it dropped anything, so the panel can end with a line admitting it. Rows that
 /// vanish with nothing on screen to say so read as a panel that has nothing more to show.
-fn fit(blocks: &mut [Vec<Line<'static>>], height: usize) -> bool {
+///
+/// `notice` is how many rows that admission takes at this width. They are held back before
+/// anything is dropped, so the notice is never the thing that has to be trimmed.
+fn fit(blocks: &mut [Vec<Line<'static>>], height: usize, notice: usize) -> bool {
     let mut total: usize = blocks.iter().map(Vec::len).sum();
     if height == 0 || total <= height {
         return false;
     }
-    // One row is held back for the line that says rows were dropped.
-    let room = height.saturating_sub(1);
+    let room = height.saturating_sub(notice);
     let mut dropped = false;
     while total > room {
         let Some(tallest) = blocks.iter_mut().max_by_key(|block| block.len()) else { break };
@@ -1191,6 +1288,8 @@ impl Session {
         }
         self.revealed += 1;
         if let Run(deed) = script[self.revealed] {
+            let settled = Settled::of(self.knobs());
+            self.running_with = Some(settled);
             match deed {
                 Systems => {
                     self.reported = 0;
@@ -1224,6 +1323,38 @@ impl Session {
         true
     }
 
+    /// Whether the reader has turned a knob since the run in progress started.
+    fn knobs_moved(&self) -> bool {
+        match &self.running_with {
+            Some(settled) => !settled.still(self.knobs()),
+            None => false,
+        }
+    }
+
+    /// Runs this stage's work again with the values now on screen, in place of the run before it,
+    /// so the sentences that read the result are about the run that just happened.
+    fn rerun(&mut self) -> Reaction {
+        if self.knobs().is_empty() {
+            return Reaction::Ignored;
+        }
+        let script = self.script();
+        // The run this stage is showing, not the last one written in the script: a reader in the
+        // middle of the first run's sentences must not be thrown forward past what they have
+        // not read yet.
+        let upto = self.revealed.min(script.len().saturating_sub(1));
+        let Some(at) = script[..=upto].iter().rposition(|step| matches!(step, Run(_))) else {
+            return Reaction::Ignored;
+        };
+        if at == 0 {
+            return Reaction::Ignored;
+        }
+        self.stop_and_forget_the_telling();
+        self.log.retain(|logged| logged.step < at);
+        self.revealed = at - 1;
+        self.advance();
+        Reaction::Handled
+    }
+
     fn say(&mut self, what: Happening) {
         if self.log.len() < EVENT_CAP {
             self.log.push(Logged { step: self.revealed, what });
@@ -1246,14 +1377,17 @@ impl Session {
                     accepted: outcome.honest_accepted,
                 }];
                 // Only the forgeries that got through are worth a line of their own; the ones the
-                // verifier caught are the table's job.
-                out.extend(outcome.forgery.attempts.iter().filter(|f| f.accepted).map(|forgery| {
-                    Happening::Attack {
+                // verifier caught are the table's job. And only on the stage that is about
+                // attacks: two unexplained "attack · accepted" lines four stages early read as
+                // the program breaking, or as the reader having broken it.
+                let attacks = self.stage == STAGE_BREAK;
+                out.extend(outcome.forgery.attempts.iter().filter(|f| attacks && f.accepted).map(
+                    |forgery| Happening::Attack {
                         stage: outcome.stage,
                         kind: forgery.kind,
                         accepted: forgery.accepted,
-                    }
-                }));
+                    },
+                ));
                 out
             })
             .collect();
@@ -1278,15 +1412,18 @@ impl Session {
     /// One happening, said in the reader's language.
     fn beat_for(&self, what: &Happening, language: Language) -> Beat {
         match what {
+            // The same unit the table gives these columns: a beat and the row it is about are two
+            // ways of reading one measurement, and a reader who has to convert between them is
+            // being asked to check the program's arithmetic.
             Happening::Measured { stage, prove, verify, bytes, accepted } => Beat::outcome(
                 if *accepted { State::Good } else { State::Bad },
                 format!(
                     "{}  ·  {} {}  ·  {} {}  ·  {} {}",
                     phrases::stage(*stage).text(language),
                     Msg::EventProved.text(language),
-                    short_time(*prove),
+                    time_in(*prove, self.unit_over(&Stage::ALL, |m| m.prove_nanos)),
                     Msg::EventVerified.text(language),
-                    short_time(*verify),
+                    time_in(*verify, self.unit_over(&Stage::ALL, |m| m.verify_nanos)),
                     Msg::EventSize.text(language),
                     format::bytes(*bytes as u64),
                 ),
@@ -1311,6 +1448,16 @@ impl Session {
                 format::bytes(*bytes as u64),
             )),
             Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+            Happening::PulledIn { to } => Beat::outcome(
+                State::Chosen,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventOutsideRange.text(language),
+                    Msg::EventSetTo.text(language),
+                    to,
+                ),
+            ),
+            Happening::NotANumber => Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)),
         }
     }
 }
@@ -1372,14 +1519,23 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Go => {
+                // A knob turned since this stage's run started asks for the run to be done again
+                // with what is on screen. That comes before carrying the conversation on: the
+                // sentences after a run are about that run, and they would be about the old one.
+                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                    return Reaction::Handled;
+                }
                 if let Some(Await(until)) = self.script().get(self.revealed)
                     && !self.satisfied(*until)
                 {
                     return Reaction::Ignored;
                 }
-                // The end of a stage is not the end of the quest, but walking on from here is
-                // the shell's business: it is what knows there is another stage to walk to.
-                if self.advance() { Reaction::Handled } else { Reaction::Ignored }
+                if self.advance() {
+                    return Reaction::Handled;
+                }
+                // Where there are knobs, Enter runs it again with the values on screen; walking
+                // on is Tab's job. Where there are none the shell walks.
+                self.rerun()
             }
             Action::Reset => {
                 self.forget_results();
@@ -1419,12 +1575,17 @@ impl KqSession for Session {
                 }
             }
             Action::Commit => {
-                if self.knob_count() > 0 {
-                    self.knobs[self.chosen].commit();
-                    Reaction::Handled
-                } else {
-                    Reaction::Ignored
+                if self.knob_count() == 0 {
+                    return Reaction::Ignored;
                 }
+                // A number that goes nowhere reads as a broken key unless the screen says what
+                // happened to it.
+                match self.knobs[self.chosen].commit() {
+                    Typed::PulledIn { to } => self.say(Happening::PulledIn { to }),
+                    Typed::NotANumber => self.say(Happening::NotANumber),
+                    Typed::Taken | Typed::Nothing => {}
+                }
+                Reaction::Handled
             }
             Action::Cancel => {
                 if self.knob_count() > 0 {
@@ -1472,16 +1633,27 @@ impl KqSession for Session {
         };
         let heading = match self.stage {
             STAGE_SIDES => match self.focused() {
-                Some(outcome) => format!(
-                    "{}  ·  {}",
-                    title.text(language),
-                    phrases::stage(outcome.stage).text(language)
-                ),
+                Some(outcome) => {
+                    let both = format!(
+                        "{}  ·  {}",
+                        title.text(language),
+                        phrases::stage(outcome.stage).text(language)
+                    );
+                    // A title is drawn over the top border, and this one carries a second thing:
+                    // the system the reader is looking at. Where both will not fit, the panel
+                    // keeps its name and the system drops off whole, because a title cut in the
+                    // middle of a word costs the border and says less than the name alone.
+                    if text::width(&both) <= theme::title_room(area.width) {
+                        both
+                    } else {
+                        title.text(language).to_string()
+                    }
+                }
                 None => title.text(language).to_string(),
             },
             _ => title.text(language).to_string(),
         };
-        let block = theme.titled_panel(&heading);
+        let block = theme.titled_panel_in(&heading, area.width);
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let width = inner.width as usize;
@@ -1592,6 +1764,11 @@ impl KqSession for Session {
             STAGE_SIDES => vec![("↑↓", Msg::KeySystem.text(language))],
             _ => Vec::new(),
         }
+    }
+
+    fn go_name(&self, language: Language) -> Option<&'static str> {
+        let runnable = !self.knobs().is_empty() && (self.at_end() || self.knobs_moved());
+        runnable.then(|| Msg::KeyRunIt.text(language))
     }
 
     fn typing(&self) -> bool {
@@ -1847,11 +2024,195 @@ mod tests {
         let cut = session.recap_lines(width, 12, Language::KOREAN, theme);
         assert!(cut.len() < whole.len(), "nothing was dropped at twelve rows");
         assert!(cut.len() <= 12, "the panel kept {} rows in twelve", cut.len());
-        let said = drawn(cut.last().expect("a line"));
+        let said = cut.iter().map(drawn).collect::<Vec<_>>().join(" ");
         let head: String = Msg::PanelTrimmed.text(Language::KOREAN).chars().take(10).collect();
-        assert!(
-            said.starts_with(&head),
-            "the panel said nothing about the rows it dropped: {said:?}"
-        );
+        assert!(said.contains(&head), "the panel said nothing about the rows it dropped: {said:?}");
+    }
+
+    /// A label wider than its column was cut where it ran out: `The unchanged verifier sa…` is
+    /// half a sentence, and a reader cannot finish it for themselves.
+    #[test]
+    fn a_label_too_wide_for_its_column_folds_instead_of_being_cut() {
+        let session = finished();
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        for language in [Language::ENGLISH, Language::KOREAN] {
+            let lines: Vec<String> =
+                session.attack_lines(width, language, theme).iter().map(drawn).collect();
+            let panel = lines.join("\n");
+            assert!(!panel.contains('\u{2026}'), "a label was cut in {language}:\n{panel}");
+            for label in [Msg::WasteHolds, Msg::WasteOpened, Msg::WasteVerifier] {
+                let said = label.text(language);
+                assert!(
+                    lines.iter().any(|line| line.contains(said)),
+                    "{said:?} is not on the panel whole in {language}:\n{panel}"
+                );
+            }
+        }
+    }
+
+    /// The line admitting that rows were dropped was itself dropped in half, which leaves the
+    /// reader a notice they cannot read about rows they cannot see.
+    #[test]
+    fn the_notice_about_dropped_rows_is_never_itself_trimmed() {
+        let session = finished();
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        for language in [Language::ENGLISH, Language::KOREAN] {
+            let cut: Vec<String> =
+                session.recap_lines(width, 14, language, theme).iter().map(drawn).collect();
+            let notice = Msg::PanelTrimmed.text(language);
+            let parts = text::wrap(notice, width);
+            let tail: Vec<String> = cut.iter().rev().take(parts.len()).rev().cloned().collect();
+            assert_eq!(
+                tail.join(" "),
+                notice,
+                "the notice was not said in full in {language}: {tail:?}"
+            );
+        }
+    }
+
+    /// A party's own row was cut at the panel's edge — at a hundred columns in Korean that lost
+    /// the sender's change, which is the number the row was drawn for.
+    #[test]
+    fn a_party_row_too_wide_for_the_panel_wraps_under_itself() {
+        let session = finished();
+        let theme = Theme::new(true);
+        let sender = &session.focused().expect("a finished run").views.sender;
+        let sent = format::count(sender.amount);
+        let kept = format::count(sender.change);
+        for total in [MIN_WIDTH, 100] {
+            let width = panel_width(total, theme);
+            for language in [Language::ENGLISH, Language::KOREAN] {
+                let panel = session
+                    .recap_lines(width, 200, language, theme)
+                    .iter()
+                    .map(drawn)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(!panel.contains('\u{2026}'), "a row was cut in {language}:\n{panel}");
+                for number in [&sent, &kept] {
+                    assert!(
+                        panel.contains(number.as_str()),
+                        "{total} columns in {language} lost {number}:\n{panel}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// One proof, two sizes: the table read what the run measured and the panel counted the whole
+    /// transcript, so the interactive protocol was 96 B on one screen and 128 B on the next.
+    #[test]
+    fn the_panel_and_the_table_give_one_proof_one_size() {
+        let mut session = finished();
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        for stage in [Stage::Sigma, Stage::FiatShamir, Stage::TrustedSetup] {
+            session.focus = stage;
+            let outcome = session.outcome(stage).expect("a finished run");
+            let measured = format::bytes(outcome.measurement.proof_bytes as u64);
+            let on_the_wire = format::bytes(outcome.views.onlooker.proof_bytes as u64);
+            let table = session
+                .table(&[stage], width, Language::ENGLISH, theme)
+                .iter()
+                .map(drawn)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let panel = session
+                .recap_lines(width, 200, Language::ENGLISH, theme)
+                .iter()
+                .map(drawn)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(table.contains(&measured), "{stage:?}: the table lost its size:\n{table}");
+            assert!(
+                panel.contains(&measured),
+                "{stage:?}: the panel says something other than {measured}:\n{panel}"
+            );
+            if on_the_wire != measured {
+                assert!(
+                    !panel.contains(&on_the_wire),
+                    "{stage:?}: the panel is still counting {on_the_wire}:\n{panel}"
+                );
+            }
+        }
+    }
+
+    /// One quantity in two units on one screen: the conversation said `prove 215 µs` beside a
+    /// table row reading `0.22 ms`, and the reader was left to work out that they agree.
+    #[test]
+    fn the_conversation_writes_a_time_in_the_unit_its_column_uses() {
+        let mut session = finished();
+        // halo2 is what puts these columns in milliseconds on a real machine, and it is left out
+        // of these tests because it really compiles a circuit. One slow row stands in for it.
+        let slowest = session.outcomes.len() - 1;
+        session.outcomes[slowest].measurement.prove_nanos = 25_000_000;
+        session.outcomes[slowest].measurement.verify_nanos = 2_000_000;
+        // The beats were said while that row was still quick, so they are said again.
+        session.log.clear();
+        session.reported = 0;
+        session.notice();
+
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        for language in Language::ALL {
+            let table = session
+                .table(&Stage::ALL, width, *language, theme)
+                .iter()
+                .map(drawn)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let said = KqSession::transcript(&session, *language)
+                .iter()
+                .map(|beat| beat.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for outcome in &session.outcomes {
+                let column = session.unit_over(&Stage::ALL, |m| m.prove_nanos);
+                let one = time_in(outcome.measurement.prove_nanos, column);
+                assert!(table.contains(&one), "the table lost {one}:\n{table}");
+                assert!(
+                    said.contains(&one),
+                    "the conversation writes {:?} in another unit than the table:\n{said}",
+                    outcome.stage
+                );
+            }
+        }
+    }
+
+    /// A title as wide as the panel leaves the border its two corners and nothing else, and a
+    /// longer one is cut where the border ends. The title is what gives way.
+    #[test]
+    fn a_long_title_leaves_the_panel_its_border() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut session = finished();
+        session.stage = STAGE_SIDES;
+        let theme = Theme::new(true);
+        for total in [MIN_WIDTH, 90, 100, 120, 160] {
+            let (_, run) = split(total);
+            for language in Language::ALL {
+                for stage in Stage::ALL {
+                    session.focus = stage;
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(run, MIN_HEIGHT)).expect("backend");
+                    terminal
+                        .draw(|frame| {
+                            let area = frame.area();
+                            KqSession::render(&session, frame, area, theme, *language);
+                        })
+                        .expect("draw");
+                    let buffer = terminal.backend().buffer().clone();
+                    let top: String =
+                        (0..buffer.area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+                    assert!(
+                        top.ends_with("\u{2500}\u{2500}\u{256e}"),
+                        "{total} columns in {language}: the title ate the border: {top:?}"
+                    );
+                }
+            }
+        }
     }
 }

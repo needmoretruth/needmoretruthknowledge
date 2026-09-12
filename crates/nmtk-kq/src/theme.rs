@@ -143,4 +143,35 @@ impl Theme {
     pub fn titled_panel(self, title: &str) -> Block<'_> {
         self.panel().title(ratatui::text::Span::styled(format!(" {title} "), self.heading()))
     }
+
+    /// [`titled_panel`](Self::titled_panel), cut to what the top border can hold.
+    ///
+    /// A title is drawn over the top border, so a title as wide as the panel leaves the border
+    /// with nothing but its two corners and the box stops reading as a box — which is what a
+    /// reader saw when a quest put a chosen system's name in its title. `width` is the width the
+    /// panel will be drawn in, and [`TITLE_BORDER`] cells of border are kept past the title.
+    ///
+    /// Measured in cells rather than characters: a Korean title is twice as wide as its character
+    /// count, and this is the width at which it stops fitting.
+    pub fn titled_panel_in(self, title: &str, width: u16) -> Block<'static> {
+        let room = title_room(width);
+        if room == 0 {
+            return self.panel();
+        }
+        let title = crate::text::truncate(title, room);
+        self.panel().title(ratatui::text::Span::styled(format!(" {title} "), self.heading()))
+    }
+}
+
+/// Cells of top border a title leaves past itself, so a panel still reads as a box.
+pub const TITLE_BORDER: u16 = 2;
+
+/// Cells a panel that wide has for its title.
+///
+/// The two corners, the space either side of the title, and [`TITLE_BORDER`] cells of border past
+/// it are what a title may not have. Titles sit against the left corner, so the border it must not
+/// eat is the run between its own end and the right corner. A caller with two things to say asks
+/// this first and drops the second rather than handing over a title that is cut in half.
+pub fn title_room(width: u16) -> usize {
+    (width as usize).saturating_sub(2 + TITLE_BORDER as usize + 2)
 }

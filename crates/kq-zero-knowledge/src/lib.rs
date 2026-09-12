@@ -292,12 +292,20 @@ mod tests {
         session.on(Action::Commit);
         assert_eq!(session.knobs()[1].display(), "37");
 
-        // Out of range is refused and the old value stays.
+        // Out of range lands on the nearest end rather than vanishing, and the conversation says
+        // where it landed: putting 37 back without a word reads as a broken key.
         for c in "200".chars() {
             session.on(Action::Type(c));
         }
         session.on(Action::Commit);
-        assert_eq!(session.knobs()[1].display(), "37");
+        let landed = session.knobs()[1].display();
+        assert_ne!(landed, "200", "a number past the end should not be taken as typed");
+        assert_ne!(landed, "37", "a number past the end should not be silently dropped");
+        let said = session.transcript(Language::ENGLISH);
+        assert!(
+            said.iter().any(|beat| beat.text.contains(&landed)),
+            "the reader was not told where the number landed"
+        );
         session.close();
     }
 

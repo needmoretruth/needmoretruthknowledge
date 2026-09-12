@@ -276,8 +276,22 @@ pub fn run_stage(
     match stage {
         Stage::Sigma => {
             let run = sigma::run(&mut rng)?;
-            let proof: Vec<u8> =
-                run.transcript.lines.iter().flat_map(|line| line.bytes.clone()).collect();
+            // The proof is the three messages the protocol produces. The statement is public
+            // input that everyone already has, so counting it as proof made the onlooker's view
+            // say 128 bytes where every other screen in the quest says 96.
+            let proof: Vec<u8> = run
+                .transcript
+                .lines
+                .iter()
+                .filter(|line| {
+                    matches!(
+                        line.step,
+                        sigma::Step::Commitment | sigma::Step::Challenge | sigma::Step::Response
+                    )
+                })
+                .flat_map(|line| line.bytes.clone())
+                .collect();
+            debug_assert_eq!(proof.len(), sigma::TRANSCRIPT_BYTES);
             let forgery = ForgeryOutcome::new(vec![ForgeryAttempt {
                 kind: ForgeryKind::GuessedResponse,
                 attacker_holds: None,
@@ -464,6 +478,15 @@ mod tests {
             let outcome = run_stage(stage, Seed::fixed(), &profile()).expect("stage runs");
             assert!(outcome.honest_accepted, "{stage:?} rejected an honest proof");
         }
+    }
+
+    #[test]
+    fn what_an_onlooker_sees_of_a_sigma_proof_is_the_proof_and_not_the_statement() {
+        let outcome = run_stage(Stage::Sigma, Seed::fixed(), &profile()).expect("stage runs");
+        // The statement is public input everyone already holds. Counting it as proof made the
+        // onlooker's panel say 128 bytes where every other screen said 96.
+        assert_eq!(outcome.views.onlooker.proof_bytes, sigma::TRANSCRIPT_BYTES);
+        assert_eq!(outcome.measurement.proof_bytes, sigma::TRANSCRIPT_BYTES);
     }
 
     #[test]
