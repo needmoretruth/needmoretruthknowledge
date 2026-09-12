@@ -9,7 +9,7 @@
 //! entered in any order.
 
 use nmtk_core::{Language, format};
-use nmtk_kq::knob::{Knob, KnobValue};
+use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::text::{column, pad, rpad};
 use nmtk_kq::theme::{State, Theme};
@@ -74,9 +74,12 @@ const COINS: &[Step] = &[
     Say(Msg::CoinsOne),
     Say(Msg::CoinsTwo),
     Say(Msg::CoinsThree),
+    Say(Msg::CoinsSui),
     Say(Msg::CoinsFour),
     Say(Msg::CoinsFive),
     Say(Msg::CoinsSix),
+    Say(Msg::CoinsBytes),
+    Say(Msg::CoinsNode),
 ];
 
 /// One whole coin changes hands. The first thing the reader makes happen.
@@ -129,6 +132,8 @@ const TWICE: &[Step] = &[
     Say(Msg::TwiceUtxo),
     Say(Msg::TwiceAccount),
     Say(Msg::TwiceObject),
+    Say(Msg::TwiceCounter),
+    Say(Msg::TwiceCounterAgain),
     Say(Msg::TwiceLesson),
 ];
 
@@ -179,6 +184,11 @@ pub struct Session {
     done: Vec<Done>,
     /// The last run, kept apart from the live ledgers so the recap can still read it.
     kept: Option<Kept>,
+    /// What became of the last number the reader typed, said once at the end of the conversation
+    /// and forgotten the moment they do anything else.
+    typed: Option<Typed>,
+    /// The values the last send used, so a changed amount can be told from a repeat.
+    sent_with: Option<Settled>,
     knobs: Vec<Knob>,
     chosen: usize,
     alice: Key,
@@ -195,6 +205,8 @@ impl Session {
             scenario: open_ledgers(alice.address()),
             done: Vec::new(),
             kept: None,
+            typed: None,
+            sent_with: None,
             knobs: vec![
                 Knob::new(
                     "amount",
@@ -257,7 +269,34 @@ impl Session {
     /// The ledgers go back to their opening state first. Every run is then a change from the same
     /// three coins of ten, which is the only way two runs can be compared — and it is why a reader
     /// can send 30 twice without being told the second time that Alice is out of money.
+    /// Whether the reader has changed a value since the last send.
+    fn values_moved(&self) -> bool {
+        match &self.sent_with {
+            Some(settled) => !settled.still(self.knobs()),
+            None => false,
+        }
+    }
+
+    /// Does this stage's deed again with the values now on screen, in place of the one it did
+    /// before, so the sentence that reads the result is about the send that just happened.
+    fn rerun(&mut self) -> Reaction {
+        if !self.tuning() {
+            return Reaction::Ignored;
+        }
+        let script = self.script();
+        let upto = self.revealed.min(script.len().saturating_sub(1));
+        let Some(at) = script[..=upto].iter().rposition(|step| matches!(step, Run(_))) else {
+            return Reaction::Ignored;
+        };
+        let Run(deed) = script[at] else { return Reaction::Ignored };
+        self.done.retain(|done| done.step != at);
+        self.perform(at, deed);
+        Reaction::Handled
+    }
+
     fn perform(&mut self, step: usize, deed: Deed) {
+        let settled = Settled::of(self.knobs());
+        self.sent_with = Some(settled);
         self.scenario = open_ledgers(self.alice.address());
         let what = match deed {
             SendWholeCoin => Outcome::Transfer(Box::new(
@@ -531,6 +570,21 @@ impl KqSession for Session {
                 Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
             }
         }
+        match &self.typed {
+            Some(Typed::PulledIn { to }) => beats.push(Beat::outcome(
+                State::Chosen,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventOutsideRange.text(language),
+                    Msg::EventSetTo.text(language),
+                    to,
+                ),
+            )),
+            Some(Typed::NotANumber) => {
+                beats.push(Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)))
+            }
+            _ => {}
+        }
         beats
     }
 
@@ -557,11 +611,19 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Go => {
+                self.typed = None;
+                // A value changed since the last send asks for the send to be done again with
+                // what is on screen. The sentences after a send are about that send.
+                if self.values_moved() && self.rerun() == Reaction::Handled {
+                    return Reaction::Handled;
+                }
                 let script = self.script();
-                // The end of a stage is not the end of the quest, but walking on from here is the
-                // shell's business: it is what knows there is another stage to walk to.
+                // The stage has said everything it has to say. Where the reader has knobs, Enter
+                // sends again with the values now on screen — the conversation says "Enter sends
+                // it", and a key that walks away instead has broken its own promise. Walking on
+                // is Tab's job; where there is nothing to send, the shell walks.
                 if self.revealed + 1 >= script.len() {
-                    return Reaction::Ignored;
+                    return self.rerun();
                 }
                 self.revealed += 1;
                 if let Run(deed) = script[self.revealed] {
@@ -587,6 +649,7 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Nudge(direction) => {
+                self.typed = None;
                 if self.tuning() {
                     self.knobs[self.chosen].nudge(direction);
                     Reaction::Handled
@@ -611,12 +674,15 @@ impl KqSession for Session {
                 }
             }
             Action::Commit => {
-                if self.tuning() {
-                    self.knobs[self.chosen].commit();
-                    Reaction::Handled
-                } else {
-                    Reaction::Ignored
+                if !self.tuning() {
+                    return Reaction::Ignored;
                 }
+                // A number that goes nowhere reads as a broken key unless the screen says what
+                // happened to it.
+                let typed = self.knobs[self.chosen].commit();
+                self.typed =
+                    matches!(typed, Typed::PulledIn { .. } | Typed::NotANumber).then_some(typed);
+                Reaction::Handled
             }
             Action::Cancel => {
                 if self.tuning() {
@@ -661,6 +727,11 @@ impl KqSession for Session {
         } else {
             Vec::new()
         }
+    }
+
+    fn go_name(&self, language: Language) -> Option<&'static str> {
+        (self.tuning() && (self.at_end() || self.values_moved()))
+            .then(|| Msg::KeySend.text(language))
     }
 
     fn typing(&self) -> bool {
@@ -1013,7 +1084,31 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_amount_is_taken_and_a_silly_one_is_not() {
+    fn enter_at_the_end_of_the_sending_stage_sends_again_rather_than_walking_away() {
+        let mut session = Session::new();
+        session.go_to(3);
+        for _ in 0..SCRIPTS[3].len() {
+            if session.at_end() {
+                break;
+            }
+            session.on(Action::Go);
+        }
+        assert!(session.at_end(), "the stage should have said everything by now");
+        let entries = session.done.len();
+        let before = session.amount();
+        session.chosen = 0;
+        session.on(Action::Nudge(1));
+        assert_ne!(session.amount(), before, "the arrow did not move the amount");
+        assert_eq!(session.on(Action::Go), Reaction::Handled, "Enter walked away instead");
+        assert_eq!(session.done.len(), entries, "the send was added instead of replaced");
+        assert!(
+            session.kept.as_ref().is_some_and(|kept| kept.stage == 3),
+            "the send that was kept is not this stage's"
+        );
+    }
+
+    #[test]
+    fn a_typed_amount_is_taken_and_one_past_the_end_lands_on_the_end() {
         let mut session = Session::new();
         session.go_to(3);
         for c in "25".chars() {
@@ -1023,11 +1118,20 @@ mod tests {
         session.on(Action::Commit);
         assert_eq!(session.amount(), 25);
 
+        // Silently putting 25 back reads as a broken key. The number lands on the end of the
+        // range instead, and the conversation says where it landed.
         for c in "900".chars() {
             session.on(Action::Type(c));
         }
         session.on(Action::Commit);
-        assert_eq!(session.amount(), 25, "an out-of-range amount was accepted");
+        assert_eq!(session.amount(), 30, "a number past the end should land on the end");
+        let said = session.transcript(Language::ENGLISH);
+        let last = said.last().expect("the conversation said nothing about it");
+        assert!(
+            last.text.contains("30"),
+            "the reader was not told where the number landed: {:?}",
+            last.text
+        );
     }
 
     #[test]

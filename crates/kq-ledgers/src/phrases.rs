@@ -27,9 +27,12 @@ nmtk_i18n::messages! {
     CoinsOne { en: "There is more than one way to write down where money is.", ko: "돈이 어디에 있는지 적는 방법은 하나가 아닙니다." },
     CoinsTwo { en: "Bitcoin counts coins. Your balance is whatever coins nobody has spent yet.", ko: "비트코인은 코인을 셉니다. 아직 아무도 쓰지 않은 코인이 곧 내 잔액입니다." },
     CoinsThree { en: "Ethereum keeps a book. One line per person, and the line says how much.", ko: "이더리움은 장부를 씁니다. 사람마다 한 줄이고, 그 줄에 얼마인지 적혀 있습니다." },
+    CoinsSui { en: "Sui is a newer public blockchain, put beside the two famous ones here because it writes money down in a third way.", ko: "Sui는 비교적 새로 나온 공개 블록체인입니다. 돈을 적는 방식이 세 번째 방식이라 유명한 둘과 나란히 놓았습니다." },
     CoinsFour { en: "Sui treats each coin as a thing with an owner written on it. Sending changes the owner.", ko: "Sui는 코인 하나하나를 주인이 적힌 물건처럼 다룹니다. 보낸다는 것은 그 주인을 바꾸는 일입니다." },
     CoinsFive { en: "All three are running on the right, holding the same thing: Alice has three coins of ten.", ko: "오른쪽에 셋이 다 돌고 있고, 셋 다 같은 것을 들고 있습니다. 앨리스에게 10짜리 코인이 셋 있습니다." },
     CoinsSix { en: "Watch the sizes. Right now they already disagree about how much space that takes.", ko: "크기를 보세요. 지금도 벌써 그것을 담는 데 드는 자리가 서로 다릅니다." },
+    CoinsBytes { en: "B is bytes — the room this state takes up. A byte is eight 0s and 1s, and every node keeps every byte of it.", ko: "B는 바이트입니다. 이 상태가 차지하는 자리를 말합니다. 바이트는 0과 1 여덟 개이고, 모든 노드가 그 바이트를 전부 들고 있습니다." },
+    CoinsNode { en: "A node is one computer keeping its own copy of the ledger and checking every payment against it.", ko: "노드는 원장을 자기 사본으로 들고 있으면서 들어오는 결제를 하나하나 그 사본에 비춰 보는 컴퓨터 한 대입니다." },
 
     // ---- Stage 2: send one -----------------------------------------------------
     SendOne { en: "Alice sends Bob exactly ten — one whole coin, nothing left over.", ko: "앨리스가 밥에게 딱 10을 보냅니다. 코인 하나가 통째로 가고 남는 것이 없습니다." },
@@ -71,6 +74,8 @@ nmtk_i18n::messages! {
     TwiceUtxo { en: "Bitcoin's way stopped the second one: the coin it names is gone. It was destroyed by the first transfer.", ko: "비트코인 쪽이 두 번째를 막았습니다. 그 이체가 가리키는 코인이 없어졌기 때문입니다. 첫 번째 이체가 없애 버렸습니다." },
     TwiceAccount { en: "Ethereum's way stopped it too, but for a different reason: every transfer carries a counter, and this one's counter has already been used.", ko: "이더리움 쪽도 막았지만 이유가 다릅니다. 이체마다 번호가 붙는데, 이 이체의 번호는 이미 쓰인 번호입니다." },
     TwiceObject { en: "Sui's way stopped it for a third reason: the coin had already changed hands, so Alice was no longer its owner.", ko: "Sui 쪽은 세 번째 이유로 막았습니다. 그 코인은 이미 주인이 바뀌어서, 앨리스의 것이 아니게 됐습니다." },
+    TwiceCounter { en: "That counter is called a nonce. It starts at zero and goes up by one with every transfer the account makes.", ko: "그 번호를 논스라고 부릅니다. 계정마다 0에서 시작해 이체할 때마다 하나씩 올라갑니다." },
+    TwiceCounterAgain { en: "So a number that has already been used can never come round again.", ko: "그래서 한 번 쓰인 번호가 다시 돌아오는 일은 없습니다." },
     TwiceLesson { en: "Three systems, three different things noticed. What a system checks is what a system is.", ko: "세 방식이 서로 다른 것을 알아챘습니다. 무엇을 검사하는가가 곧 그 방식의 성격입니다." },
 
     // ---- Stage 6: recap ---------------------------------------------------------
@@ -96,7 +101,10 @@ nmtk_i18n::messages! {
     KnobRecipient { en: "Recipient", ko: "받는 사람" },
     PartyBob { en: "Bob", ko: "밥" },
     PartyCarol { en: "Carol", ko: "캐럴" },
-    KeySend { en: "send it", ko: "보내기" },
+    KeySend { en: "send it with these", ko: "이 값으로 보내기" },
+    EventOutsideRange { en: "outside what this value allows", ko: "이 값이 가질 수 있는 범위 밖입니다" },
+    EventSetTo { en: "set to", ko: "맞춘 값" },
+    EventNotANumber { en: "that was not a number this value can take", ko: "이 값이 받을 수 있는 숫자가 아닙니다" },
     KeyChange { en: "change the value", ko: "값 바꾸기" },
 
     // ---- Model names -------------------------------------------------------------
