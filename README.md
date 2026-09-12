@@ -54,10 +54,10 @@ practice difficulty, so blocks arrive in seconds. Your measured hash rate sits b
 mean at Bitcoin's difficulty 1, and beside the hash rate the protocol implies for early 2009. A
 laptop today is worth several times the whole network of January 2009.
 
-Then split your cores between miners whose shares you choose, and run a **51% attack that actually
-succeeds**: a payment reaches the confirmations you set, the merchant hands over the goods, and the
-attacker's private chain erases it. Drop the attacker to 30% and watch the same attack fall behind
-and give up.
+Then split your cores between miners whose shares you choose, and attack the chain. At 30% the
+attacker falls behind, gives up, and the payment stands. Type `51` and run the same attack again:
+this one is a **51% attack that actually succeeds** — the payment reaches the confirmations you set,
+the merchant hands over the goods, and the attacker's private chain erases it.
 
 ### 📒 Ledger models · *Ledgers · 20 min*
 
