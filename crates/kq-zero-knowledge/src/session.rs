@@ -528,11 +528,8 @@ impl Session {
                     Msg::BreakSummaryAccepted.text(language),
                     through
                 );
-                let verdict = if through == 0 {
-                    Msg::YoursAttacksNone
-                } else {
-                    Msg::YoursAttacksThrough
-                };
+                let verdict =
+                    if through == 0 { Msg::YoursAttacksNone } else { Msg::YoursAttacksThrough };
                 format!("{counted}. {}", verdict.text(language))
             }
         }
@@ -1849,6 +1846,9 @@ mod tests {
         assert!(cut.len() <= 12, "the panel kept {} rows in twelve", cut.len());
         let said = drawn(cut.last().expect("a line"));
         let head: String = Msg::PanelTrimmed.text(Language::KOREAN).chars().take(10).collect();
-        assert!(said.starts_with(&head), "the panel said nothing about the rows it dropped: {said:?}");
+        assert!(
+            said.starts_with(&head),
+            "the panel said nothing about the rows it dropped: {said:?}"
+        );
     }
 }

@@ -133,12 +133,8 @@ const TWICE: &[Step] = &[
 ];
 
 /// What the reader now knows, in four sentences.
-const RECAP: &[Step] = &[
-    Say(Msg::RecapOne),
-    Say(Msg::RecapTwo),
-    Say(Msg::RecapThree),
-    Say(Msg::RecapFour),
-];
+const RECAP: &[Step] =
+    &[Say(Msg::RecapOne), Say(Msg::RecapTwo), Say(Msg::RecapThree), Say(Msg::RecapFour)];
 
 /// The stages' scripts, in the order `lib.rs` declares them.
 const SCRIPTS: [&[Step]; 6] = [COINS, SEND, GROW, TUNE, TWICE, RECAP];
@@ -270,9 +266,13 @@ impl Session {
             SendPartOfACoin => Outcome::Transfer(Box::new(
                 self.scenario.transfer(&TransferRequest::new(self.alice, self.bob, 3)),
             )),
-            SendChosen => Outcome::Transfer(Box::new(self.scenario.transfer(
-                &TransferRequest::new(self.alice, self.recipient(), self.amount()),
-            ))),
+            SendChosen => {
+                Outcome::Transfer(Box::new(self.scenario.transfer(&TransferRequest::new(
+                    self.alice,
+                    self.recipient(),
+                    self.amount(),
+                ))))
+            }
             SpendTwice => {
                 let first = TransferRequest::new(self.alice, self.bob, 10);
                 let second = TransferRequest::new(self.alice, self.carol, 10);
@@ -314,7 +314,11 @@ impl Session {
             // sends comparable — and it means the book gains Bob's line every time. The old
             // sentence claimed the book came out the same size both times; it never does.
             Topic::Compared => {
-                if sends.len() < 2 { Msg::TuneOnlyOne } else { Msg::TuneBookLine }
+                if sends.len() < 2 {
+                    Msg::TuneOnlyOne
+                } else {
+                    Msg::TuneBookLine
+                }
             }
         }
         .text(language)
@@ -701,10 +705,7 @@ fn change_line(outcome: &ApplyOutcome, language: Language, theme: Theme) -> Line
     let mut spans = vec![
         Span::styled(format!("  {} ", state.mark()), theme.state(state)),
         Span::styled(
-            pad(
-                if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }.text(language),
-                12,
-            ),
+            pad(if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }.text(language), 12),
             theme.state(state),
         ),
     ];

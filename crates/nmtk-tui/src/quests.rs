@@ -29,8 +29,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     // An answer to a keypress goes under both panels, where there is always a line for it. Inside
     // the quest's own panel it landed below whatever that panel had already filled, and was never
     // seen.
-    let [body, answer] =
-        Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).areas(body);
+    let [body, answer] = Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).areas(body);
     if let Some(status) = app.status {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -232,12 +231,7 @@ fn needs_lines(
 }
 
 /// `Minimum      4 cores   2.0 GiB`, with the memory left off when the quest does not care.
-fn bar_line(
-    label: Msg,
-    needs: MachineNeeds,
-    language: Language,
-    theme: Theme,
-) -> Line<'static> {
+fn bar_line(label: Msg, needs: MachineNeeds, language: Language, theme: Theme) -> Line<'static> {
     let cores = format!(
         "{} {}",
         needs.cores,

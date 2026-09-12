@@ -336,10 +336,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         let text = shot(&mut app, 100, 30);
         assert!(text.contains("Bitcoin counts coins"), "Enter added nothing:\n{text}");
-        assert!(
-            !text.contains("Ethereum keeps a book"),
-            "one Enter revealed two beats:\n{text}"
-        );
+        assert!(!text.contains("Ethereum keeps a book"), "one Enter revealed two beats:\n{text}");
     }
 
     /// A reviewer pressed Enter four times at the end of a quest before concluding it was over:
@@ -494,9 +491,11 @@ mod tests {
             let rows = text.lines().position(|line| line.contains("▸")).expect("a chosen row");
             assert!(rows > 0, "nothing is chosen:\n{text}");
             assert!(
-                text.lines().nth(rows).unwrap().replace(' ', "").contains(
-                    &t(Msg::SettingsLanguage, *language).replace(' ', "")
-                ),
+                text.lines()
+                    .nth(rows)
+                    .unwrap()
+                    .replace(' ', "")
+                    .contains(&t(Msg::SettingsLanguage, *language).replace(' ', "")),
                 "the first row is not the language:\n{text}"
             );
         }

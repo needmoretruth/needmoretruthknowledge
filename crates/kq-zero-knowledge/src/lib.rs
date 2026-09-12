@@ -248,7 +248,10 @@ mod tests {
         for stage in 0..ZeroKnowledge.meta().stages.len() {
             session.on(Action::Stage(stage));
             assert_eq!(session.stage(), stage);
-            assert!(!session.transcript(Language::ENGLISH).is_empty(), "stage {stage} says nothing");
+            assert!(
+                !session.transcript(Language::ENGLISH).is_empty(),
+                "stage {stage} says nothing"
+            );
         }
         session.close();
     }

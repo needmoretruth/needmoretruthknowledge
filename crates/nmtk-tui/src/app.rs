@@ -477,8 +477,7 @@ impl App {
     fn step_language(&mut self, step: i32) {
         let count = Language::ALL.len();
         let at = self.settings.language.index();
-        let next_index =
-            if step > 0 { (at + 1) % count } else { (at + count - 1) % count };
+        let next_index = if step > 0 { (at + 1) % count } else { (at + count - 1) % count };
         self.settings.language = Language::ALL[next_index];
     }
 
@@ -526,12 +525,7 @@ impl App {
 /// digits belong to those values — a quest that promises "type a number" and then swallows every
 /// digit as a stage jump has promised nothing. Tab moves between stages instead, and where there
 /// is nothing to type the digits go back to reaching stages directly.
-fn action_for(
-    code: KeyCode,
-    typing: bool,
-    tunable: bool,
-    stages: &[StageSpec],
-) -> Option<Action> {
+fn action_for(code: KeyCode, typing: bool, tunable: bool, stages: &[StageSpec]) -> Option<Action> {
     match code {
         KeyCode::Up | KeyCode::Char('k') if !typing => Some(Action::Previous),
         KeyCode::Down | KeyCode::Char('j') if !typing => Some(Action::Next),

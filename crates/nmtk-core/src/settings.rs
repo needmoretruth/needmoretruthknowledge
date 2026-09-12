@@ -200,5 +200,4 @@ mod tests {
         let parsed: Settings = toml::from_str(text).unwrap();
         assert_eq!(parsed.language, Language::KOREAN);
     }
-
 }

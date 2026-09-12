@@ -204,7 +204,8 @@ mod tests {
 
     #[test]
     fn wrapping_never_exceeds_the_width_it_was_given() {
-        let english = "Every chain has to answer one question: where is the money, and who says so?";
+        let english =
+            "Every chain has to answer one question: where is the money, and who says so?";
         for line in wrap(english, 28) {
             assert!(width(&line) <= 28, "line too wide: {line:?}");
         }

@@ -37,7 +37,10 @@ pub fn lines(beats: &[Beat], theme: Theme, columns: usize) -> Vec<Line<'static>>
             let prefix = if row == 0 { format!("{mark} ") } else { "  ".to_string() };
             out.push(Line::from(vec![
                 Span::styled(prefix, style),
-                Span::styled(text, if matches!(beat.voice, Voice::Say) { theme.plain() } else { style }),
+                Span::styled(
+                    text,
+                    if matches!(beat.voice, Voice::Say) { theme.plain() } else { style },
+                ),
             ]));
         }
     }
@@ -48,13 +51,7 @@ pub fn lines(beats: &[Beat], theme: Theme, columns: usize) -> Vec<Line<'static>>
 ///
 /// Returns how far the panel *could* be scrolled, so the caller can keep its offset honest when
 /// the conversation grows or the terminal is resized.
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    theme: Theme,
-    beats: &[Beat],
-    offset: usize,
-) -> usize {
+pub fn render(frame: &mut Frame, area: Rect, theme: Theme, beats: &[Beat], offset: usize) -> usize {
     let mut all = lines(beats, theme, area.width as usize);
     let height = area.height as usize;
     // A conversation starts at the bottom and rises, the way every messenger does. Beginning at

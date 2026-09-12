@@ -75,5 +75,3 @@ pub fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> 
         ),
     }
 }
-
-

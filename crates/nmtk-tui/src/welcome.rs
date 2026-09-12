@@ -72,7 +72,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let marker = if index == selected { "▸ " } else { "  " };
             let style = if index == selected { theme.selected() } else { theme.plain() };
             Line::from(vec![
-                Span::styled(format!("{marker}{}", nmtk_kq::text::column(t(item.title(), language), 18)), style),
+                Span::styled(
+                    format!("{marker}{}", nmtk_kq::text::column(t(item.title(), language), 18)),
+                    style,
+                ),
                 Span::styled(value_of(*item, app, language), theme.heading()),
             ])
         })
