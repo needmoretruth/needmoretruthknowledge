@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "kq-ledgers"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "nmtk-i18n",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "kq-proof-of-work"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "nmtk-i18n",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "kq-transformer"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "nmtk-i18n",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "kq-zero-knowledge"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "nmtk-i18n",
@@ -976,14 +976,14 @@ dependencies = [
 
 [[package]]
 name = "nmtk"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-tui",
 ]
 
 [[package]]
 name = "nmtk-core"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "serde",
  "toml",
@@ -991,14 +991,14 @@ dependencies = [
 
 [[package]]
 name = "nmtk-i18n"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
 ]
 
 [[package]]
 name = "nmtk-kq"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "nmtk-i18n",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "nmtk-ledger"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "sha2 0.11.0",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "nmtk-pow"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "rand 0.10.2",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "nmtk-transformer"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "nmtk-core",
  "rand 0.10.2",
@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "nmtk-tui"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "crossterm",
  "kq-ledgers",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "nmtk-zk"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "ff 0.14.0",
  "group 0.14.0",
