@@ -90,27 +90,14 @@ Finally, the same shielded payment from four sides at once: sender, receiver, on
 
 ## Install
 
-nmtk builds from source. You need Rust 1.96 or newer; the repository pins the exact compiler, so
-`rustup` will fetch the right one for you.
+Paste this into a terminal on Fedora or Ubuntu. It installs what nmtk needs and starts it, and asks
+you nothing.
 
 ```sh
-# Rust, if you do not have it yet
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-git clone https://github.com/needmoretruth/needmoretruthknowledge.git
-cd needmoretruthknowledge
-cargo build --release
-./target/release/nmtk
+git clone https://github.com/needmoretruth/needmoretruthknowledge.git && cd needmoretruthknowledge && ./install.sh
 ```
 
-To put it on your `PATH` instead:
-
-```sh
-cargo install --path crates/nmtk
-nmtk
-```
-
-**Fedora** and **Ubuntu** need no other packages — nmtk links nothing outside Rust.
+Details, other ways to do it, and what to do when something goes wrong: **[INSTALL.md](INSTALL.md)**.
 
 ## Keys
 

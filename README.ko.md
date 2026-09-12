@@ -86,27 +86,14 @@
 
 ## 설치
 
-nmtk는 소스에서 빌드합니다. Rust 1.96 이상이 필요하고, 저장소가 컴파일러 판을 고정해 두었으므로 `rustup`이
-맞는 판을 알아서 받아 옵니다.
+페도라나 우분투 터미널에 아래 한 줄을 붙여 넣으세요. 필요한 것을 설치하고 바로 실행되며, 중간에 아무것도
+묻지 않습니다.
 
 ```sh
-# Rust가 아직 없다면
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-git clone https://github.com/needmoretruth/needmoretruthknowledge.git
-cd needmoretruthknowledge
-cargo build --release
-./target/release/nmtk
+git clone https://github.com/needmoretruth/needmoretruthknowledge.git && cd needmoretruthknowledge && ./install.sh
 ```
 
-어디서나 `nmtk`로 실행하고 싶다면:
-
-```sh
-cargo install --path crates/nmtk
-nmtk
-```
-
-**페도라**와 **우분투**에서 다른 패키지는 필요 없습니다. nmtk는 Rust 밖의 라이브러리를 쓰지 않습니다.
+자세한 설명과 다른 설치 방법, 잘 안 될 때의 해결법은 **[INSTALL.ko.md](INSTALL.ko.md)**에 있습니다.
 
 ## 키
 
