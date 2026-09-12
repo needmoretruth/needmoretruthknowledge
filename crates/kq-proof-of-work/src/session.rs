@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use nmtk_core::{Language, MachineProfile, format};
-use nmtk_kq::knob::{Knob, KnobValue};
+use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::text::{column, rpad, truncate, width as cells, wrap};
 use nmtk_kq::theme::{State, Theme};
@@ -31,7 +31,9 @@ const MINER_PRESETS: &[u64] = &[1, 2, 3, 4];
 /// Thread counts worth trying.
 const THREAD_PRESETS: &[u64] = &[1, 2, 4, 8];
 /// Shares worth trying, as fractions of the whole machine.
-const SHARE_PRESETS: &[f64] = &[0.10, 0.25, 0.50, 0.75];
+/// Miner shares are weights, not percentages. Shown as percentages they read as parts of a
+/// whole, and three miners asking for 60%, 40% and 50% look like a broken screen adding to 150.
+const SHARE_PRESETS: &[u64] = &[1, 2, 3, 4];
 /// Attacker shares worth trying. 30% loses, 51% wins, and both are the lesson.
 const ATTACKER_PRESETS: &[f64] = &[0.20, 0.30, 0.45, 0.51, 0.70];
 /// How many blocks a merchant might wait for.
@@ -49,7 +51,7 @@ const MAX_ZERO_BITS: u64 = 28;
 /// Stable knob ids, one per miner.
 const SHARE_IDS: [&str; MAX_MINERS] = ["share-1", "share-2", "share-3", "share-4"];
 /// What a miner's share starts at. The first two differ so the split has something to say.
-const DEFAULT_SHARES: [f64; MAX_MINERS] = [0.60, 0.40, 0.50, 0.50];
+const DEFAULT_SHARES: [u64; MAX_MINERS] = [3, 2, 2, 2];
 /// How many hash-rate samples the curve keeps. Ten a second, so this is the last twelve seconds.
 const RATE_SAMPLES: usize = 120;
 /// The panel needs this many rows before a hash-rate curve is worth the space it costs.
@@ -105,6 +107,14 @@ enum Topic {
     Attack,
     /// What moving the difficulty did to the cost of a block.
     Difficulty,
+    /// Everything this reader mined, across every run of the quest.
+    Mined,
+    /// Whether they moved the numbers themselves, and from what to what.
+    Tuned,
+    /// Every attack they ran, one line each.
+    AttacksRan,
+    /// What those attacks, taken together, mean.
+    AttacksMeant,
 }
 
 /// Work a step starts.
@@ -136,7 +146,12 @@ const WHY: &[Step] =
 const PUZZLE: &[Step] = &[
     Say(Msg::PuzzleOne),
     Say(Msg::PuzzleTwo),
+    Say(Msg::PuzzleWhatAHashIs),
+    Say(Msg::PuzzleHashOneWay),
     Say(Msg::PuzzleThree),
+    Say(Msg::PuzzleByte),
+    Say(Msg::PuzzleBits),
+    Say(Msg::PuzzleBitsDouble),
     Say(Msg::PuzzleFour),
     Say(Msg::PuzzleFive),
     Say(Msg::PuzzleSix),
@@ -156,6 +171,7 @@ const MINE_STAGE: &[Step] = &[
     Say(Msg::MineFive),
     Say(Msg::MineSix),
     Say(Msg::MineSeven),
+    Say(Msg::MineRate),
     Say(Msg::MineEight),
     Say(Msg::MineNine),
     Say(Msg::MineTen),
@@ -204,9 +220,10 @@ const ATTACK_STAGE: &[Step] = &[
 const RECAP_STAGE: &[Step] = &[
     Say(Msg::RecapOne),
     Say(Msg::RecapTwo),
-    Say(Msg::RecapThree),
-    Say(Msg::RecapFour),
-    Say(Msg::RecapFive),
+    Tell(Topic::Mined),
+    Tell(Topic::Tuned),
+    Tell(Topic::AttacksRan),
+    Tell(Topic::AttacksMeant),
     Say(Msg::RecapSix),
 ];
 
@@ -214,17 +231,64 @@ const SCRIPTS: [&[Step]; 6] = [WHY, PUZZLE, MINE_STAGE, TUNE_STAGE, ATTACK_STAGE
 
 /// Something that happened, kept as numbers so the conversation can be said again in any language.
 enum Happening {
-    MiningStarted { miners: usize, threads: usize, bits: u64 },
-    Block { height: u64, gap: Duration, miner: usize, on_the_chain: bool },
-    FallingBehind { by: u64, elapsed: Duration },
-    AttackStarted { share: f64, confirmations: u64 },
+    MiningStarted {
+        miners: usize,
+        threads: usize,
+        bits: u64,
+    },
+    Block {
+        height: u64,
+        gap: Duration,
+        miner: usize,
+        on_the_chain: bool,
+    },
+    FallingBehind {
+        by: u64,
+        elapsed: Duration,
+    },
+    AttackStarted {
+        share: f64,
+        confirmations: u64,
+    },
     Paid,
-    Released { confirmations: u64 },
-    Ended { outcome: AttackOutcome, reverted: u64, took: Option<Duration> },
+    Released {
+        confirmations: u64,
+    },
+    Ended {
+        outcome: AttackOutcome,
+        reverted: u64,
+        took: Option<Duration>,
+    },
     Refused(Msg),
+    /// A typed number that fell outside the knob's range, with where it landed.
+    PulledIn {
+        to: String,
+    },
+    /// A typed number the knob could not read at all.
+    NotANumber,
 }
 
 /// One happening, filed against the step the reader was on when it happened.
+/// One attack that ended, kept after its run is gone.
+#[derive(Debug, Clone, Copy)]
+struct Attempt {
+    share: f64,
+    won: bool,
+    reverted: u64,
+}
+
+/// What this reader did, gathered across the whole quest rather than the last run.
+///
+/// The recap used to read the snapshot that happened to be lying around, which was whichever run
+/// finished last — so a reader who mined thirty-seven blocks and then ran a four-block experiment
+/// was told they had mined four.
+#[derive(Debug, Clone, Default)]
+struct Done {
+    blocks: u64,
+    fastest: f64,
+    attacks: Vec<Attempt>,
+}
+
 struct Logged {
     step: usize,
     what: Happening,
@@ -258,12 +322,27 @@ pub struct Session {
     /// The difficulty as it stood when the tuning stage opened, so "you moved it" can be checked
     /// rather than assumed.
     bits_on_entry: u32,
+    /// The miner count as it stood when the tuning stage opened, for the same reason.
+    miners_on_entry: u64,
     mining_snapshot: Option<MiningSnapshot>,
     attack: Option<AttackHandle>,
     attack_snapshot: Option<AttackSnapshot>,
     rates: Vec<f64>,
     state: RunState,
     refused: Option<Msg>,
+    /// The knob values the run in progress was started with, so turning one can be told apart
+    /// from pressing Enter twice.
+    running_with: Option<Settled>,
+    /// What this reader has done in this quest, for the recap to read.
+    done: Done,
+    /// Which step started the run that is going, so what the run produces is filed against it.
+    run_step: usize,
+    /// The attempt each attack step produced.
+    ///
+    /// A sentence about the first attack has to keep being about the first attack after the
+    /// second one has run. Reading the live snapshot instead put "it still fell short" directly
+    /// under the line saying a payment had been erased.
+    attempts: Vec<(usize, Attempt)>,
 }
 
 impl Session {
@@ -344,12 +423,17 @@ impl Session {
             chosen: 0,
             mining: None,
             bits_on_entry: zero_bits as u32,
+            miners_on_entry: 2,
             mining_snapshot: None,
             attack: None,
             attack_snapshot: None,
             rates: Vec::new(),
             state: RunState::Idle,
             refused: None,
+            running_with: None,
+            done: Done::default(),
+            run_step: 0,
+            attempts: Vec::new(),
         };
         session.sync_share_knobs();
         session
@@ -369,8 +453,9 @@ impl Session {
         count_of(self.tune_knobs.get(KNOB_THREADS)).max(1) as usize
     }
 
+    /// The weight this miner asked for. The engine normalises them, so only the ratios matter.
     fn miner_share(&self, index: usize) -> f64 {
-        share_of(self.tune_knobs.get(KNOB_SHARES_FROM + index)).max(0.0)
+        count_of(self.tune_knobs.get(KNOB_SHARES_FROM + index)).max(1) as f64
     }
 
     fn attacker_share(&self) -> f64 {
@@ -391,11 +476,11 @@ impl Session {
             let index = (self.tune_knobs.len() - KNOB_SHARES_FROM).min(MAX_MINERS - 1);
             self.tune_knobs.push(Knob::new(
                 SHARE_IDS[index],
-                KnobValue::Share {
+                KnobValue::Count {
                     current: DEFAULT_SHARES[index],
-                    min: 0.01,
-                    max: 1.0,
-                    step: 0.05,
+                    min: 1,
+                    max: 10,
+                    step: 1,
                     presets: SHARE_PRESETS,
                 },
             ));
@@ -450,7 +535,7 @@ impl Session {
     /// The miners the current knobs describe.
     fn specs(&self) -> Vec<MinerSpec> {
         (0..self.miner_count())
-            .map(|index| MinerSpec::percent(index as u32, self.miner_share(index) * 100.0))
+            .map(|index| MinerSpec::percent(index as u32, self.miner_share(index)))
             .collect()
     }
 
@@ -810,8 +895,18 @@ impl Session {
             Constraint::Length(2),
         ])
         .areas(area);
-        let _ = gap;
         frame.render_widget(Paragraph::new(knob_lines), knobs);
+        // The conversation tells the reader to read the cost line here, so the cost line is here.
+        // It used to be on the stage before this one, where the difficulty could not be moved.
+        if let Some((label, value)) = self.cost_rows(language).into_iter().next() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{label}  "), theme.muted()),
+                    Span::styled(value, theme.plain()),
+                ])),
+                gap,
+            );
+        }
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 Msg::HeadingSplit.text(language),
@@ -1038,15 +1133,37 @@ impl Session {
             (Msg::LabelPublicChain.text(language), format::count(snapshot.public_height)),
             (Msg::LabelPrivateChain.text(language), format::count(snapshot.private_height)),
         ];
-        let gap = snapshot.lead.unsigned_abs();
-        rows.push((
-            if snapshot.lead >= 0 {
-                Msg::LabelAheadBy.text(language)
-            } else {
-                Msg::LabelBehindBy.text(language)
-            },
-            blocks(gap, language),
-        ));
+        // While the race is on, the gap is the thing to watch. Once it is over the gap is zero
+        // whoever won — the losing chain has been abandoned — and a screen still showing "ahead
+        // by 0 blocks" beside a payment that was erased is two screens disagreeing.
+        match snapshot.outcome {
+            Some(outcome) => {
+                rows.push((
+                    Msg::LabelAtTheEnd.text(language),
+                    phrases::short_outcome(outcome).text(language).to_string(),
+                ));
+                let won = outcome == AttackOutcome::Succeeded;
+                rows.push((
+                    Msg::LabelChainNow.text(language),
+                    if won {
+                        Msg::ChainNowAttacker.text(language).to_string()
+                    } else {
+                        Msg::ChainNowHonest.text(language).to_string()
+                    },
+                ));
+            }
+            None => {
+                let gap = snapshot.lead.unsigned_abs();
+                rows.push((
+                    if snapshot.lead >= 0 {
+                        Msg::LabelAheadBy.text(language)
+                    } else {
+                        Msg::LabelBehindBy.text(language)
+                    },
+                    blocks(gap, language),
+                ));
+            }
+        }
         rows.push((
             Msg::LabelFurthestBehind.text(language),
             blocks(snapshot.max_deficit, language),
@@ -1104,14 +1221,18 @@ impl Session {
 
     fn recap_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let unknown = || Msg::NotYet.text(language).to_string();
-        let mining = self.mining_snapshot.as_ref();
-        let rate = mining.map(|snapshot| snapshot.total_hashrate).unwrap_or(0.0);
+        // The recap is about the quest, not about whichever run happened to finish last: it
+        // reads the record every run wrote into, so a short experiment after a long run cannot
+        // shrink what the reader mined.
+        let mined = self.done.blocks > 0;
+        let rate = self.done.fastest;
         let real = Target::difficulty_one();
         let network = implied_network_hashrate(real, BITCOIN_TARGET_BLOCK_SECONDS);
 
-        // The recap says what happened, so the split it shows is the one the run really used.
-        let split = mining.map(split_of).and_then(|rows| rows.first().copied());
-        let attack = self.attack_snapshot.as_ref();
+        // The split is the one the run really used, so it comes from the run.
+        let split =
+            self.mining_snapshot.as_ref().map(split_of).and_then(|rows| rows.first().copied());
+        let attacks = &self.done.attacks;
 
         let rows: Vec<(&'static str, String)> = vec![
             (
@@ -1120,23 +1241,18 @@ impl Session {
             ),
             (
                 Msg::RecapHashRate.text(language),
-                match mining {
-                    Some(_) => format::hashrate(rate),
-                    None => unknown(),
-                },
+                if mined { format::hashrate(rate) } else { unknown() },
             ),
             (
                 Msg::RecapBlocks.text(language),
-                match mining {
-                    Some(snapshot) => format::count(snapshot.blocks_in_chain),
-                    None => unknown(),
-                },
+                if mined { format::count(self.done.blocks) } else { unknown() },
             ),
             (
                 Msg::RecapAtDifficultyOne.text(language),
-                match mining {
-                    Some(_) => span(expected_time_to_block(rate, real).expected_seconds, language),
-                    None => unknown(),
+                if mined {
+                    span(expected_time_to_block(rate, real).expected_seconds, language)
+                } else {
+                    unknown()
                 },
             ),
             (Msg::RecapNetwork.text(language), format::hashrate(network)),
@@ -1152,10 +1268,15 @@ impl Session {
                 },
             ),
             (
-                Msg::RecapAttack.text(language),
-                match attack.and_then(|snapshot| snapshot.outcome) {
-                    Some(outcome) => phrases::short_outcome(outcome).text(language).to_string(),
-                    None => unknown(),
+                Msg::RecapAttacksRun.text(language),
+                if attacks.is_empty() { unknown() } else { format::count(attacks.len() as u64) },
+            ),
+            (
+                Msg::RecapAttacksWon.text(language),
+                if attacks.is_empty() {
+                    unknown()
+                } else {
+                    format::count(attacks.iter().filter(|attempt| attempt.won).count() as u64)
                 },
             ),
         ];
@@ -1221,15 +1342,20 @@ impl Session {
         self.forget_run();
         self.revealed = 0;
         self.log.clear();
+        self.attempts.clear();
     }
 
     /// A sentence about the attack that finished, read off that attack.
     ///
     /// Four endings, because a race is not arithmetic alone: below half it usually loses and
     /// sometimes wins, and above half it usually wins and sometimes runs out of time first.
-    fn tell(&self, topic: Topic, language: Language) -> String {
+    fn tell(&self, step: usize, topic: Topic, language: Language) -> String {
         match topic {
-            Topic::Attack => self.tell_attack(language),
+            Topic::Attack => self.tell_attack(step, language),
+            Topic::Mined => self.tell_mined(language),
+            Topic::Tuned => self.tell_tuned(language),
+            Topic::AttacksRan => self.tell_attacks_ran(language),
+            Topic::AttacksMeant => self.tell_attacks_meant(language),
             Topic::Difficulty => {
                 // The reader sets the difficulty, so the sentence reads the difficulty rather
                 // than the one the conversation suggested. Pressing Enter without moving it used
@@ -1245,16 +1371,114 @@ impl Session {
         }
     }
 
-    fn tell_attack(&self, language: Language) -> String {
-        let Some(snapshot) = &self.attack_snapshot else {
+    /// What this reader mined, across every run rather than the last one.
+    fn tell_mined(&self, language: Language) -> String {
+        if self.done.blocks == 0 {
+            return Msg::RecapMinedNone.text(language).to_string();
+        }
+        format!(
+            "{} {}. {} {}.",
+            Msg::RecapMinedBlocks.text(language),
+            format::count(self.done.blocks),
+            Msg::RecapMinedFastest.text(language),
+            format::hashrate(self.done.fastest),
+        )
+    }
+
+    /// Whether they moved the numbers themselves, and from what to what.
+    fn tell_tuned(&self, language: Language) -> String {
+        let bits = self.zero_bits();
+        let miners = self.miner_count() as u64;
+        if bits == self.bits_on_entry && miners == self.miners_on_entry {
+            return Msg::RecapTunedNo.text(language).to_string();
+        }
+        let mut text = Msg::RecapTunedYes.text(language).to_string();
+        if bits != self.bits_on_entry {
+            text.push_str(&format!(
+                "  ·  {} {} → {}",
+                Msg::KnobDifficulty.text(language),
+                self.bits_on_entry,
+                bits,
+            ));
+        }
+        if miners != self.miners_on_entry {
+            text.push_str(&format!(
+                "  ·  {} {} → {}",
+                Msg::KnobMiners.text(language),
+                self.miners_on_entry,
+                miners,
+            ));
+        }
+        text
+    }
+
+    /// Every attack that ended, one clause each, in the order they were run.
+    fn tell_attacks_ran(&self, language: Language) -> String {
+        if self.done.attacks.is_empty() {
+            return Msg::RecapAttackNone.text(language).to_string();
+        }
+        let mut text = Msg::RecapAttackRan.text(language).to_string();
+        for attempt in &self.done.attacks {
+            let outcome = if attempt.won {
+                phrases::short_outcome(AttackOutcome::Succeeded)
+            } else {
+                phrases::short_outcome(AttackOutcome::GaveUp)
+            };
+            text.push_str(&format!(
+                "  ·  {} {}",
+                format::percent(attempt.share),
+                outcome.text(language),
+            ));
+            if attempt.won && attempt.reverted > 0 {
+                text.push_str(&format!(
+                    " ({} {})",
+                    Msg::EventErased.text(language),
+                    attempt.reverted
+                ));
+            }
+        }
+        text
+    }
+
+    /// What those attacks, taken together, say about the number 51.
+    fn tell_attacks_meant(&self, language: Language) -> String {
+        let attacks = &self.done.attacks;
+        if attacks.is_empty() {
+            return String::new();
+        }
+        let won_below = attacks.iter().any(|a| a.won && a.share < 0.5);
+        let won_above = attacks.iter().any(|a| a.won && a.share >= 0.5);
+        let lost_above = attacks.iter().any(|a| !a.won && a.share >= 0.5);
+        let message = if won_below {
+            Msg::RecapAttackWonBelowHalf
+        } else if lost_above && won_above {
+            Msg::RecapAttackLostAboveHalf
+        } else if won_above {
+            Msg::RecapAttackWonAboveHalf
+        } else if lost_above {
+            Msg::RecapAttackLostAboveHalf
+        } else {
+            Msg::RecapAttackAllLost
+        };
+        message.text(language).to_string()
+    }
+
+    /// How the attack that this step ran ended — that one, not whichever ran last.
+    fn tell_attack(&self, step: usize, language: Language) -> String {
+        let attempt = self
+            .attempts
+            .iter()
+            .filter(|(at, _)| *at <= step)
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, attempt)| *attempt);
+        let Some(attempt) = attempt else {
             return Msg::AttackNotYetRun.text(language).to_string();
         };
-        let majority = snapshot.attacker_share >= 0.5;
-        let message = match (majority, snapshot.outcome) {
-            (false, Some(AttackOutcome::Succeeded)) => Msg::AttackLuckyWin,
-            (false, _) => Msg::AttackLost,
-            (true, Some(AttackOutcome::Succeeded)) => Msg::AttackWon,
-            (true, _) => Msg::AttackRanOut,
+        let message = match (attempt.share >= 0.5, attempt.won) {
+            (false, true) => Msg::AttackLuckyWin,
+            (false, false) => Msg::AttackLost,
+            (true, true) => Msg::AttackWon,
+            (true, false) => Msg::AttackRanOut,
         };
         message.text(language).to_string()
     }
@@ -1277,6 +1501,9 @@ impl Session {
         }
         self.revealed += 1;
         if let Run(deed) = script[self.revealed] {
+            let settled = Settled::of(self.knobs());
+            self.running_with = Some(settled);
+            self.run_step = self.revealed;
             match deed {
                 Mine => {
                     self.reported_blocks = 0;
@@ -1315,6 +1542,43 @@ impl Session {
         true
     }
 
+    /// Whether the reader has turned a knob since the run in progress started.
+    fn knobs_moved(&self) -> bool {
+        match &self.running_with {
+            Some(settled) => !settled.still(self.knobs()),
+            None => false,
+        }
+    }
+
+    /// Runs this stage's work again with the values now on screen.
+    ///
+    /// The conversation rewinds to the run itself rather than appending, so the new lines arrive
+    /// where they belong and the sentence that reads them is said again about the run that just
+    /// happened rather than about the one before it.
+    fn rerun(&mut self) -> Reaction {
+        if self.knobs().is_empty() {
+            return Reaction::Ignored;
+        }
+        let script = self.script();
+        // The run this stage is showing, not the last one written in the script: a reader in the
+        // middle of the first run's sentences must not be thrown forward past what they have
+        // not read yet.
+        let upto = self.revealed.min(script.len().saturating_sub(1));
+        let Some(at) = script[..=upto].iter().rposition(|step| matches!(step, Run(_))) else {
+            return Reaction::Ignored;
+        };
+        if at == 0 {
+            return Reaction::Ignored;
+        }
+        self.stop_runs();
+        self.forget_run();
+        self.forget_results();
+        self.log.retain(|logged| logged.step < at);
+        self.revealed = at - 1;
+        self.advance();
+        Reaction::Handled
+    }
+
     /// Files one happening against the step the reader is on.
     fn say(&mut self, what: Happening) {
         if self.log.len() < EVENT_CAP {
@@ -1350,6 +1614,9 @@ impl Session {
         }
         for (height, gap, miner, on_the_chain) in blocks {
             self.reported_blocks = self.reported_blocks.max(height);
+            if on_the_chain {
+                self.done.blocks += 1;
+            }
             self.say(Happening::Block { height, gap, miner, on_the_chain });
         }
 
@@ -1393,6 +1660,22 @@ impl Session {
             && !self.said_ended
         {
             self.said_ended = true;
+            // The panel keeps the worst deficit; the conversation only said the last one it
+            // remarked on. Ending one short of the panel reads as two screens disagreeing.
+            let (deficit, elapsed, share) = self
+                .attack_snapshot
+                .as_ref()
+                .map(|s| (s.max_deficit, s.elapsed, s.attacker_share))
+                .unwrap_or((0, Duration::ZERO, 0.0));
+            if deficit > self.said_deficit {
+                self.said_deficit = deficit;
+                self.say(Happening::FallingBehind { by: deficit, elapsed });
+            }
+            let attempt = Attempt { share, won: outcome == AttackOutcome::Succeeded, reverted };
+            self.done.attacks.push(attempt);
+            let at = self.run_step;
+            self.attempts.retain(|(step, _)| *step != at);
+            self.attempts.push((at, attempt));
             self.say(Happening::Ended { outcome, reverted, took });
         }
     }
@@ -1479,6 +1762,16 @@ impl Session {
                 Beat::outcome(if won { State::Bad } else { State::Good }, text)
             }
             Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+            Happening::PulledIn { to } => Beat::outcome(
+                State::Chosen,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventOutsideRange.text(language),
+                    Msg::EventSetTo.text(language),
+                    to,
+                ),
+            ),
+            Happening::NotANumber => Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)),
         }
     }
 }
@@ -1495,6 +1788,7 @@ impl KqSession for Session {
         self.stage = stage;
         self.chosen = 0;
         self.bits_on_entry = self.zero_bits();
+        self.miners_on_entry = self.miner_count() as u64;
         // One heavy run at a time: mining beside an attack halves both, and a 51% attack that
         // cannot win because the screen is stealing its cores is a lie about proof of work. The
         // threads stop; what they already produced stays, because the recap is about it.
@@ -1508,7 +1802,7 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
-                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
+                Tell(topic) => beats.push(Beat::say(self.tell(index, *topic, language))),
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1549,14 +1843,25 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Go => {
+                // A knob turned since this stage's run started asks for the run to be done again
+                // with what is on screen. That comes before carrying the conversation on: the
+                // sentences after a run are about that run, and they would be about the old one.
+                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                    return Reaction::Handled;
+                }
                 if let Some(Await(until)) = self.script().get(self.revealed)
                     && !self.satisfied(*until)
                 {
                     return Reaction::Ignored;
                 }
-                // The end of a stage is not the end of the quest, but walking on from here is
-                // the shell's business: it is what knows there is another stage to walk to.
-                if self.advance() { Reaction::Handled } else { Reaction::Ignored }
+                if self.advance() {
+                    return Reaction::Handled;
+                }
+                // The stage has said everything it has to say. Where there are knobs, Enter runs
+                // it again with the values now on screen — an Ask is a suggestion, and a
+                // suggestion the reader takes has to do something. Walking on is Tab's job.
+                // Where there are no knobs there is nothing to run, and the shell walks.
+                self.rerun()
             }
             Action::Reset => {
                 self.forget_results();
@@ -1608,9 +1913,18 @@ impl KqSession for Session {
             Action::Nudge(direction) => self.change_chosen(|knob| knob.nudge(direction)),
             Action::Type(c) => self.change_chosen(|knob| knob.type_char(c)),
             Action::Backspace => self.change_chosen(Knob::backspace),
-            Action::Commit => self.change_chosen(|knob| {
-                knob.commit();
-            }),
+            Action::Commit => {
+                let mut typed = Typed::Nothing;
+                let taken = self.change_chosen(|knob| typed = knob.commit());
+                // A number that went nowhere reads as a broken key unless the screen says what
+                // happened to it.
+                match typed {
+                    Typed::PulledIn { to } => self.say(Happening::PulledIn { to }),
+                    Typed::NotANumber => self.say(Happening::NotANumber),
+                    Typed::Taken | Typed::Nothing => {}
+                }
+                taken
+            }
             Action::Cancel => self.change_chosen(Knob::cancel),
         }
     }
@@ -1629,6 +1943,9 @@ impl KqSession for Session {
                 self.rates.remove(0);
             }
             self.rates.push(snapshot.total_hashrate);
+            if snapshot.total_hashrate > self.done.fastest {
+                self.done.fastest = snapshot.total_hashrate;
+            }
             self.mining_snapshot = Some(snapshot);
         }
         if let Some(handle) = &self.attack {
@@ -1703,6 +2020,11 @@ impl KqSession for Session {
         }
     }
 
+    fn go_name(&self, language: Language) -> Option<&'static str> {
+        let runnable = !self.knobs().is_empty() && (self.at_end() || self.knobs_moved());
+        runnable.then(|| Msg::KeyRunIt.text(language))
+    }
+
     fn typing(&self) -> bool {
         self.knob_count() > 0
             && self.knobs().get(self.chosen).is_some_and(|knob| knob.draft().is_some())
@@ -1746,12 +2068,20 @@ fn knob_line(
     };
     let style = if chosen { theme.heading() } else { theme.muted() };
     let room = width.saturating_sub(label_width + 2);
+    // The ends of the range, on the line the reader is pointing at. An arrow key that stops
+    // working with nothing on the screen to say why reads as a broken key.
+    let ends = if chosen { ends_of(knob) } else { None };
+    let ends = ends.filter(|ends| cells(&value) + cells(ends) + 3 <= room);
     if cells(&value) <= room {
-        return vec![Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!("{marker} "), theme.state(State::Chosen)),
             Span::styled(column(label, label_width), theme.plain()),
             Span::styled(value, style),
-        ])];
+        ];
+        if let Some(ends) = ends {
+            spans.push(Span::styled(format!("   {ends}"), theme.muted()));
+        }
+        return vec![Line::from(spans)];
     }
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("{marker} "), theme.state(State::Chosen)),
@@ -1761,6 +2091,17 @@ fn knob_line(
         lines.push(Line::from(Span::styled(format!("    {chunk}"), style)));
     }
     lines
+}
+
+/// Both ends of what a knob will take, written the way its value is written.
+fn ends_of(knob: &Knob) -> Option<String> {
+    match &knob.value {
+        KnobValue::Count { min, max, .. } => Some(format!("{min}-{max}")),
+        KnobValue::Share { min, max, .. } => {
+            Some(format!("{}-{}", format::percent(*min), format::percent(*max)))
+        }
+        _ => None,
+    }
 }
 
 fn count_of(knob: Option<&Knob>) -> u64 {
@@ -1887,7 +2228,12 @@ mod tests {
 
     /// Draws the quest's panel exactly where the shell puts it on the smallest screen nmtk allows.
     fn draw(session: &Session) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).expect("backend");
+        draw_at(session, MIN_WIDTH, MIN_HEIGHT)
+    }
+
+    /// The same panel at a size of the test's choosing.
+    fn draw_at(session: &Session, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
         terminal
             .draw(|frame| {
                 let [_, body, _] = Layout::vertical([
@@ -2077,8 +2423,131 @@ mod tests {
     /// Presses Enter until the stage runs out of steps it can take without waiting.
     fn walk(session: &mut Session) {
         for _ in 0..session.script().len() {
+            if session.at_end() {
+                break;
+            }
             session.on(Action::Go);
         }
+    }
+
+    /// The whole conversation of a stage as one string, for tests about what it says.
+    fn conversation(session: &Session) -> String {
+        session
+            .transcript(Language::ENGLISH)
+            .iter()
+            .map(|beat| beat.text.as_str())
+            .collect::<Vec<_>>()
+            .join("  |  ")
+    }
+
+    #[test]
+    fn enter_at_the_end_of_a_stage_with_knobs_runs_it_again_rather_than_walking_away() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        // Straight to the end of the conversation: what is being tested is what Enter does once
+        // the stage has nothing left to say, not how long the real runs take to get there.
+        session.revealed = TUNE_STAGE.len() - 1;
+        assert!(session.at_end(), "the stage should have said everything by now");
+        let last_run =
+            TUNE_STAGE.iter().rposition(|step| matches!(step, Run(_))).expect("a run to repeat");
+        assert_eq!(session.on(Action::Go), Reaction::Handled, "Enter walked away instead");
+        assert_eq!(session.revealed, last_run + 1, "Enter did not rewind to the run");
+        session.close();
+    }
+
+    #[test]
+    fn the_value_the_reader_is_pointing_at_shows_both_ends_of_its_range() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        session.chosen = KNOB_DIFFICULTY;
+        let text = draw_at(&session, 120, 30);
+        let ends = format!("16-{MAX_ZERO_BITS}");
+        assert!(text.contains(&ends), "the range is not on the screen: {ends}\n{text}");
+    }
+
+    #[test]
+    fn enter_on_a_stage_with_nothing_to_run_is_left_to_the_shell() {
+        let mut session = session();
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        assert_eq!(session.on(Action::Go), Reaction::Ignored);
+    }
+
+    #[test]
+    fn turning_a_knob_while_the_work_runs_makes_enter_start_it_over() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        for _ in 0..TUNE_STAGE.len() {
+            if session.mining.is_some() {
+                break;
+            }
+            session.on(Action::Go);
+        }
+        assert!(session.mining.is_some(), "the first run never started");
+        assert_eq!(session.on(Action::Go), Reaction::Ignored, "nothing had been changed");
+        session.chosen = KNOB_DIFFICULTY;
+        session.on(Action::Nudge(-1));
+        assert_eq!(session.on(Action::Go), Reaction::Handled, "a turned knob asks for another run");
+        session.close();
+    }
+
+    #[test]
+    fn what_was_said_about_the_first_attack_survives_the_second_one() {
+        let mut session = session();
+        session.go_to(STAGE_ATTACK);
+        let runs: Vec<usize> = ATTACK_STAGE
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| matches!(step, Run(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(runs.len(), 2, "the attack stage runs twice");
+        // A win, then a loss above half. The sentence about the win used to be recomputed from
+        // the losing run and printed "it still fell short" under the payment it had erased.
+        session.attempts.push((runs[0], Attempt { share: 0.55, won: true, reverted: 3 }));
+        session.attempts.push((runs[1], Attempt { share: 0.55, won: false, reverted: 0 }));
+        session.revealed = ATTACK_STAGE.len() - 1;
+        let first = session.tell_attack(runs[0] + 1, Language::ENGLISH);
+        let second = session.tell_attack(runs[1] + 1, Language::ENGLISH);
+        assert_eq!(first, Msg::AttackWon.text(Language::ENGLISH));
+        assert_eq!(second, Msg::AttackRanOut.text(Language::ENGLISH));
+        session.close();
+    }
+
+    #[test]
+    fn the_recap_counts_the_whole_quest_and_not_the_last_run() {
+        let mut session = session();
+        session.done.blocks = 37;
+        session.done.fastest = 83_000_000.0;
+        session.done.attacks.push(Attempt { share: 0.55, won: true, reverted: 3 });
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let text = conversation(&session);
+        assert!(text.contains("37"), "the recap forgot the blocks that were mined: {text}");
+        assert!(text.contains("55.0%"), "the recap forgot the attack that was run: {text}");
+    }
+
+    #[test]
+    fn the_recap_claims_nothing_the_reader_did_not_do() {
+        let mut session = session();
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let text = conversation(&session);
+        assert!(text.contains(Msg::RecapMinedNone.text(Language::ENGLISH)), "{text}");
+        assert!(text.contains(Msg::RecapAttackNone.text(Language::ENGLISH)), "{text}");
+    }
+
+    #[test]
+    fn an_attack_above_half_that_ran_out_of_time_is_not_called_a_win() {
+        let mut session = session();
+        session.done.attacks.push(Attempt { share: 0.55, won: false, reverted: 0 });
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let text = conversation(&session);
+        assert!(
+            text.contains(Msg::RecapAttackLostAboveHalf.text(Language::ENGLISH)),
+            "the recap told the reader the opposite of what happened: {text}"
+        );
     }
 
     #[test]
@@ -2219,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_number_beats_the_presets_and_a_refused_one_changes_nothing() {
+    fn a_typed_number_beats_the_presets_and_one_past_the_end_says_where_it_landed() {
         let mut session = session();
         session.go_to(STAGE_TUNE);
         for c in "24".chars() {
@@ -2227,11 +2696,18 @@ mod tests {
         }
         session.on(Action::Commit);
         assert_eq!(session.zero_bits(), 24);
+        // Putting 24 back without a word reads as a broken key: the number lands on the end of
+        // the range and the conversation says so.
         for c in "99".chars() {
             session.on(Action::Type(c));
         }
         session.on(Action::Commit);
-        assert_eq!(session.zero_bits(), 24, "an out-of-range number was taken");
+        assert_eq!(session.zero_bits(), MAX_ZERO_BITS as u32);
+        let said = session.transcript(Language::ENGLISH);
+        assert!(
+            said.iter().any(|beat| beat.text.contains(&MAX_ZERO_BITS.to_string())),
+            "the reader was not told where the number landed"
+        );
     }
 
     #[test]
@@ -2372,28 +2848,28 @@ mod tests {
         let mut session = session();
         KqSession::go_to(&mut session, STAGE_TUNE);
 
-        assert_eq!(session.tell(Topic::Difficulty, english), Msg::TuneBitsUnchanged.text(english));
+        assert_eq!(
+            session.tell(0, Topic::Difficulty, english),
+            Msg::TuneBitsUnchanged.text(english)
+        );
         let raised = session.bits_on_entry as u64 + 1;
         if let KnobValue::Count { current, .. } = &mut session.tune_knobs[KNOB_DIFFICULTY].value {
             *current = raised;
         }
-        assert_eq!(session.tell(Topic::Difficulty, english), Msg::TuneBitsUp.text(english));
+        assert_eq!(session.tell(0, Topic::Difficulty, english), Msg::TuneBitsUp.text(english));
 
-        assert_eq!(session.tell(Topic::Attack, english), Msg::AttackNotYetRun.text(english));
-        for (share, outcome, expected) in [
-            (0.30, Some(AttackOutcome::GaveUp), Msg::AttackLost),
-            (0.30, Some(AttackOutcome::Succeeded), Msg::AttackLuckyWin),
-            (0.51, Some(AttackOutcome::Succeeded), Msg::AttackWon),
-            (0.51, Some(AttackOutcome::GaveUp), Msg::AttackRanOut),
+        assert_eq!(session.tell(0, Topic::Attack, english), Msg::AttackNotYetRun.text(english));
+        for (share, won, expected) in [
+            (0.30, false, Msg::AttackLost),
+            (0.30, true, Msg::AttackLuckyWin),
+            (0.51, true, Msg::AttackWon),
+            (0.51, false, Msg::AttackRanOut),
         ] {
-            let mut snapshot = blank_attack();
-            snapshot.attacker_share = share;
-            snapshot.outcome = outcome;
-            session.attack_snapshot = Some(snapshot);
+            session.attempts = vec![(0, Attempt { share, won, reverted: 0 })];
             assert_eq!(
-                session.tell(Topic::Attack, english),
+                session.tell(1, Topic::Attack, english),
                 expected.text(english),
-                "share {share} ending {outcome:?} was described wrongly"
+                "share {share} ending won={won} was described wrongly"
             );
         }
     }

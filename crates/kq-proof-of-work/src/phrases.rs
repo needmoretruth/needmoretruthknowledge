@@ -30,6 +30,11 @@ nmtk_i18n::messages! {
     // ---- Stage 2: the puzzle -----------------------------------------------------
     PuzzleOne { en: "A block is one page of that list. To add a page you have to find a number.", ko: "블록은 그 목록의 한 쪽입니다. 쪽을 붙이려면 수 하나를 찾아야 합니다." },
     PuzzleTwo { en: "The number has to make the page's fingerprint come out below a target.", ko: "그 수는 쪽의 지문이 목표값보다 작게 나오도록 만들어야 합니다." },
+    PuzzleWhatAHashIs { en: "A fingerprint here means a hash: put any data through one fixed procedure and the same short answer always comes back.", ko: "여기서 지문이란 해시를 말합니다. 어떤 데이터든 정해진 절차 하나에 넣으면 언제나 같은 짧은 답이 나옵니다." },
+    PuzzleHashOneWay { en: "From the answer there is no way back to the data, and no way to guess which data gives the answer you want.", ko: "그 답에서 원래 데이터로 되돌아가는 길은 없고, 원하는 답이 나오는 데이터를 미리 알아낼 방법도 없습니다." },
+    PuzzleByte { en: "A bit is a single 0 or 1, and a byte is eight of them. The block header is 80 bytes — 640 of those 0s and 1s.", ko: "비트는 0 아니면 1 하나이고, 바이트는 그 비트 여덟 개입니다. 블록 헤더 80바이트는 0과 1이 640개라는 뜻입니다." },
+    PuzzleBits { en: "The target is written as how many of those bits have to be zero at the front.", ko: "목표값은 그 비트 가운데 앞자리 몇 개가 0이어야 하는지로 적습니다." },
+    PuzzleBitsDouble { en: "Asking for one more zero halves the answers that count, which is why one bit doubles the work.", ko: "0을 하나 더 요구하면 통과하는 답이 반으로 줄고, 그래서 비트 하나가 일을 두 배로 만듭니다." },
     PuzzleThree { en: "The fingerprint is a hash: SHA-256, run twice, over the 80 bytes of the block header.", ko: "지문은 해시입니다. 블록 헤더 80바이트에 SHA-256을 두 번 돌린 값입니다." },
     PuzzleFour { en: "There is no clever way to find that number. You guess, you check, you guess again.", ko: "그 수를 영리하게 찾는 방법은 없습니다. 찍고, 확인하고, 다시 찍습니다." },
     PuzzleFive { en: "The number you keep changing is called the nonce. It is a counter sitting in the header, nothing more.", ko: "계속 바꾸는 그 수를 논스라고 부릅니다. 헤더 안에 들어 있는 계수기일 뿐입니다." },
@@ -45,7 +50,8 @@ nmtk_i18n::messages! {
     MineFive { en: "So a machine grinding for an hour is exactly as far from its next block as one that just started.", ko: "그래서 한 시간을 돌린 기계나 방금 시작한 기계나 다음 블록까지의 거리는 똑같습니다." },
     MineSix { en: "The waiting time is an average, never a countdown.", ko: "기다리는 시간은 평균이지 남은 시간이 아닙니다." },
     MineSeven { en: "Your hash rate is on the right: hashes counted, divided by the seconds they took. Not an estimate.", ko: "오른쪽의 해시 속도는 실제로 센 해시 수를 걸린 초로 나눈 값입니다. 추정치가 아닙니다." },
-    MineEight { en: "Bitcoin's difficulty 1, where it started in January 2009, costs about 4.3 billion hashes a block.", ko: "비트코인이 2009년 1월에 시작한 난이도 1은 블록 하나에 약 43억 번의 해시가 듭니다." },
+    MineRate { en: "MH/s on the right is millions of hashes a second: M for million, H for hash, s for second.", ko: "오른쪽의 MH/s는 초당 해시 수를 백만 단위로 적은 것입니다. M은 백만, H는 해시, s는 초입니다." },
+    MineEight { en: "Bitcoin's difficulty is a multiple. Difficulty 1 is the easiest the network has ever been — January 2009 — and costs about 4.3 billion hashes a block.", ko: "비트코인의 난이도는 배수입니다. 난이도 1은 네트워크가 가장 쉬웠던 때, 2009년 1월이고, 블록 하나에 약 43억 번의 해시가 듭니다." },
     MineNine { en: "At your rate, one block at that difficulty would take the time shown on the right.", ko: "지금 속도라면 그 난이도에서 블록 하나에 오른쪽에 적힌 만큼 걸립니다." },
     MineTen { en: "The 2009 network figure beside it comes from the protocol itself — difficulty 1, ten minutes a block. Nobody's computer was measured for it.", ko: "그 옆의 2009년 네트워크 수치는 프로토콜 자체의 숫자 — 난이도 1, 블록 간격 10분 — 에서 계산한 값입니다. 누군가의 컴퓨터를 잰 것이 아닙니다." },
     MineEleven { en: "Compare the two and you have your share of what the whole network was then.", ko: "둘을 견주면 그때의 네트워크 전체에서 이 컴퓨터가 차지했을 비중이 나옵니다." },
@@ -58,11 +64,11 @@ nmtk_i18n::messages! {
     TuneBitsUnchanged { en: "The difficulty is where it was, so the cost is too. Move it and press Enter to watch the cost move with it.", ko: "난이도가 그대로라 비용도 그대로입니다. 난이도를 옮기고 Enter를 누르면 비용이 따라 움직입니다." },
     TuneBitsUp { en: "Every bit doubles the work, and nothing about the machine changed. Read the cost line on the right.", ko: "비트 하나마다 할 일이 두 배가 됩니다. 컴퓨터는 아무것도 바뀌지 않았습니다. 오른쪽 비용 줄을 보세요." },
     TuneBitsDown { en: "Every bit taken off halves the work. Blocks are cheaper now, and nothing about the machine changed.", ko: "비트를 하나 뺄 때마다 할 일이 절반이 됩니다. 블록이 그만큼 싸졌고, 컴퓨터는 아무것도 바뀌지 않았습니다." },
-    TuneWhole { en: "Threads are whole things. A machine with seven of them cannot give one miner 51% and another 49%.", ko: "스레드는 쪼갤 수 없습니다. 스레드가 일곱 개인 기계는 한 채굴자에게 51%, 다른 채굴자에게 49%를 줄 수 없습니다." },
+    TuneWhole { en: "Threads are whole things, so the split you ask for is rounded to threads. A miner cannot be given half of one.", ko: "스레드는 쪼갤 수 없어서, 요청한 비율은 스레드 단위로 반올림됩니다. 채굴자에게 스레드 반 개를 줄 수는 없습니다." },
     TuneAskMiners { en: "Set the miners to three and press Enter.", ko: "채굴자 수를 셋으로 바꾸고 Enter를 누르세요." },
     TuneAsked { en: "The panel shows the share each miner asked for beside the share it really holds. They rarely match.", ko: "오른쪽에 각 채굴자가 요청한 몫과 실제로 쥔 몫이 나란히 있습니다. 둘이 맞는 경우는 드뭅니다." },
-    TuneAddUp { en: "Shares do not have to add up to 100. Three miners asking for 1, 1 and 2 get a quarter, a quarter and a half.", ko: "몫의 합이 100일 필요는 없습니다. 셋이 1, 1, 2를 요청하면 각각 4분의 1, 4분의 1, 2분의 1을 갖습니다." },
-    TuneOver { en: "Asking for more threads than there are cores brings the two numbers together, at a small cost in speed.", ko: "코어보다 많은 스레드를 요청하면 두 숫자가 가까워집니다. 대신 전체 속도가 조금 줄어듭니다." },
+    TuneAddUp { en: "A share is a weight, not a percentage. Three miners asking for 1, 1 and 2 get a quarter, a quarter and a half.", ko: "몫은 비율을 정하는 가중치이지 백분율이 아닙니다. 셋이 1, 1, 2를 요청하면 각각 4분의 1, 4분의 1, 2분의 1을 갖습니다." },
+    TuneOver { en: "Asking for more threads than this machine has cores brings the two numbers together, at a small cost in speed.", ko: "이 컴퓨터의 코어보다 많은 스레드를 요청하면 두 숫자가 가까워집니다. 대신 전체 속도가 조금 줄어듭니다." },
 
     // ---- Stage 5: the 51% attack ---------------------------------------------------
     AttackOne { en: "Someone pays a merchant, and waits.", ko: "누군가 상인에게 돈을 내고 기다립니다." },
@@ -83,15 +89,30 @@ nmtk_i18n::messages! {
 
     // ---- Stage 6: recap ------------------------------------------------------------
     RecapOne { en: "You hashed headers until one came out below a target. That is the whole of mining.", ko: "목표값보다 작은 값이 나올 때까지 헤더를 해시했습니다. 채굴이란 그게 전부입니다." },
-    RecapTwo { en: "Every number you saw was counted on this machine, not estimated.", ko: "본 숫자는 전부 이 컴퓨터에서 실제로 센 것이지 추정치가 아닙니다." },
-    RecapThree { en: "You changed the difficulty and the miners, and the run answered with different blocks.", ko: "난이도와 채굴자를 바꿨고, 그때마다 나오는 블록이 달라졌습니다." },
-    RecapFour { en: "You bought hash power and tried to erase a payment somebody had already been paid for.", ko: "해시 파워를 사서, 누군가 이미 받은 결제를 지우려고 했습니다." },
-    RecapFive { en: "It failed below half and worked above it. Both endings are the lesson.", ko: "절반에 못 미치면 실패하고 넘으면 성공했습니다. 두 결말 모두가 이 배움의 내용입니다." },
-    RecapSix { en: "The panel holds your own numbers, not anybody else's.", ko: "오른쪽 숫자는 남의 것이 아니라 전부 직접 만든 것입니다." },
+    RecapTwo { en: "Every number you made here was counted on this machine. The one line about 2009 is worked out from the protocol, and says so.", ko: "여기서 만든 숫자는 전부 이 컴퓨터에서 실제로 센 것입니다. 2009년 네트워크 줄 하나만 프로토콜에서 계산한 값이고, 그렇게 적혀 있습니다." },
+    RecapSix { en: "Nothing here spoke to a network. Every block, every hash, every attack happened on this machine.", ko: "여기서 네트워크에 연결한 것은 하나도 없습니다. 블록도 해시도 공격도 전부 이 컴퓨터 안에서 일어났습니다." },
+
+    // The recap is said about what this reader did, so every line of it is composed from the
+    // record rather than written in advance. A quest that congratulates you on a run you never
+    // made has stopped being about you.
+    RecapMinedNone { en: "You have not mined anything here yet — that stage is still waiting.", ko: "여기서는 아직 아무것도 캐지 않았습니다. 그 단계가 그대로 기다리고 있습니다." },
+    RecapMinedBlocks { en: "Blocks you mined here:", ko: "여기서 캔 블록:" },
+    RecapMinedFastest { en: "Fastest this machine went:", ko: "이 컴퓨터가 가장 빨랐던 속도:" },
+    RecapTunedYes { en: "You changed the numbers yourself, and the blocks changed with them.", ko: "숫자를 직접 바꿨고, 블록도 따라 바뀌었습니다." },
+    RecapTunedNo { en: "You left the difficulty and the miners where they started, so every block cost the same.", ko: "난이도와 채굴자를 처음 그대로 뒀으므로 블록 하나의 값은 내내 같았습니다." },
+    RecapAttackNone { en: "You have not sent the attacker at the chain yet — that stage is still waiting.", ko: "아직 공격자를 체인으로 보내지 않았습니다. 그 단계가 그대로 기다리고 있습니다." },
+    RecapAttackRan { en: "What your attacks did:", ko: "돌려 본 공격이 한 일:" },
+    RecapAttackAllLost { en: "Every one of them fell behind and gave up. Below half, catching up is a race you lose.", ko: "전부 뒤처지다 포기했습니다. 절반 아래에서는 따라잡기가 지는 싸움입니다." },
+    RecapAttackWonAboveHalf { en: "Above half it caught up and the payment went away. That is what the number means.", ko: "절반을 넘자 따라잡았고 결제가 사라졌습니다. 그 숫자가 뜻하는 것이 이것입니다." },
+    RecapAttackWonBelowHalf { en: "One of them won from below half. It is a race of chance, and chance sometimes pays.", ko: "절반 아래에서 이긴 것도 있었습니다. 확률 싸움이라, 운이 붙을 때가 있습니다." },
+    RecapAttackLostAboveHalf { en: "One above half still ran out of time. More than half makes the odds good, not the result certain.", ko: "절반을 넘고도 시간이 다한 것이 있었습니다. 절반을 넘으면 확률이 좋아질 뿐, 결과까지 정해지지는 않습니다." },
 
     // ---- Things that happened, reported as they happened ----------------------------
     // Label first, value after: that order reads in every language this program will ever speak.
     EventMiningStarted { en: "mining started", ko: "채굴 시작" },
+    EventOutsideRange { en: "outside what this value allows", ko: "이 값이 가질 수 있는 범위 밖입니다" },
+    EventSetTo { en: "set to", ko: "맞춘 값" },
+    EventNotANumber { en: "that was not a number this value can take", ko: "이 값이 받을 수 있는 숫자가 아닙니다" },
     EventBlock { en: "block", ko: "블록" },
     EventGap { en: "gap", ko: "간격" },
     EventFoundBy { en: "found by", ko: "찾은 이" },
@@ -168,6 +189,10 @@ nmtk_i18n::messages! {
     LabelAheadBy { en: "Attacker ahead by", ko: "공격자가 앞선 폭" },
     LabelBehindBy { en: "Attacker behind by", ko: "공격자가 뒤진 폭" },
     LabelFurthestBehind { en: "Furthest behind", ko: "가장 뒤졌던 폭" },
+    LabelAtTheEnd { en: "At the end", ko: "끝났을 때" },
+    LabelChainNow { en: "The chain everyone follows", ko: "모두가 따르는 체인" },
+    ChainNowAttacker { en: "the attacker's", ko: "공격자의 것" },
+    ChainNowHonest { en: "the honest one", ko: "원래의 것" },
     LabelGivesUp { en: "Gives up after", ko: "포기하는 때" },
     UnitOrBlocks { en: "or blocks", ko: "또는 블록" },
     EventFallingBehind { en: "still behind", ko: "아직 뒤처져 있습니다" },
@@ -191,15 +216,17 @@ nmtk_i18n::messages! {
     // ---- Recap -----------------------------------------------------------------
     RecapTitle { en: "What just happened", ko: "방금 본 것" },
     RecapDifficulty { en: "Practice difficulty", ko: "연습 난이도" },
-    RecapHashRate { en: "Your hash rate", ko: "내 해시 속도" },
+    RecapHashRate { en: "Your fastest hash rate", ko: "가장 빨랐던 해시 속도" },
     RecapBlocks { en: "Blocks you mined", ko: "내가 캔 블록" },
     RecapAtDifficultyOne { en: "At difficulty 1", ko: "난이도 1이라면" },
     RecapNetwork { en: "Network, early 2009", ko: "2009년 초 네트워크" },
     RecapSplit { en: "Miner 1 asked / got", ko: "채굴자 1 요청 / 실제" },
-    RecapAttack { en: "Attack", ko: "공격" },
+    RecapAttacksRun { en: "Attacks you ran", ko: "돌려 본 공격" },
+    RecapAttacksWon { en: "Of those, succeeded", ko: "그중 성공한 것" },
     NotYet { en: "not run yet", ko: "아직 안 돌림" },
     // ---- Keys ------------------------------------------------------------------
     KeyTypeNumber { en: "type a number", ko: "숫자 입력" },
+    KeyRunIt { en: "run it with these", ko: "이 값으로 실행" },
     KeyTurn { en: "turn the value", ko: "값 바꾸기" },
     // ---- When a setting is refused ---------------------------------------------
     ErrorNoMiners { en: "There has to be at least one miner.", ko: "채굴자가 적어도 하나는 있어야 합니다." },
