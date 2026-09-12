@@ -12,5 +12,4 @@ name = "nmtk"
 path = "src/main.rs"
 
 [dependencies]
-nmtk-core = { workspace = true }
 nmtk-tui = { workspace = true }
