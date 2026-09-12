@@ -115,6 +115,7 @@ messages! {
     KeyContinue { en: "continue", ko: "계속" },
     KeyScroll { en: "scroll", ko: "스크롤" },
     ConversationWaiting { en: "Press Enter to carry on.", ko: "Enter를 눌러 계속합니다." },
+    ConversationWorking { en: "Working. The next line arrives when the machine does.", ko: "돌아가는 중입니다. 기계가 답하면 다음 줄이 나옵니다." },
     // ---- Keys -----------------------------------------------------------------
     KeyMove { en: "move", ko: "이동" },
     KeyOpen { en: "open", ko: "열기" },

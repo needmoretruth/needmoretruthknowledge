@@ -4,7 +4,6 @@ members = ["crates/*"]
 # Being rewritten to the conversational KQ standard. They come back the moment they compile
 # against it; shipping a quest that still lectures at the reader is worse than shipping three.
 exclude = [
-    "crates/kq-proof-of-work",
     "crates/kq-transformer",
     "crates/kq-zero-knowledge",
 ]

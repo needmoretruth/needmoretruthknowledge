@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
-use nmtk_kq::meta::StageKind;
-use nmtk_kq::session::{Action, KqSession, Reaction, RunState};
+use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::widgets;
 use nmtk_pow::{
@@ -65,9 +64,174 @@ const KNOB_SHARES_FROM: usize = 3;
 const KNOB_ATTACKER: usize = 0;
 const KNOB_CONFIRMATIONS: usize = 1;
 
+/// Where each stage sits. The order here is the order `lib.rs` declares them in.
+const STAGE_WHY: usize = 0;
+const STAGE_PUZZLE: usize = 1;
+const STAGE_MINE: usize = 2;
+const STAGE_TUNE: usize = 3;
+const STAGE_ATTACK: usize = 4;
+#[cfg(test)]
+const STAGE_RECAP: usize = 5;
+
+/// The most events one stage will report before it stops reporting them. Blocks keep arriving
+/// while a reader reads, and a conversation that grows without end is a log, not a conversation.
+const EVENT_CAP: usize = 24;
+
+/// One move in a stage's conversation.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// The quest says one thing.
+    Say(Msg),
+    /// The quest asks the reader to do something before pressing Enter.
+    Ask(Msg),
+    /// Real work, started the moment this step is reached.
+    Run(Deed),
+    /// The conversation waits here until the machine has done something. Enter does nothing; the
+    /// beats that arrive meanwhile are the answer.
+    Await(Until),
+}
+
+/// Work a step starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deed {
+    /// Mine with whatever the knobs say.
+    Mine,
+    /// Run the 51% attack with whatever the knobs say.
+    Attack,
+}
+
+/// What a waiting step is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// This many blocks found since the stage started.
+    Blocks(u64),
+    /// The attack has ended, one way or the other.
+    AttackOver,
+}
+
+use Deed::{Attack, Mine};
+use Step::{Ask, Await, Run, Say};
+
+/// Why a network burns electricity to agree on anything.
+const WHY: &[Step] = &[
+    Say(Msg::WhyOne),
+    Say(Msg::WhyTwo),
+    Say(Msg::WhyThree),
+    Say(Msg::WhyFour),
+    Say(Msg::WhyFive),
+];
+
+/// What the puzzle actually is, with what it costs on the right.
+const PUZZLE: &[Step] = &[
+    Say(Msg::PuzzleOne),
+    Say(Msg::PuzzleTwo),
+    Say(Msg::PuzzleThree),
+    Say(Msg::PuzzleFour),
+    Say(Msg::PuzzleFive),
+    Say(Msg::PuzzleSix),
+    Say(Msg::PuzzleSeven),
+];
+
+/// The machine does it, and the conversation waits for the blocks.
+const MINE_STAGE: &[Step] = &[
+    Say(Msg::MineOne),
+    Ask(Msg::MineAsk),
+    Run(Mine),
+    Await(Until::Blocks(1)),
+    Say(Msg::MineTwo),
+    Say(Msg::MineThree),
+    Await(Until::Blocks(3)),
+    Say(Msg::MineFour),
+    Say(Msg::MineFive),
+    Say(Msg::MineSix),
+    Say(Msg::MineSeven),
+    Say(Msg::MineEight),
+    Say(Msg::MineNine),
+    Say(Msg::MineTen),
+    Say(Msg::MineEleven),
+];
+
+/// The reader's own numbers, twice, each answered by a real run.
+const TUNE_STAGE: &[Step] = &[
+    Say(Msg::TuneOne),
+    Say(Msg::TuneKeys),
+    Say(Msg::TuneBits),
+    Ask(Msg::TuneAskBits),
+    Run(Mine),
+    Await(Until::Blocks(1)),
+    Say(Msg::TuneAfterBits),
+    Say(Msg::TuneWhole),
+    Ask(Msg::TuneAskMiners),
+    Run(Mine),
+    Await(Until::Blocks(1)),
+    Say(Msg::TuneAsked),
+    Say(Msg::TuneAddUp),
+    Say(Msg::TuneOver),
+];
+
+/// The attack, lost at 30% and won at 51%.
+const ATTACK_STAGE: &[Step] = &[
+    Say(Msg::AttackOne),
+    Say(Msg::AttackTwo),
+    Say(Msg::AttackThree),
+    Say(Msg::AttackFour),
+    Say(Msg::AttackFive),
+    Say(Msg::AttackSix),
+    Say(Msg::AttackSeven),
+    Ask(Msg::AttackAskLow),
+    Run(Attack),
+    Await(Until::AttackOver),
+    Say(Msg::AttackLost),
+    Ask(Msg::AttackAskHigh),
+    Run(Attack),
+    Await(Until::AttackOver),
+    Say(Msg::AttackWon),
+    Say(Msg::AttackWhyName),
+];
+
+/// What the reader now knows, beside the numbers they made.
+const RECAP_STAGE: &[Step] = &[
+    Say(Msg::RecapOne),
+    Say(Msg::RecapTwo),
+    Say(Msg::RecapThree),
+    Say(Msg::RecapFour),
+    Say(Msg::RecapFive),
+    Say(Msg::RecapSix),
+];
+
+const SCRIPTS: [&[Step]; 6] =
+    [WHY, PUZZLE, MINE_STAGE, TUNE_STAGE, ATTACK_STAGE, RECAP_STAGE];
+
+/// Something that happened, kept as numbers so the conversation can be said again in any language.
+enum Happening {
+    MiningStarted { threads: usize, bits: u64 },
+    Block { height: u64, gap: Duration, miner: usize },
+    AttackStarted { share: f64, confirmations: u64 },
+    Paid,
+    Released { confirmations: u64 },
+    Ended { outcome: AttackOutcome, reverted: u64, took: Option<Duration> },
+    Refused(Msg),
+}
+
+/// One happening, filed against the step the reader was on when it happened.
+struct Logged {
+    step: usize,
+    what: Happening,
+}
+
 /// The quest a reader has opened.
 pub struct Session {
-    stage: StageKind,
+    stage: usize,
+    /// How many steps of this stage have been revealed. Step zero shows the moment it opens.
+    revealed: usize,
+    /// Everything that happened in this stage, oldest first.
+    log: Vec<Logged>,
+    /// Blocks the log has already reported, so the same block is never said twice.
+    reported_blocks: u64,
+    /// Whether the attack's milestones have been said yet.
+    said_paid: bool,
+    said_released: bool,
+    said_ended: bool,
     tune_knobs: Vec<Knob>,
     break_knobs: Vec<Knob>,
     chosen: usize,
@@ -88,7 +252,13 @@ impl Session {
         let doublings = u64::from(u64::BITS - 1 - threads.leading_zeros());
         let zero_bits = (BASE_ZERO_BITS + doublings).min(MAX_ZERO_BITS);
         let mut session = Self {
-            stage: StageKind::Brief,
+            stage: 0,
+            revealed: 0,
+            log: Vec::new(),
+            reported_blocks: 0,
+            said_paid: false,
+            said_released: false,
+            said_ended: false,
             tune_knobs: vec![
                 Knob::new(
                     "difficulty",
@@ -125,7 +295,10 @@ impl Session {
                 Knob::new(
                     "attacker-share",
                     KnobValue::Share {
-                        current: 0.51,
+                        // The conversation asks for 30% first and 51% second, so this is where it
+                        // starts: a reader who just presses Enter watches the attack lose, which
+                        // is the half of the lesson people skip.
+                        current: 0.30,
                         min: 0.01,
                         max: 0.99,
                         step: 0.01,
@@ -207,8 +380,8 @@ impl Session {
 
     fn knob_count(&self) -> usize {
         match self.stage {
-            StageKind::Tune => self.tune_knobs.len(),
-            StageKind::Break => self.break_knobs.len(),
+            STAGE_TUNE => self.tune_knobs.len(),
+            STAGE_ATTACK => self.break_knobs.len(),
             _ => 0,
         }
     }
@@ -232,15 +405,15 @@ impl Session {
     fn change_chosen(&mut self, change: impl FnOnce(&mut Knob)) -> Reaction {
         let index = self.chosen;
         let knobs = match self.stage {
-            StageKind::Tune => &mut self.tune_knobs,
-            StageKind::Break => &mut self.break_knobs,
+            STAGE_TUNE => &mut self.tune_knobs,
+            STAGE_ATTACK => &mut self.break_knobs,
             _ => return Reaction::Ignored,
         };
         match knobs.get_mut(index) {
             Some(knob) => change(knob),
             None => return Reaction::Ignored,
         }
-        if self.stage == StageKind::Tune && index == KNOB_MINERS {
+        if self.stage == STAGE_TUNE && index == KNOB_MINERS {
             self.sync_share_knobs();
         }
         Reaction::Handled
@@ -373,12 +546,22 @@ impl Session {
         let real = Target::difficulty_one();
         let estimate = expected_time_to_block(rate, real);
         let network = implied_network_hashrate(real, BITCOIN_TARGET_BLOCK_SECONDS);
-        let share = if network > 0.0 { rate / network } else { f64::NAN };
+        // A multiple, not a percentage. A machine seven times the whole network of early 2009 is
+        // not "715% of a share" — a share cannot be more than all of it, and the reader who reads
+        // that line as a share concludes the screen is broken.
+        let times = if network > 0.0 { rate / network } else { f64::NAN };
         vec![
             (Msg::LabelOneBlockTakes.text(language), span(estimate.expected_seconds, language)),
             (Msg::LabelHalfTakeUnder.text(language), span(estimate.median_seconds, language)),
             (Msg::LabelNetwork2009.text(language), format::hashrate(network)),
-            (Msg::LabelYouAre.text(language), format::percent(share)),
+            (
+                Msg::LabelYouAre.text(language),
+                if times.is_finite() {
+                    format!("{times:.1} {}", Msg::UnitTimesNetwork.text(language))
+                } else {
+                    Msg::Unavailable.text(language).to_string()
+                },
+            ),
         ]
     }
 
@@ -453,10 +636,10 @@ impl Session {
 
     fn run_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let Some(snapshot) = &self.mining_snapshot else {
-            let mut lines = vec![
-                Line::from(Span::styled(Msg::RunIdle.text(language), theme.muted())),
-                Line::from(""),
-            ];
+            let mut lines = vec![Line::from(Span::styled(
+                Msg::StatusIdle.text(language),
+                theme.muted(),
+            ))];
             if let Some(message) = self.refused {
                 lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
                 lines.push(Line::from(""));
@@ -469,7 +652,7 @@ impl Session {
             return;
         };
 
-        let rows: Vec<(&str, String)> = vec![
+        let mut rows: Vec<(&str, String)> = vec![
             (Msg::LabelHashRate.text(language), format::hashrate(snapshot.total_hashrate)),
             (Msg::LabelHashes.text(language), format::count(snapshot.total_hashes)),
             (Msg::LabelBlocksFound.text(language), format::count(snapshot.blocks_found)),
@@ -478,8 +661,12 @@ impl Session {
                 Msg::LabelHashesPerBlock.text(language),
                 format::count(snapshot.expected_hashes_per_block as u64),
             ),
-            (Msg::LabelStale.text(language), format::count(snapshot.stale_blocks)),
         ];
+        // Only when it has happened. A row that reads zero for the whole run is a question the
+        // screen asks the reader and never answers.
+        if snapshot.stale_blocks > 0 {
+            rows.push((Msg::LabelStale.text(language), format::count(snapshot.stale_blocks)));
+        }
         let comparison = self.comparison_rows(snapshot.total_hashrate, language);
 
         let [status, gap, stats, gap2, heading, compare, note, gap3, blocks_head, blocks] =
@@ -611,7 +798,6 @@ impl Session {
         if let Some(message) = self.refused {
             lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
         }
-        lines.push(Line::from(Span::styled(Msg::TuneRestart.text(language), theme.muted())));
         frame.render_widget(Paragraph::new(lines), footer);
     }
 
@@ -663,10 +849,10 @@ impl Session {
 
         let Some(snapshot) = &self.attack_snapshot else {
             let (attacker, honest) = self.attack_threads();
-            let mut lines = vec![
-                Line::from(Span::styled(Msg::BreakHint.text(language), theme.muted())),
-                Line::from(""),
-            ];
+            let mut lines = vec![Line::from(Span::styled(
+                Msg::StatusIdle.text(language),
+                theme.muted(),
+            ))];
             if let Some(message) = self.refused {
                 lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
                 lines.push(Line::from(""));
@@ -720,20 +906,13 @@ impl Session {
             AttackOutcome::Succeeded => State::Bad,
             AttackOutcome::GaveUp => State::Good,
         };
-        let mut lines = vec![
+        vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled(format!("{} ", state.mark()), theme.state(state)),
                 Span::styled(phrases::outcome(outcome).text(language), theme.state(state)),
             ]),
-        ];
-        if outcome == AttackOutcome::GaveUp && snapshot.attacker_share < 0.5 {
-            lines.push(Line::from(Span::styled(
-                Msg::BreakLessonFailed.text(language),
-                theme.muted(),
-            )));
-        }
-        lines
+        ]
     }
 
     /// What the attack has done so far, or what it did.
@@ -878,29 +1057,234 @@ struct SplitRow {
     effective: f64,
 }
 
+impl Session {
+    /// The script of the stage showing now.
+    fn script(&self) -> &'static [Step] {
+        SCRIPTS[self.stage.min(SCRIPTS.len() - 1)]
+    }
+
+    /// Back to the first sentence of this stage, with nothing running and nothing said.
+    fn restart(&mut self) {
+        self.reset();
+        self.revealed = 0;
+        self.log.clear();
+        self.reported_blocks = 0;
+        self.said_paid = false;
+        self.said_released = false;
+        self.said_ended = false;
+    }
+
+    /// Whether the thing a waiting step is waiting for has happened.
+    fn satisfied(&self, until: Until) -> bool {
+        match until {
+            Until::Blocks(wanted) => {
+                self.mining_snapshot.as_ref().is_some_and(|s| s.blocks_in_chain >= wanted)
+            }
+            Until::AttackOver => {
+                self.attack_snapshot.as_ref().is_some_and(|s| s.outcome.is_some())
+            }
+        }
+    }
+
+    /// Reveals the next step and starts whatever it asks for. Used by Enter and by the clock.
+    fn advance(&mut self) -> bool {
+        let script = self.script();
+        if self.revealed + 1 >= script.len() {
+            return false;
+        }
+        self.revealed += 1;
+        if let Run(deed) = script[self.revealed] {
+            match deed {
+                Mine => {
+                    self.reported_blocks = 0;
+                    self.start_run();
+                    if let Some(snapshot) = &self.mining_snapshot {
+                        let threads = snapshot.miners.iter().map(|m| m.threads).sum();
+                        let bits = u64::from(self.zero_bits());
+                        self.say(Happening::MiningStarted { threads, bits });
+                    }
+                }
+                Attack => {
+                    self.said_paid = false;
+                    self.said_released = false;
+                    self.said_ended = false;
+                    self.start_the_attack();
+                    if self.attack.is_some() {
+                        let share = self.attacker_share();
+                        let confirmations = self.confirmations();
+                        self.say(Happening::AttackStarted { share, confirmations });
+                    }
+                }
+            }
+            if let Some(refused) = self.refused.take() {
+                self.say(Happening::Refused(refused));
+            }
+            // A run and the wait for it are one move. Making the reader press Enter again to
+            // start waiting would offer them a key that does nothing but skip the answer.
+            if matches!(script.get(self.revealed + 1), Some(Await(_))) {
+                self.revealed += 1;
+            }
+        }
+        true
+    }
+
+    /// Files one happening against the step the reader is on.
+    fn say(&mut self, what: Happening) {
+        if self.log.len() < EVENT_CAP {
+            self.log.push(Logged { step: self.revealed, what });
+        }
+    }
+
+    /// Reads the running engines and turns anything new into beats.
+    fn notice(&mut self) {
+        let blocks: Vec<(u64, Duration, usize)> = match &self.mining_snapshot {
+            Some(snapshot) if self.mining.is_some() => snapshot
+                .recent_blocks
+                .iter()
+                .filter(|block| block.height > self.reported_blocks)
+                .map(|block| (block.height, block.since_previous, block.miner.0 as usize))
+                .collect(),
+            _ => Vec::new(),
+        };
+        for (height, gap, miner) in blocks {
+            self.reported_blocks = self.reported_blocks.max(height);
+            self.say(Happening::Block { height, gap, miner });
+        }
+
+        let Some(snapshot) = &self.attack_snapshot else { return };
+        if self.attack.is_none() {
+            return;
+        }
+        let paid = snapshot.payment_height.is_some();
+        let released = snapshot.victim_released;
+        let at_release = snapshot.confirmations_at_release.unwrap_or(0);
+        let ending = snapshot
+            .outcome
+            .map(|outcome| (outcome, snapshot.blocks_reverted, snapshot.attack_duration));
+        if paid && !self.said_paid {
+            self.said_paid = true;
+            self.say(Happening::Paid);
+        }
+        if released && !self.said_released {
+            self.said_released = true;
+            self.say(Happening::Released { confirmations: at_release });
+        }
+        if let Some((outcome, reverted, took)) = ending
+            && !self.said_ended
+        {
+            self.said_ended = true;
+            self.say(Happening::Ended { outcome, reverted, took });
+        }
+    }
+
+    /// One happening, said in the reader's language.
+    fn beat_for(&self, what: &Happening, language: Language) -> Beat {
+        match what {
+            Happening::MiningStarted { threads, bits } => Beat::event(format!(
+                "{}  ·  {} {}  ·  {} {} {}",
+                Msg::EventMiningStarted.text(language),
+                Msg::KnobThreads.text(language),
+                threads,
+                Msg::KnobDifficulty.text(language),
+                bits,
+                Msg::UnitZeroBits.text(language),
+            )),
+            Happening::Block { height, gap, miner } => Beat::outcome(
+                State::Good,
+                format!(
+                    "{} {}  ·  {} {}  ·  {} {}",
+                    Msg::EventBlock.text(language),
+                    height,
+                    Msg::EventGap.text(language),
+                    span(gap.as_secs_f64(), language),
+                    Msg::EventFoundBy.text(language),
+                    phrases::miner_name(*miner).text(language),
+                ),
+            ),
+            Happening::AttackStarted { share, confirmations } => Beat::event(format!(
+                "{}  ·  {} {}  ·  {} {}",
+                Msg::EventAttackStarted.text(language),
+                Msg::EventShare.text(language),
+                format::percent(*share),
+                Msg::KnobConfirmations.text(language),
+                confirmations,
+            )),
+            Happening::Paid => Beat::event(Msg::EventPaid.text(language)),
+            Happening::Released { confirmations } => Beat::event(format!(
+                "{}  ·  {} {}",
+                Msg::EventReleased.text(language),
+                Msg::KnobConfirmations.text(language),
+                confirmations,
+            )),
+            Happening::Ended { outcome, reverted, took } => {
+                let won = *outcome == AttackOutcome::Succeeded;
+                let mut text = phrases::outcome(*outcome).text(language).to_string();
+                if *reverted > 0 {
+                    text.push_str(&format!(
+                        "  ·  {} {}",
+                        Msg::EventErased.text(language),
+                        reverted
+                    ));
+                }
+                if let Some(took) = took {
+                    text.push_str(&format!(
+                        "  ·  {} {}",
+                        Msg::EventTook.text(language),
+                        span(took.as_secs_f64(), language)
+                    ));
+                }
+                // The attacker winning is bad news for everyone else, which is the point.
+                Beat::outcome(if won { State::Bad } else { State::Good }, text)
+            }
+            Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+        }
+    }
+}
+
 impl KqSession for Session {
-    fn stage(&self) -> StageKind {
+    fn stage(&self) -> usize {
         self.stage
     }
 
-    fn go_to(&mut self, stage: StageKind) {
-        if stage == self.stage {
+    fn go_to(&mut self, stage: usize) {
+        if stage >= SCRIPTS.len() || stage == self.stage {
             return;
-        }
-        // One run at a time: the attack and the mining run would otherwise fight for the cores.
-        if self.stage == StageKind::Break {
-            self.stop_attack();
-        } else if stage == StageKind::Break {
-            self.stop_mining();
         }
         self.stage = stage;
         self.chosen = 0;
+        // One heavy run at a time: mining beside an attack halves both, and a 51% attack that
+        // cannot win because the screen is stealing its cores is a lie about proof of work.
+        self.restart();
+    }
+
+    fn transcript(&self, language: Language) -> Vec<Beat> {
+        let script = self.script();
+        let mut beats = Vec::new();
+        for (index, step) in script.iter().enumerate().take(self.revealed + 1) {
+            match step {
+                Say(message) => beats.push(Beat::say(message.text(language))),
+                Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Run(_) | Await(_) => {}
+            }
+            for logged in self.log.iter().filter(|logged| logged.step == index) {
+                beats.push(self.beat_for(&logged.what, language));
+            }
+        }
+        beats
+    }
+
+    fn can_advance(&self) -> bool {
+        match self.script().get(self.revealed) {
+            // A waiting step goes on by itself, as soon as the machine has answered.
+            Some(Await(until)) => self.satisfied(*until),
+            _ => self.revealed + 1 < self.script().len() || self.stage + 1 < SCRIPTS.len(),
+        }
     }
 
     fn knobs(&self) -> &[Knob] {
         match self.stage {
-            StageKind::Tune => &self.tune_knobs,
-            StageKind::Break => &self.break_knobs,
+            STAGE_TUNE => &self.tune_knobs,
+            STAGE_ATTACK => &self.break_knobs,
             _ => &[],
         }
     }
@@ -915,19 +1299,23 @@ impl KqSession for Session {
                 self.go_to(stage);
                 Reaction::Handled
             }
-            Action::Go => match self.stage {
-                StageKind::Run | StageKind::Tune => {
-                    self.start_run();
-                    Reaction::Handled
+            Action::Go => {
+                if let Some(Await(until)) = self.script().get(self.revealed)
+                    && !self.satisfied(*until)
+                {
+                    return Reaction::Ignored;
                 }
-                StageKind::Break => {
-                    self.start_the_attack();
+                if self.advance() {
                     Reaction::Handled
+                } else if self.stage + 1 < SCRIPTS.len() {
+                    self.go_to(self.stage + 1);
+                    Reaction::Handled
+                } else {
+                    Reaction::Ignored
                 }
-                _ => Reaction::Ignored,
-            },
+            }
             Action::Reset => {
-                self.reset();
+                self.restart();
                 Reaction::Handled
             }
             Action::PauseOrResume => {
@@ -1009,97 +1397,64 @@ impl KqSession for Session {
             };
             self.attack_snapshot = Some(snapshot);
         }
+        self.notice();
+        // A waiting step carries itself on the moment the machine has answered, so the reader
+        // never has to guess whether pressing Enter would have helped.
+        if let Some(Await(until)) = self.script().get(self.revealed)
+            && self.satisfied(*until)
+        {
+            self.advance();
+        }
     }
 
     fn run_state(&self) -> RunState {
         self.state
     }
 
-    fn explain(&self, language: Language) -> Vec<Line<'static>> {
-        let paragraphs: &[Msg] = match self.stage {
-            StageKind::Brief => &[
-                Msg::BriefProblem,
-                Msg::BriefCost,
-                Msg::BriefNonce,
-                Msg::BriefRule,
-                Msg::BriefPromise,
-            ],
-            StageKind::Run => &[
-                Msg::RunExplainReal,
-                Msg::RunExplainDifficulty,
-                Msg::RunExplainTail,
-                Msg::RunExplainDerived,
-            ],
-            StageKind::Tune => &[
-                Msg::TuneExplainHint,
-                Msg::TuneExplainDifficulty,
-                Msg::TuneShares,
-                Msg::TuneExplainThreads,
-                Msg::TuneExplainOversubscribe,
-            ],
-            StageKind::Break => &[
-                Msg::BreakExplainStory,
-                Msg::BreakExplainPrivate,
-                Msg::BreakExplainPublish,
-                Msg::BreakExplainArithmetic,
-                Msg::BreakExplainSettings,
-            ],
-            StageKind::Recap => &[
-                Msg::RecapExplainOrder,
-                Msg::RecapExplainMining,
-                Msg::RecapExplainTune,
-                Msg::RecapExplainBreak,
-            ],
-        };
-        let mut lines = Vec::new();
-        for (index, message) in paragraphs.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(message.text(language)));
-        }
-        lines
-    }
-
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let title = match self.stage {
-            StageKind::Brief => Msg::PuzzleTitle,
-            StageKind::Run => Msg::RunTitle,
-            StageKind::Tune => Msg::TuneTitle,
-            StageKind::Break => Msg::BreakTitle,
-            StageKind::Recap => Msg::RecapTitle,
+            STAGE_WHY | STAGE_PUZZLE => Msg::PuzzleTitle,
+            STAGE_MINE => Msg::RunTitle,
+            STAGE_TUNE => Msg::TuneTitle,
+            STAGE_ATTACK => Msg::BreakTitle,
+            _ => Msg::RecapTitle,
         };
         let block = theme.titled_panel(title.text(language));
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         match self.stage {
-            StageKind::Brief => self.brief_panel(frame, inner, theme, language),
-            StageKind::Run => {
+            STAGE_WHY | STAGE_PUZZLE => self.brief_panel(frame, inner, theme, language),
+            STAGE_MINE => {
                 // A taller terminal gets the hash rate over time; 80x24 does not have the room.
                 if inner.height >= CURVE_NEEDS_ROWS && self.rates.len() > 1 {
                     let [top, curve] =
                         Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(inner);
                     self.run_panel(frame, top, theme, language);
-                    widgets::curve(frame, curve, theme, &self.rates);
+                    widgets::curve(frame, curve, theme, &self.rates, Msg::LabelHashRate.text(language));
                 } else {
                     self.run_panel(frame, inner, theme, language);
                 }
             }
-            StageKind::Tune => self.tune_panel(frame, inner, theme, language),
-            StageKind::Break => self.break_panel(frame, inner, theme, language),
-            StageKind::Recap => self.recap_panel(frame, inner, theme, language),
+            STAGE_TUNE => self.tune_panel(frame, inner, theme, language),
+            STAGE_ATTACK => self.break_panel(frame, inner, theme, language),
+            _ => self.recap_panel(frame, inner, theme, language),
         }
     }
 
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)> {
         match self.stage {
-            StageKind::Tune | StageKind::Break => vec![
-                ("←→", Msg::KeyTurn.text(language)),
+            STAGE_TUNE | STAGE_ATTACK => vec![
+                ("↑↓ ←→", Msg::KeyTurn.text(language)),
                 ("0-9", Msg::KeyTypeNumber.text(language)),
             ],
             _ => Vec::new(),
         }
+    }
+
+    fn typing(&self) -> bool {
+        self.knob_count() > 0
+            && self.knobs().get(self.chosen).is_some_and(|knob| knob.draft().is_some())
     }
 
     fn close(&mut self) {
@@ -1224,7 +1579,7 @@ fn short_hash(hash: Hash256) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nmtk_kq::theme::{EXPLAIN_PERCENT, MIN_HEIGHT, MIN_WIDTH};
+    use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, split};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1249,11 +1604,10 @@ mod tests {
                     Constraint::Length(1),
                 ])
                 .areas(frame.area());
-                let [_, panel] = Layout::horizontal([
-                    Constraint::Percentage(EXPLAIN_PERCENT),
-                    Constraint::Percentage(100 - EXPLAIN_PERCENT),
-                ])
-                .areas(body);
+                let (talk, run) = split(body.width);
+                let [_, panel] =
+                    Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)])
+                        .areas(body);
                 session.render(frame, panel, Theme::new(true), Language::ENGLISH);
             })
             .expect("draw");
@@ -1278,19 +1632,93 @@ mod tests {
         assert!(text.contains("4,295,032,833"), "difficulty 1 is not costed:\n{text}");
     }
 
+    /// Presses Enter until the stage runs out of steps it can take without waiting.
+    fn walk(session: &mut Session) {
+        for _ in 0..session.script().len() {
+            session.on(Action::Go);
+        }
+    }
+
     #[test]
-    fn the_run_screen_offers_to_start_and_names_the_figure_it_compares_against() {
+    fn a_stage_opens_with_one_sentence_and_not_a_wall() {
+        let session = session();
+        let beats = session.transcript(Language::ENGLISH);
+        assert_eq!(beats.len(), 1, "the reader was handed more than one thing at once");
+    }
+
+    #[test]
+    fn every_beat_of_every_stage_is_short_in_both_languages() {
+        for (stage, script) in SCRIPTS.iter().enumerate() {
+            for language in Language::ALL {
+                let mut session = session();
+                session.go_to(stage);
+                // Every scripted line, without starting any threads.
+                for step in *script {
+                    let text = match step {
+                        Say(message) | Ask(message) => message.text(*language),
+                        _ => continue,
+                    };
+                    assert!(
+                        text.chars().count() <= 160,
+                        "stage {stage} in {language} says too much at once: {text:?}"
+                    );
+                    assert!(!text.is_empty(), "stage {stage} has a blank beat in {language}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_mining_stage_waits_for_a_block_rather_than_talking_over_it() {
         let mut session = session();
-        session.go_to(StageKind::Run);
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        let waiting = matches!(session.script().get(session.revealed), Some(Await(_)));
+        assert!(waiting, "the conversation ran past the block it was about to describe");
+        assert!(!session.can_advance(), "Enter would have skipped the run");
+        assert_eq!(session.run_state(), RunState::Running);
+        session.close();
+    }
+
+    #[test]
+    fn a_block_that_arrives_is_reported_where_the_reader_is_looking() {
+        let mut session = session();
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        // The practice difficulty is sized to this machine, so a block is seconds away.
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(60) {
+            session.tick();
+            if session.log.iter().any(|l| matches!(l.what, Happening::Block { .. })) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let beats = session.transcript(Language::ENGLISH);
+        session.close();
+        assert!(
+            beats.iter().any(|beat| beat.text.starts_with("block ")),
+            "no block was ever reported: {beats:?}"
+        );
+        assert!(session.revealed > 3, "the conversation never carried on by itself");
+    }
+
+    #[test]
+    fn the_puzzle_panel_costs_a_block_at_eighty_by_twenty_four() {
+        let mut session = session();
+        session.go_to(STAGE_PUZZLE);
         let text = draw(&session);
-        assert!(text.contains("Press Enter"), "nothing invites a run:\n{text}");
-        assert!(text.contains("Bitcoin, Jan 2009"), "no comparison offered:\n{text}");
+        assert!(text.contains("The puzzle"), "no panel title:\n{text}");
+        assert!(text.contains("SHA-256"), "the hash is not named:\n{text}");
+        // A block at difficulty 1 costs 2^256/(target+1) hashes, and that number — the one the
+        // engine works out from the target itself — is the whole point of the screen.
+        assert!(text.contains("4,295,032,833"), "difficulty 1 is not costed:\n{text}");
     }
 
     #[test]
     fn tune_shows_the_share_that_was_asked_for_beside_the_share_that_was_got() {
         let mut session = session();
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         let text = draw(&session);
         assert!(text.contains("asked") && text.contains("got"), "no split table:\n{text}");
         // Three threads cannot be split 60/40, so the two numbers have to differ on screen.
@@ -1300,20 +1728,21 @@ mod tests {
     }
 
     #[test]
-    fn break_says_how_the_threads_are_split_before_anything_starts() {
+    fn the_attack_stage_says_how_the_threads_are_split_before_anything_starts() {
         let mut session = session();
-        session.go_to(StageKind::Break);
-        assert_eq!(session.attack_threads(), (2, 1));
+        session.go_to(STAGE_ATTACK);
+        // Three threads, 30% of them: one for the attacker and two for everybody else.
+        assert_eq!(session.attack_threads(), (1, 2));
         let text = draw(&session);
         assert!(text.contains("Attacker's share"), "the knob is missing:\n{text}");
-        assert!(text.contains("51.0%"), "the share is missing:\n{text}");
-        assert!(text.contains("2 / 1"), "the thread split is missing:\n{text}");
+        assert!(text.contains("30.0%"), "the share is missing:\n{text}");
+        assert!(text.contains("1 / 2"), "the thread split is missing:\n{text}");
     }
 
     #[test]
     fn the_recap_admits_what_has_not_been_run_instead_of_inventing_it() {
         let mut session = session();
-        session.go_to(StageKind::Recap);
+        session.go_to(STAGE_RECAP);
         let text = draw(&session);
         assert!(text.contains("What just happened"), "no panel title:\n{text}");
         assert!(text.contains("not run yet"), "an unrun stage was filled in:\n{text}");
@@ -1323,33 +1752,34 @@ mod tests {
     #[test]
     fn a_reader_can_jump_to_every_stage_and_each_one_draws_something() {
         let mut session = session();
-        for stage in StageKind::ALL {
+        for stage in 0..SCRIPTS.len() {
             session.on(Action::Stage(stage));
             assert_eq!(session.stage(), stage);
             let text = draw(&session);
-            assert!(text.contains('╭'), "{stage:?} drew no panel:\n{text}");
+            assert!(text.contains('╭'), "stage {stage} drew no panel:\n{text}");
             assert!(
                 text.chars().filter(|c| c.is_alphanumeric()).count() > 40,
-                "{stage:?} drew an empty panel:\n{text}"
+                "stage {stage} drew an empty panel:\n{text}"
             );
         }
+        session.close();
     }
 
     #[test]
     fn every_stage_with_knobs_offers_them_and_the_others_offer_none() {
         let mut session = session();
-        for stage in StageKind::ALL {
+        for stage in 0..SCRIPTS.len() {
             session.go_to(stage);
-            let expected = matches!(stage, StageKind::Tune | StageKind::Break);
-            assert_eq!(!session.knobs().is_empty(), expected, "{stage:?}");
-            assert_eq!(session.chosen_knob().is_some(), expected, "{stage:?}");
+            let expected = matches!(stage, STAGE_TUNE | STAGE_ATTACK);
+            assert_eq!(!session.knobs().is_empty(), expected, "stage {stage}");
+            assert_eq!(session.chosen_knob().is_some(), expected, "stage {stage}");
         }
     }
 
     #[test]
     fn a_typed_number_beats_the_presets_and_a_refused_one_changes_nothing() {
         let mut session = session();
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         for c in "24".chars() {
             session.on(Action::Type(c));
         }
@@ -1365,7 +1795,7 @@ mod tests {
     #[test]
     fn changing_the_miner_count_changes_how_many_shares_there_are_to_set() {
         let mut session = session();
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         assert_eq!(session.knobs().len(), KNOB_SHARES_FROM + 2);
         session.chosen = KNOB_MINERS;
         session.on(Action::Nudge(1));
@@ -1390,7 +1820,7 @@ mod tests {
     #[test]
     fn asking_for_fewer_threads_than_miners_is_refused_in_words() {
         let mut session = session();
-        session.go_to(StageKind::Tune);
+        session.go_to(STAGE_TUNE);
         session.chosen = KNOB_THREADS;
         for c in "1".chars() {
             session.on(Action::Type(c));
@@ -1404,13 +1834,27 @@ mod tests {
     #[test]
     fn a_run_starts_real_threads_and_closing_brings_them_home() {
         let mut session = session();
-        session.go_to(StageKind::Run);
-        session.on(Action::Go);
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
         assert_eq!(session.run_state(), RunState::Running);
         session.tick();
         assert!(session.mining_snapshot.is_some(), "no snapshot to draw from");
         session.close();
         assert!(session.mining.is_none(), "a worker was left running");
         assert_eq!(session.run_state(), RunState::Idle);
+    }
+
+    /// Leaving a stage must stop its threads. Two heavy runs on one machine halve each other, and
+    /// a 51% attack that loses because the last stage is still mining is a lie about the subject.
+    #[test]
+    fn walking_out_of_a_stage_stops_what_it_started() {
+        let mut session = session();
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        assert!(session.mining.is_some());
+        session.go_to(STAGE_ATTACK);
+        assert!(session.mining.is_none(), "mining carried on into the attack");
+        assert_eq!(session.run_state(), RunState::Idle);
+        session.close();
     }
 }

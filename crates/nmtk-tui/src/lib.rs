@@ -27,7 +27,10 @@ use crate::app::{App, Screen};
 
 /// Every quest the program ships with, newest version and older ones alike.
 fn catalogue() -> Catalogue {
-    Catalogue::new(vec![Box::new(kq_ledgers::Ledgers)])
+    Catalogue::new(vec![
+        Box::new(kq_proof_of_work::ProofOfWork),
+        Box::new(kq_ledgers::Ledgers),
+    ])
 }
 
 /// Runs nmtk until the reader quits, restoring the terminal whatever happens.
@@ -191,9 +194,22 @@ mod tests {
             .join("\n")
     }
 
-    /// The shelf with one quest open on it, ready for keys.
+    /// The shelf with the first quest open on it, ready for keys.
     fn opened(language: Language) -> App {
         let mut app = app_in(language);
+        press(&mut app, KeyCode::Enter);
+        app
+    }
+
+    /// The shelf with one named quest open. Tests that read a quest's own words say which one.
+    fn opened_named(language: Language, title: &str) -> App {
+        let mut app = app_in(language);
+        let at = app
+            .visible()
+            .iter()
+            .position(|quest| quest.title(language) == title)
+            .unwrap_or_else(|| panic!("{title} is not on the shelf"));
+        app.list_index = at;
         press(&mut app, KeyCode::Enter);
         app
     }
@@ -209,10 +225,11 @@ mod tests {
 
     #[test]
     fn opening_a_quest_starts_with_one_sentence_and_its_stages() {
-        let mut app = opened(Language::ENGLISH);
+        let mut app = opened_named(Language::ENGLISH, "Ledger models");
         let text = shot(&mut app, 100, 30);
         println!("\n===== a quest, first beat (100x30) =====\n{text}");
         assert!(text.contains("Where money lives"), "the stage strip is missing:\n{text}");
+        assert!(text.contains("Ledger models"), "the quest is not named:\n{text}");
         assert!(text.contains("1/6"), "the strip does not say where the reader is:\n{text}");
         assert!(
             text.contains("more than one way to write down where"),
@@ -226,7 +243,7 @@ mod tests {
 
     #[test]
     fn enter_adds_one_beat_at_a_time() {
-        let mut app = opened(Language::ENGLISH);
+        let mut app = opened_named(Language::ENGLISH, "Ledger models");
         press(&mut app, KeyCode::Enter);
         let text = shot(&mut app, 100, 30);
         assert!(text.contains("Bitcoin counts coins"), "Enter added nothing:\n{text}");
@@ -317,7 +334,7 @@ mod tests {
 
     #[test]
     fn a_korean_conversation_reaches_the_reader_whole() {
-        let mut app = opened(Language::KOREAN);
+        let mut app = opened_named(Language::KOREAN, "원장 방식");
         for _ in 0..5 {
             press(&mut app, KeyCode::Enter);
         }

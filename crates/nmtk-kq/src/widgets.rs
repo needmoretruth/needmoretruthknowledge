@@ -13,13 +13,16 @@ use ratatui::widgets::{Paragraph, Sparkline};
 use crate::theme::Theme;
 
 /// A column of `name    value` rows, names quiet and values plain.
+///
+/// Padded by how many columns a name takes on screen, not by how many characters it has. A Korean
+/// name is half as many characters and exactly as many columns, and `{:<10}` cannot tell.
 pub fn stats(frame: &mut Frame, area: Rect, theme: Theme, rows: &[(&str, String)]) {
-    let width = rows.iter().map(|(name, _)| name.chars().count()).max().unwrap_or(0);
+    let width = rows.iter().map(|(name, _)| crate::text::width(name)).max().unwrap_or(0);
     let lines: Vec<Line> = rows
         .iter()
         .map(|(name, value)| {
             Line::from(vec![
-                Span::styled(format!("{name:<width$}  "), theme.muted()),
+                Span::styled(format!("{}  ", crate::text::pad(name, width)), theme.muted()),
                 Span::styled(value.clone(), theme.plain()),
             ])
         })
@@ -53,7 +56,12 @@ pub fn bar(frame: &mut Frame, area: Rect, theme: Theme, label: &str, ratio: f64,
 ///
 /// Values are scaled against their own range, so a loss falling from 4.1 to 3.9 still reads as a
 /// fall. A flat series draws as a flat line rather than dividing by zero.
-pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64]) {
+///
+/// `label` says what is being drawn, and is not optional. A curve with no name teaches nothing:
+/// a reader who cannot tell what the line measures reads it as decoration and looks away.
+pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64], label: &str) {
+    let [name_area, line_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
     if finite.is_empty() {
         frame.render_widget(theme.panel(), area);
@@ -64,7 +72,26 @@ pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64]) {
     let span = (high - low).max(f64::EPSILON);
     let scaled: Vec<u64> =
         finite.iter().map(|v| (((v - low) / span) * 100.0).round() as u64).collect();
-    frame.render_widget(Sparkline::default().data(&scaled).style(theme.heading()), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(label.to_string(), theme.muted()),
+            Span::styled(
+                format!("   {}  \u{2192}  {}", short(low), short(high)),
+                theme.muted(),
+            ),
+        ])),
+        name_area,
+    );
+    frame.render_widget(Sparkline::default().data(&scaled).style(theme.heading()), line_area);
+}
+
+/// A number small enough to sit at the end of a curve's name.
+fn short(value: f64) -> String {
+    if value >= 1000.0 || value == 0.0 {
+        nmtk_core::format::count(value as u64)
+    } else {
+        format!("{value:.3}")
+    }
 }
 
 #[cfg(test)]
@@ -112,14 +139,16 @@ mod tests {
     #[test]
     fn a_small_fall_still_shows_as_a_fall() {
         let theme = Theme::new(true);
-        let text = draw(8, 3, |frame, area| curve(frame, area, theme, &[4.1, 4.05, 4.0, 3.9]));
+        let text =
+            draw(20, 3, |frame, area| curve(frame, area, theme, &[4.1, 4.05, 4.0, 3.9], "loss"));
         assert!(text.chars().any(|c| ('▁'..='█').contains(&c)), "no curve was drawn:\n{text}");
+        assert!(text.contains("loss"), "the curve was drawn without a name:\n{text}");
     }
 
     #[test]
     fn an_empty_curve_draws_a_panel_instead_of_dividing_by_zero() {
         let theme = Theme::new(true);
-        let text = draw(8, 3, |frame, area| curve(frame, area, theme, &[]));
+        let text = draw(8, 3, |frame, area| curve(frame, area, theme, &[], "loss"));
         assert!(text.contains('╭'));
     }
 

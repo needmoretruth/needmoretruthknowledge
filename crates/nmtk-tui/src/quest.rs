@@ -3,8 +3,8 @@
 use nmtk_core::Language;
 use nmtk_i18n::{Msg, t};
 use nmtk_kq::meta::{StageRole, StageSpec};
-use nmtk_kq::session::Kq;
-use nmtk_kq::theme::{EXPLAIN_PERCENT, State, Theme};
+use nmtk_kq::session::{Kq, RunState};
+use nmtk_kq::theme::{self, State, Theme};
 use nmtk_kq::{conversation, text};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -27,11 +27,9 @@ pub fn render(
     let [strip, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
     render_strip(frame, strip, quest, definition, theme, language);
 
-    let [talk_area, run_area] = Layout::horizontal([
-        Constraint::Percentage(EXPLAIN_PERCENT),
-        Constraint::Percentage(100 - EXPLAIN_PERCENT),
-    ])
-    .areas(body);
+    let (talk, run) = theme::split(body.width);
+    let [talk_area, run_area] =
+        Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)]).areas(body);
 
     let stage = current_stage(quest);
     let name = stage_name(definition, stage, language);
@@ -42,6 +40,9 @@ pub fn render(
     let mut beats = quest.session.transcript(language);
     if quest.session.can_advance() {
         beats.push(nmtk_kq::Beat::ask(t(Msg::ConversationWaiting, language).to_string()));
+    } else if quest.session.run_state() == RunState::Running {
+        // A conversation that has stopped and says nothing reads as a program that has hung.
+        beats.push(nmtk_kq::Beat::event(t(Msg::ConversationWorking, language).to_string()));
     }
     let furthest = conversation::render(frame, inner, theme, &beats, app.transcript_scroll);
 

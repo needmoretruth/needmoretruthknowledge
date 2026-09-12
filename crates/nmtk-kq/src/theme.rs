@@ -15,9 +15,29 @@ use ratatui::widgets::{Block, BorderType, Padding};
 pub const MIN_WIDTH: u16 = 80;
 /// Smallest screen nmtk will draw on.
 pub const MIN_HEIGHT: u16 = 24;
-/// Share of a quest screen given to the conversation; the rest shows the run itself.
-/// The conversation is the lesson, so it takes the wider half.
+/// Share of a quest screen the conversation would like, before either side's limits.
 pub const EXPLAIN_PERCENT: u16 = 55;
+/// Columns a quest's own panel needs before its tables start losing columns.
+pub const PANEL_MIN: u16 = 40;
+/// Columns past which a line of prose stops being comfortable to read.
+pub const TALK_MAX: u16 = 64;
+/// Columns below which a conversation is a column of single words.
+pub const TALK_MIN: u16 = 30;
+
+/// How a quest screen divides between the conversation and the run, given the width it has.
+///
+/// Neither side is a fixed fraction. A percentage that reads well at 120 columns starves the
+/// panel's tables at 80, and one that fits the tables at 80 gives the conversation a 90-column
+/// line at 160, which nobody can read. So each side states what it needs and the width is shared
+/// out: the panel takes what its tables want, the conversation takes the rest up to a readable
+/// line length, and whatever is left over goes back to the panel.
+pub fn split(total: u16) -> (u16, u16) {
+    let wanted = total * EXPLAIN_PERCENT / 100;
+    let shared = wanted.min(total.saturating_sub(PANEL_MIN)).min(TALK_MAX);
+    // On a screen too narrow for both, the conversation wins: it is the lesson.
+    let talk = if shared < TALK_MIN { wanted.max(TALK_MIN).min(total) } else { shared };
+    (talk, total.saturating_sub(talk))
+}
 /// Never repaint more often than this.
 pub const FRAME_MILLIS: u64 = 100;
 
