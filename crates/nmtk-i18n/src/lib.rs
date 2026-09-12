@@ -138,8 +138,9 @@ messages! {
     KeyQuit { en: "quit", ko: "끝내기" },
     KeySettings { en: "settings", ko: "설정" },
     KeyStage { en: "stage", ko: "단계" },
-    KeyType { en: "type a number", ko: "숫자 입력" },
-    KeyChoose { en: "choose a value", ko: "값 고르기" },
+    KeyType { en: "or type the number", ko: "숫자로 직접 치기" },
+    KeyChoose { en: "pick a value", ko: "값 고르기" },
+    KeyChange { en: "change it", ko: "값 바꾸기" },
     // ---- Settings screen ------------------------------------------------------
     SettingsLanguage { en: "Language", ko: "언어" },
     SettingsLanguageAbout { en: "English is the default. Korean is a choice, and anything not translated yet stays English.", ko: "영어가 기본입니다. 한국어는 선택이고, 아직 번역되지 않은 줄은 영어로 남습니다." },
@@ -160,7 +161,7 @@ messages! {
     // ---- Help -----------------------------------------------------------------
     HelpTitle { en: "Keys", ko: "키" },
     HelpEverywhere { en: "Everywhere", ko: "어디서나" },
-    HelpOnTheShelf { en: "On the shelf", ko: "선반에서" },
+    HelpOnTheShelf { en: "On the quest list", ko: "퀘스트 목록에서" },
     HelpInAQuest { en: "Inside a quest", ko: "퀘스트 안에서" },
     HelpOffline { en: "nmtk never touches the network. Everything here runs on this machine.", ko: "nmtk는 네트워크를 전혀 쓰지 않습니다. 여기 있는 것은 전부 이 컴퓨터에서 돕니다." },
 }

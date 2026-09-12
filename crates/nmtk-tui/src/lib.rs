@@ -120,26 +120,28 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
     let say = |key: &'static str, message: Msg| (key, t(message, language).to_string());
     match app.screen {
         Screen::Welcome => vec![
-            say("↑↓", Msg::KeyMove),
-            say("←→", Msg::KeyChoose),
-            say("l", Msg::KeyLanguage),
             say("Enter", Msg::WelcomeStart),
+            say("↑↓", Msg::KeyMove),
+            say("←→", Msg::KeyChange),
+            say("l", Msg::KeyLanguage),
         ],
+        // Ordered by how badly a reader needs it: a narrow terminal keeps the front of the list
+        // and drops the back, so the key that reveals every other key comes early.
         Screen::Quests => vec![
             say("↑↓", Msg::KeyMove),
             say("Enter", Msg::KeyOpen),
+            say("?", Msg::KeyHelp),
+            say("q", Msg::KeyQuit),
+            say("l", Msg::KeyLanguage),
             say("o", Msg::LabelSort),
             say("f", Msg::LabelFilter),
             say("v", Msg::LabelVersion),
-            say("l", Msg::KeyLanguage),
-            say("?", Msg::KeyHelp),
-            say("q", Msg::KeyQuit),
         ],
         Screen::Settings => vec![
             say("↑↓", Msg::KeyMove),
-            say("←→", Msg::KeyOpen),
-            say("l", Msg::KeyLanguage),
+            say("←→", Msg::KeyChange),
             say("q", Msg::KeyBack),
+            say("l", Msg::KeyLanguage),
         ],
         Screen::Help => vec![say("q", Msg::KeyBack)],
         Screen::Languages => {
@@ -148,7 +150,8 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
         Screen::Quest => {
             // Ordered by how badly a reader needs it, because a narrow terminal keeps the front
             // of this list and drops the back.
-            let mut keys = vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack)];
+            let mut keys =
+                vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack), say("?", Msg::KeyHelp)];
             if let Some(quest) = &app.open {
                 keys.extend(
                     quest.session.keys(language).into_iter().map(|(k, l)| (k, l.to_string())),
@@ -157,7 +160,6 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
             keys.push(say("Tab", Msg::KeyStage));
             keys.push(say("PgUp", Msg::KeyScroll));
             keys.push(say("r", Msg::KeyReset));
-            keys.push(say("?", Msg::KeyHelp));
             keys
         }
     }
@@ -172,6 +174,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::app::SettingItem;
 
     fn app_in(language: Language) -> App {
         let mut app = App::new(catalogue());
@@ -302,6 +305,58 @@ mod tests {
         assert!(app.open.as_ref().unwrap().session.typing(), "the digits never reached the value");
         let text = shot(&mut app, 100, 30);
         assert!(text.contains("17_"), "what was typed is not on screen:\n{text}");
+    }
+
+    #[test]
+    /// A reviewer at 80x24 lost "? help" and "l language" off both the quest list and the quest
+    /// screen, which makes every key they name undiscoverable at the smallest size nmtk supports.
+    #[test]
+    fn the_key_that_reveals_the_other_keys_survives_the_smallest_screen() {
+        for language in Language::ALL {
+            for screen in [Screen::Quests, Screen::Quest] {
+                let mut app = app_in(*language);
+                if screen == Screen::Quest {
+                    press(&mut app, KeyCode::Enter);
+                }
+                let text = shot(&mut app, 80, 24);
+                let bar = text.lines().last().unwrap_or_default().to_string();
+                println!("\n===== key bar ({language}, {screen:?}, 80) =====\n{bar}");
+                // A wide glyph fills two cells and the screen capture gives the second one back
+                // as a space, so both sides are compared without them.
+                let flat = bar.replace(' ', "");
+                let help = format!("?{}", t(Msg::KeyHelp, *language).replace(' ', ""));
+                assert!(flat.contains(&help), "help is missing: {bar:?}");
+            }
+        }
+    }
+
+    /// Changing a setting on the first launch replaced the sentence explaining that setting with
+    /// the word "Saved.", so the reader trying the arrows to find out what it does lost the answer.
+    #[test]
+    fn changing_a_setting_keeps_the_sentence_that_explains_it() {
+        let mut app = app_in(Language::ENGLISH);
+        app.screen = Screen::Welcome;
+        app.settings_index = 1;
+        press(&mut app, KeyCode::Left);
+        let text = shot(&mut app, 80, 30);
+        println!("\n===== welcome after a change =====\n{text}");
+        let about = t(SettingItem::Threads.about(), Language::ENGLISH);
+        let first_words: String = about.split(' ').take(4).collect::<Vec<_>>().join(" ");
+        assert!(text.contains(&first_words), "the explanation is gone:\n{text}");
+    }
+
+    /// Right means more. With `auto` stored as zero and sorted first, right on "auto (11)" used
+    /// to drop the machine to one thread.
+    #[test]
+    fn stepping_right_from_auto_never_drops_to_one_thread() {
+        let mut app = app_in(Language::ENGLISH);
+        app.screen = Screen::Welcome;
+        app.settings_index = 1;
+        let cores = app.machine.logical_cores.max(1);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.settings.worker_threads, cores, "left from auto is every core");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.settings.worker_threads, 0, "right goes back to auto");
     }
 
     #[test]

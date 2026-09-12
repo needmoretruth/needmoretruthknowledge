@@ -12,7 +12,10 @@ use ratatui::widgets::{Paragraph, Wrap};
 use nmtk_kq::Theme;
 
 /// The keys, grouped by where they work. `None` in place of a key starts a new group.
-const KEYS: [(Option<&str>, Msg); 17] = [
+///
+/// A key that works and is not here is the same failure as a key that is here and does nothing:
+/// the reader who never finds Space concludes a run cannot be paused.
+const KEYS: [(Option<&str>, Msg); 20] = [
     (None, Msg::HelpEverywhere),
     (Some("l"), Msg::KeyLanguage),
     (Some("s"), Msg::KeySettings),
@@ -28,7 +31,10 @@ const KEYS: [(Option<&str>, Msg); 17] = [
     (Some("Enter"), Msg::KeyContinue),
     (Some("Tab"), Msg::KeyStage),
     (Some("↑ ↓"), Msg::KeyChoose),
-    (Some("← →  0-9"), Msg::KeyType),
+    (Some("← →"), Msg::KeyChange),
+    (Some("0-9"), Msg::KeyType),
+    (Some("Space"), Msg::KeyPause),
+    (Some("r"), Msg::KeyReset),
     (Some("PgUp PgDn"), Msg::KeyScroll),
 ];
 
@@ -41,7 +47,7 @@ pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, them
         .iter()
         .map(|(key, label)| match key {
             Some(key) => Line::from(vec![
-                Span::styled(format!("  {key:<12}"), theme.heading()),
+                Span::styled(format!("  {}", nmtk_kq::text::column(key, 12)), theme.heading()),
                 Span::styled(t(*label, language), theme.plain()),
             ]),
             // A group heading. The blank column keeps the keys under it lined up.

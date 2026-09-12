@@ -455,20 +455,35 @@ impl App {
         let next_index =
             if step > 0 { (at + 1) % count } else { (at + count - 1) % count };
         self.settings.language = Language::ALL[next_index];
-        self.remember();
+    }
+
+    /// Thread counts in the order a reader expects them: 1, 2, … every core, then `auto`.
+    ///
+    /// `auto` is stored as 0 but it is the largest choice, not the smallest, so it belongs at the
+    /// top of the run. With it at the bottom, pressing right on `auto (11)` dropped the machine
+    /// to one thread, which reads as the key doing the opposite of what it says.
+    fn step_threads(&mut self, step: i32) {
+        let cores = self.machine.logical_cores.max(1) as i32;
+        let at = match self.settings.worker_threads as i32 {
+            0 => cores,
+            threads => threads - 1,
+        };
+        let next = (at + step).clamp(0, cores);
+        self.settings.worker_threads = if next == cores { 0 } else { (next + 1) as usize };
     }
 
     fn adjust_setting(&mut self, step: i32) {
+        let before = self.settings.clone();
         match SettingItem::ALL[self.settings_index.min(SettingItem::ALL.len() - 1)] {
             SettingItem::Language => self.step_language(step),
-            SettingItem::Threads => {
-                let max = self.machine.logical_cores as i32;
-                let current = self.settings.worker_threads as i32;
-                self.settings.worker_threads = (current + step).clamp(0, max) as usize;
-            }
+            SettingItem::Threads => self.step_threads(step),
             SettingItem::Colour => self.settings.colour = !self.settings.colour,
         }
-        self.remember();
+        // A key that changed nothing says nothing. "Saved." after a left arrow already at the
+        // leftmost value tells the reader something happened when nothing did.
+        if self.settings != before {
+            self.remember();
+        }
     }
 
     fn remember(&mut self) {

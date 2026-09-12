@@ -55,6 +55,16 @@ pub fn rpad(text: &str, columns: usize) -> String {
     out
 }
 
+/// `text` as one column of a table: exactly `columns` cells, whatever it started as.
+///
+/// This is what a column needs and [`pad`] is not. `pad` widens but never narrows, so a label
+/// longer than its column runs straight into the value beside it — in Korean, where every glyph is
+/// two cells, that happens to labels that fit comfortably in English. A column that cannot hold
+/// its text loses the tail of the text, never the gap after it.
+pub fn column(text: &str, columns: usize) -> String {
+    pad(&truncate(text, columns), columns)
+}
+
 /// `text` cut to at most `columns` cells, ending in `…` when something was removed.
 pub fn truncate(text: &str, columns: usize) -> String {
     if width(text) <= columns {
@@ -144,6 +154,27 @@ pub fn wrap(text: &str, columns: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this exists for: `pad` widens and never narrows, so a label wider than its column
+    /// collides with the value after it. Korean reaches that width on labels English never does.
+    #[test]
+    fn a_column_is_exactly_as_wide_as_it_was_asked_for() {
+        assert_eq!(width(&column("hash that skips the commitment", 20)), 20);
+        assert_eq!(width(&column("알게 되는 것", 7)), 7);
+        assert_eq!(width(&column("가진 것", 7)), 7);
+        assert_eq!(width(&column("ok", 7)), 7);
+        // pad, on its own, does not: this is the collision.
+        assert!(width(&pad("알게 되는 것", 7)) > 7);
+    }
+
+    #[test]
+    fn a_column_never_swallows_the_gap_after_it() {
+        // Two columns drawn side by side stay two columns, in either language.
+        for label in ["hash that skips the commitment", "커밋먼트를 건너뛴 해시"] {
+            let row = format!("{}{}", column(label, 22), "rejected");
+            assert!(row.contains(' '), "{row:?} has no gap between the two columns");
+        }
+    }
 
     #[test]
     fn a_korean_column_is_padded_by_cells_rather_than_characters() {

@@ -15,7 +15,7 @@ use crate::app::{App, SettingItem};
 use crate::logo;
 use crate::settings_screen::value_of;
 use nmtk_kq::Theme;
-use nmtk_kq::text::{pad, wrap};
+use nmtk_kq::text::wrap;
 
 /// The four lines that say what this is.
 const ABOUT: [Msg; 4] = [Msg::WelcomeOne, Msg::WelcomeTwo, Msg::WelcomeThree, Msg::WelcomeFour];
@@ -37,13 +37,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         }
     }
     let selected = app.settings_index.min(SettingItem::ALL.len() - 1);
-    let hint: Vec<Line> = match app.status {
-        Some(status) => vec![Line::from(Span::styled(t(status, language), theme.good()))],
-        None => wrap(t(SettingItem::ALL[selected].about(), language), column.width as usize)
+    // The confirmation joins the explanation rather than replacing it. A reader pressing the
+    // arrows to see what a setting does was losing the sentence that said what it does.
+    let mut hint: Vec<Line> =
+        wrap(t(SettingItem::ALL[selected].about(), language), column.width as usize)
             .into_iter()
             .map(|text| Line::from(Span::styled(text, theme.muted())))
-            .collect(),
-    };
+            .collect();
+    if let Some(status) = app.status {
+        hint.push(Line::from(Span::styled(t(status, language), theme.good())));
+    }
 
     let [banner, about_area, rows_area, hint_area, _] = Layout::vertical([
         Constraint::Length(if room_for_logo { logo::LARGE_HEIGHT + 1 } else { 1 }),
@@ -69,7 +72,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let marker = if index == selected { "▸ " } else { "  " };
             let style = if index == selected { theme.selected() } else { theme.plain() };
             Line::from(vec![
-                Span::styled(format!("{marker}{}", pad(t(item.title(), language), 18)), style),
+                Span::styled(format!("{marker}{}", nmtk_kq::text::column(t(item.title(), language), 18)), style),
                 Span::styled(value_of(*item, app, language), theme.heading()),
             ])
         })

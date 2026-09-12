@@ -36,8 +36,10 @@ pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, Strin
     for (key, label) in keys {
         let pair = width(key) + 1 + width(label);
         let gap = if used > 1 { GAP.len() } else { 0 };
+        // Stop rather than skip. Carrying on would keep whichever later key happened to be short
+        // enough, which is how "? help" came to vanish at 80 columns while "v version" stayed.
         if used + gap + pair > room {
-            continue;
+            break;
         }
         if gap > 0 {
             spans.push(Span::styled(GAP, theme.muted()));
