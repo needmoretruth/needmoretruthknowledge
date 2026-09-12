@@ -209,6 +209,15 @@ const STAGE_SIDES: usize = 6;
 /// The most events one stage reports.
 const EVENT_CAP: usize = 24;
 
+/// What a [`Step::Tell`] is about: a sentence built from what this machine measured.
+#[derive(Debug, Clone, Copy)]
+enum Topic {
+    /// The range of proving times and proof sizes the reader saw.
+    Spread,
+    /// How many attacks the reader ran, and how many the verifier let through.
+    Attacks,
+}
+
 /// One move in a stage's conversation.
 #[derive(Debug, Clone, Copy)]
 enum Step {
@@ -216,6 +225,8 @@ enum Step {
     Ask(Msg),
     Run(Deed),
     Await(Until),
+    /// One sentence, built from what this machine measured.
+    Tell(Topic),
 }
 
 /// Work a step starts.
@@ -236,7 +247,7 @@ enum Until {
 }
 
 use Deed::{Message, Sigma, Systems};
-use Step::{Ask, Await, Run, Say};
+use Step::{Ask, Await, Run, Say, Tell};
 
 /// What a proof that shows nothing actually means.
 const WHAT: &[Step] = &[
@@ -339,6 +350,10 @@ const SIDES: &[Step] = &[
     Say(Msg::SidesFive),
     Say(Msg::SidesSix),
     Say(Msg::SidesSeven),
+    // The other three quests end on the reader's own numbers. This one ended on a panel of
+    // somebody else's, which is the longest quest finishing with nothing of the reader's in it.
+    Tell(Topic::Spread),
+    Tell(Topic::Attacks),
 ];
 
 const SCRIPTS: [&[Step]; 7] = [WHAT, FOUR, RUN, MESSAGES, TUNE, BREAK, SIDES];
@@ -475,6 +490,52 @@ impl Session {
     fn forget_results(&mut self) {
         self.stop_and_forget_the_telling();
         self.outcomes.clear();
+    }
+
+    /// A sentence about what this machine measured, for the end of the quest.
+    fn tell(&self, topic: Topic, language: Language) -> String {
+        let measured: Vec<&Measurement> =
+            self.outcomes.iter().map(|outcome| &outcome.measurement).collect();
+        if measured.is_empty() {
+            return Msg::YoursNothing.text(language).to_string();
+        }
+        match topic {
+            Topic::Spread => {
+                let slowest = measured.iter().map(|m| m.prove_nanos).max().unwrap_or(0);
+                let quickest = measured.iter().map(|m| m.prove_nanos).min().unwrap_or(0);
+                let unit = unit_for(slowest);
+                let largest = measured.iter().map(|m| m.proof_bytes).max().unwrap_or(0);
+                let smallest = measured.iter().map(|m| m.proof_bytes).min().unwrap_or(0);
+                format!(
+                    "{}: {} {} → {}, {} {} → {}.",
+                    Msg::YoursSpread.text(language),
+                    Msg::ColumnProve.text(language),
+                    time_in(quickest, unit),
+                    time_in(slowest, unit),
+                    Msg::ColumnSize.text(language),
+                    format::bytes(smallest as u64),
+                    format::bytes(largest as u64),
+                )
+            }
+            Topic::Attacks => {
+                let attempts: Vec<&ForgeryAttempt> =
+                    self.outcomes.iter().flat_map(|o| o.forgery.attempts.iter()).collect();
+                let through = attempts.iter().filter(|a| a.accepted).count();
+                let counted = format!(
+                    "{} {}  ·  {} {}",
+                    Msg::WordTried.text(language),
+                    attempts.len(),
+                    Msg::BreakSummaryAccepted.text(language),
+                    through
+                );
+                let verdict = if through == 0 {
+                    Msg::YoursAttacksNone
+                } else {
+                    Msg::YoursAttacksThrough
+                };
+                format!("{counted}. {}", verdict.text(language))
+            }
+        }
     }
 
     fn outcome(&self, stage: Stage) -> Option<&StageOutcome> {
@@ -1275,6 +1336,7 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1731,6 +1793,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The other three quests end on the reader's own numbers. This one ended on a panel of
+    /// somebody else's, so a reviewer reached the end of the longest quest with nothing of theirs.
+    #[test]
+    fn the_quest_ends_on_numbers_this_machine_measured() {
+        let session = finished();
+        for language in Language::ALL {
+            let spread = session.tell(Topic::Spread, *language);
+            let attacks = session.tell(Topic::Attacks, *language);
+            println!("{language}: {spread}\n{language}: {attacks}");
+            for said in [&spread, &attacks] {
+                assert!(said.chars().count() <= 160, "too much at once: {said:?}");
+                assert!(
+                    said != Msg::YoursNothing.text(*language),
+                    "a finished run reported nothing measured"
+                );
+            }
+            assert!(spread.contains('→'), "no range in {spread:?}");
+            assert!(attacks.contains(|c: char| c.is_ascii_digit()), "no count in {attacks:?}");
+        }
+
+        // With nothing run, it says so rather than inventing a range.
+        let empty = Session::new(&machine());
+        assert_eq!(
+            empty.tell(Topic::Spread, Language::ENGLISH),
+            Msg::YoursNothing.text(Language::ENGLISH)
+        );
     }
 
     #[test]

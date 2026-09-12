@@ -89,6 +89,12 @@ nmtk_i18n::messages! {
     SidesSix { en: "On a transparent chain all three are public to everyone, forever.", ko: "투명한 체인에서는 셋 다 모두에게 영원히 공개됩니다." },
     SidesSeven { en: "Up and down move between the four systems. The attacker's rows are the ones that change.", ko: "위아래로 네 방식 사이를 옮깁니다. 바뀌는 것은 공격자의 줄입니다." },
 
+    // ---- The reader's own numbers, at the end -------------------------------------------
+    YoursNothing { en: "Nothing has been measured yet on this machine. Walk back to the running stage and press Enter.", ko: "이 컴퓨터에서 아직 잰 것이 없습니다. 실행 단계로 돌아가 Enter를 누르세요." },
+    YoursSpread { en: "Your own numbers, measured here", ko: "여기서 직접 잰 숫자" },
+    YoursAttacksNone { en: "Every attack you ran was refused. The systems held.", ko: "돌려 본 공격이 전부 거절됐습니다. 방식들이 막아 냈습니다." },
+    YoursAttacksThrough { en: "That many got through against a verifier nobody touched, and that is the whole reason anyone asks how a system was set up.", ko: "아무도 손대지 않은 검증자를 상대로 그만큼이 통과했습니다. 사람들이 그 방식을 어떻게 설정했는지 따지는 이유가 바로 그것입니다." },
+
     // ---- Things that happened ------------------------------------------------------------------
     EventRunning { en: "running on this machine", ko: "이 컴퓨터에서 도는 중" },
     EventProved { en: "prove", ko: "증명" },
