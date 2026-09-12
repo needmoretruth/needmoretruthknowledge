@@ -641,6 +641,22 @@ mod tests {
         }
     }
 
+    /// Waits for the hashing to get somewhere, rather than for the clock.
+    ///
+    /// A fixed sleep asserts that a busy machine is a fast one. These tests drive real threads,
+    /// and on a machine already running something else a tenth of a second buys no hashes at all —
+    /// which made them fail for a reason that had nothing to do with the code.
+    fn wait_for_hashes(handle: &MiningHandle, wanted: u64, limit: Duration) -> MiningSnapshot {
+        let deadline = Instant::now() + limit;
+        loop {
+            let snapshot = handle.snapshot();
+            if snapshot.total_hashes >= wanted || Instant::now() > deadline {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn real_threads_really_find_blocks_and_the_chain_grows() {
         let config = MiningConfig::new(
@@ -698,14 +714,19 @@ mod tests {
         // started first. Measuring the difference between two later readings leaves that out.
         thread::sleep(Duration::from_millis(300));
         let start = handle.snapshot();
-        thread::sleep(Duration::from_millis(900));
-        let end = handle.snapshot();
+        // Enough hashing for the ratio to settle, however long that takes on a busy machine.
+        const ENOUGH: u64 = 4_000_000;
+        let end = wait_for_hashes(&handle, start.total_hashes + ENOUGH, Duration::from_secs(30));
         handle.stop();
         assert_eq!(end.miners[0].threads, 51);
         assert_eq!(end.miners[1].threads, 49);
         let bigger = end.miners[0].hashes.saturating_sub(start.miners[0].hashes) as f64;
         let smaller = end.miners[1].hashes.saturating_sub(start.miners[1].hashes) as f64;
-        assert!(bigger + smaller > 0.0, "nothing was hashed");
+        assert!(
+            bigger + smaller >= ENOUGH as f64,
+            "only {} hashes in thirty seconds",
+            bigger + smaller
+        );
         let share = bigger / (bigger + smaller);
         assert!(
             (share - 0.51).abs() < 0.08,
@@ -721,19 +742,20 @@ mod tests {
             2,
         );
         let handle = start_mining(config).expect("valid config");
-        thread::sleep(Duration::from_millis(150));
+        let working = wait_for_hashes(&handle, 1, Duration::from_secs(20));
+        assert!(working.total_hashes > 0, "the threads never hashed anything to pause");
         handle.pause();
-        thread::sleep(Duration::from_millis(120));
+        // Long enough for anything still in flight to land before the two readings are compared.
+        thread::sleep(Duration::from_millis(200));
         let paused = handle.snapshot();
         thread::sleep(Duration::from_millis(250));
         let still_paused = handle.snapshot();
-        assert!(paused.total_hashes > 0);
         assert_eq!(paused.total_hashes, still_paused.total_hashes, "hashing went on while paused");
         assert!(still_paused.paused);
 
         handle.resume();
-        thread::sleep(Duration::from_millis(200));
-        let resumed = handle.snapshot();
+        let resumed =
+            wait_for_hashes(&handle, still_paused.total_hashes + 1, Duration::from_secs(20));
         handle.stop();
         assert!(resumed.total_hashes > still_paused.total_hashes, "resuming did not restart work");
         assert!(!resumed.paused);
