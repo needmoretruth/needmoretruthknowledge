@@ -259,6 +259,34 @@ mod tests {
         }
     }
 
+    /// A reviewer finished a quest and found the list exactly as they had left it, with no way
+    /// to tell which of the four they had done.
+    #[test]
+    fn a_finished_quest_is_marked_on_the_list_and_remembered() {
+        let mut app = opened(Language::ENGLISH);
+        let id = app.open.as_ref().expect("a quest is open").id.to_string();
+        assert!(!app.settings.has_finished(&id), "nothing has been finished yet");
+
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Tab);
+        }
+        for _ in 0..80 {
+            press(&mut app, KeyCode::Enter);
+        }
+        assert!(app.settings.has_finished(&id), "finishing the quest was not remembered");
+
+        press(&mut app, KeyCode::Char('q'));
+        let text = shot(&mut app, 100, 30);
+        println!("\n===== the list, one quest finished =====\n{text}");
+        // The row, not the panel beside it: only the row carries the version.
+        let title = app.visible()[0].title(Language::ENGLISH).to_string();
+        let row = text
+            .lines()
+            .find(|line| line.contains(&title) && line.contains("v0."))
+            .expect("the finished quest is on the list");
+        assert!(row.contains('+'), "the finished quest carries no mark: {row:?}");
+    }
+
     /// `v` opened a view titled for older versions that held only the current one.
     #[test]
     fn asking_for_older_versions_of_a_quest_that_has_none_says_so() {

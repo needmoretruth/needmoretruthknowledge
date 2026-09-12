@@ -120,16 +120,21 @@ fn rows<'a>(
         }
         let picked = index == chosen;
         let marker = if picked { State::Chosen.mark() } else { " " };
+        let done = app.settings.has_finished(meta.id.as_str());
         let name = quest.title(language);
         let style = if picked { theme.selected() } else { theme.plain() };
         let time = format!("{:>3}{}  ", meta.minutes, t(Msg::LabelMinutes, language));
         let version = format!("v{}", meta.version);
         // The name gives up its room first. A version cut to "v0." is worse than a title cut
         // short, because a shortened title still says which quest it is.
-        let fixed = 2 + 7 + nmtk_kq::text::width(&time) + nmtk_kq::text::width(&version);
+        let fixed = 4 + 7 + nmtk_kq::text::width(&time) + nmtk_kq::text::width(&version);
         let room = width.saturating_sub(fixed).clamp(12, 26);
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), theme.state(State::Chosen)),
+            Span::styled(
+                if done { format!("{} ", State::Good.mark()) } else { "  ".to_string() },
+                theme.state(State::Good),
+            ),
             Span::styled(column(name, room), style),
             Span::styled(format!(" {} ", meta.difficulty.marks()), theme.muted()),
             Span::styled(time, theme.muted()),

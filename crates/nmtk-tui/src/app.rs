@@ -303,6 +303,23 @@ impl App {
         if action == Action::Go && at_end {
             self.step_stage(1);
         }
+        self.note_if_finished();
+    }
+
+    /// Remembers a quest whose last stage has said everything it has to say.
+    ///
+    /// A shelf that looks the same after finishing a quest as it did before cannot tell the
+    /// reader where they got to, and four unmarked quests is four decisions to make again.
+    fn note_if_finished(&mut self) {
+        let Some(quest) = &self.open else { return };
+        let last = quest.session.stage() + 1 >= quest.stages.len();
+        if !last || !quest.session.at_end() {
+            return;
+        }
+        let id = quest.id.to_string();
+        if self.settings.remember_finished(&id) {
+            let _ = self.settings.save();
+        }
     }
 
     /// Moves one stage along, stopping at both ends rather than wrapping — a reader who holds Tab

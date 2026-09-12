@@ -21,11 +21,21 @@ pub struct Settings {
     pub worker_threads: usize,
     /// Whether to use colour at all. Off gives a screen that reads on a monochrome terminal.
     pub colour: bool,
+    /// Quests the reader has reached the end of, by id.
+    ///
+    /// The only thing nmtk remembers about what someone did. A shelf of four quests that looks
+    /// identical after finishing one cannot tell the reader where they got to.
+    pub finished: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { language: Language::default(), worker_threads: 0, colour: true }
+        Self {
+            language: Language::default(),
+            worker_threads: 0,
+            colour: true,
+            finished: Vec::new(),
+        }
     }
 }
 
@@ -74,6 +84,20 @@ impl Settings {
             _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
         };
         Some(base.join("nmtk").join("settings.toml"))
+    }
+
+    /// Records that a quest was finished. Answers whether anything changed, so a caller knows
+    /// whether it is worth writing the file.
+    pub fn remember_finished(&mut self, id: &str) -> bool {
+        if self.finished.iter().any(|done| done == id) {
+            return false;
+        }
+        self.finished.push(id.to_string());
+        true
+    }
+
+    pub fn has_finished(&self, id: &str) -> bool {
+        self.finished.iter().any(|done| done == id)
     }
 
     /// The thread count to actually use, resolving 0 against the machine.
@@ -137,7 +161,12 @@ mod tests {
 
     #[test]
     fn settings_survive_a_round_trip() {
-        let settings = Settings { language: Language::KOREAN, worker_threads: 3, colour: false };
+        let settings = Settings {
+            language: Language::KOREAN,
+            worker_threads: 3,
+            colour: false,
+            finished: vec!["consensus.proof-of-work".to_string()],
+        };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
     }
