@@ -42,8 +42,8 @@ impl Kq for ProofOfWork {
         KqMeta {
             id: KqId("consensus.proof-of-work"),
             version: Version::new(0, 0, 1),
-            released: Stamp::new(2026, 9, 12, 10, 22, 31),
-            updated: Stamp::new(2026, 9, 12, 10, 22, 31),
+            released: Stamp::new(2026, 9, 12, 10, 20, 48),
+            updated: Stamp::new(2026, 9, 12, 12, 16, 38),
             category: Category::Consensus,
             subcategory: "proof-of-work",
             difficulty: Difficulty::Medium,
