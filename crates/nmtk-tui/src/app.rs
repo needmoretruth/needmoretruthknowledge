@@ -6,8 +6,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nmtk_core::{Language, MachineProfile, Settings};
 use nmtk_i18n::Msg;
-use nmtk_kq::meta::{KqId, KqVersion, StageKind};
-use nmtk_kq::session::{Action, Kq, KqSession};
+use nmtk_kq::meta::{KqId, StageSpec, Version};
+use nmtk_kq::session::{Action, Kq, KqSession, Reaction};
 use nmtk_kq::{Catalogue, Filter, SortKey};
 
 /// A row on the settings screen.
@@ -55,9 +55,9 @@ pub enum Screen {
 /// The quest a reader is inside.
 pub struct OpenQuest {
     pub id: KqId,
-    pub version: KqVersion,
+    pub version: Version,
     pub title: &'static str,
-    pub stages: &'static [StageKind],
+    pub stages: &'static [StageSpec],
     pub session: Box<dyn KqSession>,
 }
 
@@ -78,6 +78,12 @@ pub struct App {
     pub settings_index: usize,
     /// Which row the language list is on while it is open.
     pub language_index: usize,
+    /// Lines hidden above the conversation. Zero means the oldest beat is at the top.
+    pub transcript_scroll: usize,
+    /// How far the conversation could be scrolled, learned from the last draw.
+    pub transcript_furthest: usize,
+    /// Whether the conversation follows the newest beat. True until the reader scrolls up.
+    pub transcript_follows: bool,
     /// Where the language list was opened from, so choosing goes back there.
     behind_languages: Option<Screen>,
     pub status: Option<Msg>,
@@ -99,6 +105,9 @@ impl App {
             open: None,
             settings_index: 0,
             language_index: 0,
+            transcript_scroll: 0,
+            transcript_furthest: 0,
+            transcript_follows: true,
             behind_languages: None,
             status: None,
             quit: false,
@@ -220,10 +229,53 @@ impl App {
                 _ => {}
             }
         }
-        let Some(action) = action_for(code, typing, self.stages()) else { return };
-        if let Some(quest) = &mut self.open {
-            quest.session.on(action);
+        // Scrolling the conversation belongs to the shell: every quest has one.
+        match code {
+            KeyCode::PageUp => {
+                self.scroll_conversation(-8);
+                return;
+            }
+            KeyCode::PageDown => {
+                self.scroll_conversation(8);
+                return;
+            }
+            _ => {}
         }
+        // Tab walks the stages. It has to be a key no knob wants, because a quest with values to
+        // type cannot also spend the digits on jumping about.
+        match code {
+            KeyCode::Tab => {
+                self.step_stage(1);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.step_stage(-1);
+                return;
+            }
+            _ => {}
+        }
+        let tunable = self.open.as_ref().is_some_and(|quest| !quest.session.knobs().is_empty());
+        let Some(action) = action_for(code, typing, tunable, self.stages()) else { return };
+        if let Some(quest) = &mut self.open
+            && quest.session.on(action) == Reaction::Handled
+        {
+            // A beat the reader caused is a beat they want to see.
+            self.transcript_follows = true;
+        }
+    }
+
+    /// Moves one stage along, stopping at both ends rather than wrapping — a reader who holds Tab
+    /// at the last stage should not find themselves back at the first.
+    fn step_stage(&mut self, step: i32) {
+        let count = self.stages().len();
+        let Some(quest) = &mut self.open else { return };
+        let at = quest.session.stage() as i32 + step;
+        if at < 0 || at as usize >= count {
+            return;
+        }
+        quest.session.on(Action::Stage(at as usize));
+        self.transcript_scroll = 0;
+        self.transcript_follows = true;
     }
 
     fn on_key_settings(&mut self, code: KeyCode) {
@@ -247,8 +299,34 @@ impl App {
     }
 
     /// The stages the open quest has, or nothing when none is open.
-    fn stages(&self) -> &'static [StageKind] {
+    fn stages(&self) -> &'static [StageSpec] {
         self.open.as_ref().map(|quest| quest.stages).unwrap_or(&[])
+    }
+
+    /// The quest definition behind the open session, for its stage names.
+    pub fn open_definition(&self) -> Option<&dyn Kq> {
+        let open = self.open.as_ref()?;
+        self.catalogue
+            .versions_of(open.id)
+            .into_iter()
+            .find(|quest| quest.meta().version == open.version)
+    }
+
+    /// Called after each draw so scrolling cannot run past the end of a conversation that changed.
+    pub fn conversation_drawn(&mut self, furthest: usize) {
+        self.transcript_furthest = furthest;
+        if self.transcript_follows {
+            self.transcript_scroll = furthest;
+        } else {
+            self.transcript_scroll = self.transcript_scroll.min(furthest);
+        }
+    }
+
+    fn scroll_conversation(&mut self, lines: i32) {
+        let at = self.transcript_scroll as i32 + lines;
+        let at = at.clamp(0, self.transcript_furthest as i32) as usize;
+        self.transcript_scroll = at;
+        self.transcript_follows = at >= self.transcript_furthest;
     }
 
     fn open_chosen(&mut self) {
@@ -270,6 +348,9 @@ impl App {
         if let Some((title, session)) = opened {
             self.close_quest();
             self.open = Some(OpenQuest { id, version, title, stages, session });
+            self.transcript_scroll = 0;
+            self.transcript_furthest = 0;
+            self.transcript_follows = true;
             self.screen = Screen::Quest;
         }
     }
@@ -359,7 +440,17 @@ impl App {
 }
 
 /// The gesture a key means inside a quest.
-fn action_for(code: KeyCode, typing: bool, stages: &[StageKind]) -> Option<Action> {
+///
+/// `tunable` says whether the stage showing has values the reader can change. When it does, the
+/// digits belong to those values — a quest that promises "type a number" and then swallows every
+/// digit as a stage jump has promised nothing. Tab moves between stages instead, and where there
+/// is nothing to type the digits go back to reaching stages directly.
+fn action_for(
+    code: KeyCode,
+    typing: bool,
+    tunable: bool,
+    stages: &[StageSpec],
+) -> Option<Action> {
     match code {
         KeyCode::Up | KeyCode::Char('k') if !typing => Some(Action::Previous),
         KeyCode::Down | KeyCode::Char('j') if !typing => Some(Action::Next),
@@ -370,9 +461,13 @@ fn action_for(code: KeyCode, typing: bool, stages: &[StageKind]) -> Option<Actio
         KeyCode::Char('r') if !typing => Some(Action::Reset),
         KeyCode::Backspace => Some(Action::Backspace),
         KeyCode::Esc if typing => Some(Action::Cancel),
-        KeyCode::Char(c) if typing && (c.is_ascii_digit() || c == '.') => Some(Action::Type(c)),
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            stages.iter().find(|stage| stage.digit() == c).map(|stage| Action::Stage(*stage))
+        KeyCode::Char(c) if (typing || tunable) && (c.is_ascii_digit() || c == '.') => {
+            Some(Action::Type(c))
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            // 1-9 reach the first nine stages; a quest with more is walked through with Tab.
+            let wanted = c as usize - '1' as usize;
+            (wanted < stages.len()).then_some(Action::Stage(wanted))
         }
         _ => None,
     }

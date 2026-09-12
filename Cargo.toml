@@ -1,9 +1,17 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Being rewritten to the conversational KQ standard. They come back the moment they compile
+# against it; shipping a quest that still lectures at the reader is worse than shipping three.
+exclude = [
+    "crates/kq-proof-of-work",
+    "crates/kq-transformer",
+    "crates/kq-zero-knowledge",
+]
 
 [workspace.package]
-version = "0.1.0"
+# nmtk starts at 0.0.1 and moves only when something is pushed.
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.98.1"
 license = "Apache-2.0"

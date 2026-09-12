@@ -1,110 +1,138 @@
 //! Every word this quest says, English first.
 //!
+//! These are beats in a conversation, not paragraphs in an article: one or two sentences each,
+//! said after the reader presses Enter, about something that just happened on their machine. A
+//! beat that needs three sentences is two beats.
+//!
 //! The engine hands back enums — `CheckStep::Freshness`, `RejectionKind::NonceMismatch` — and this
-//! table is where they become something a reader understands. Keeping the two apart is what lets a
-//! third language arrive without the ledger code noticing.
+//! table is where they become something a reader understands.
 
 use nmtk_ledger::{CheckStep, EntryKind, Model, RejectionKind};
 
 nmtk_i18n::messages! {
     // ---- The quest itself ------------------------------------------------------
     Title { en: "Ledger models", ko: "원장 방식" },
-    Summary { en: "Send the same coin under three sets of rules and watch them disagree.", ko: "같은 코인을 세 가지 규칙으로 보내고, 셋이 어떻게 갈리는지 봅니다." },
+    Summary { en: "Send one coin under three sets of rules and watch them disagree.", ko: "같은 코인을 세 가지 규칙으로 보내고, 셋이 어떻게 갈리는지 봅니다." },
     Subcategory { en: "Transaction models", ko: "거래 모델" },
-    // ---- Brief -----------------------------------------------------------------
-    BriefOpening { en: "Every chain has to answer one question: where is the money?", ko: "모든 체인은 한 가지 질문에 답해야 합니다. 돈이 어디에 있는가?" },
-    BriefUtxo { en: "Bitcoin keeps a pile of coins. Each was created by some transaction and can be spent exactly once. Your balance is whatever coins nobody has spent yet.", ko: "비트코인은 코인 더미를 들고 있습니다. 각 코인은 어떤 거래가 만들었고 딱 한 번만 쓸 수 있습니다. 잔액이란 아직 아무도 쓰지 않은 코인들입니다." },
-    BriefAccount { en: "Ethereum keeps a ledger book. One line per address, with a balance and a counter. Sending subtracts from one line and adds to another.", ko: "이더리움은 장부를 들고 있습니다. 주소마다 한 줄, 그 줄에 잔액과 번호가 있습니다. 보내면 한 줄에서 빼고 다른 줄에 더합니다." },
-    BriefObject { en: "Sui keeps things. Every coin is an object with an owner and a version number, and sending hands the object over.", ko: "Sui는 개별 물체를 들고 있습니다. 코인마다 주인과 판 번호가 붙은 객체이고, 보낸다는 것은 그 객체를 넘기는 일입니다." },
-    BriefPromise { en: "The same transfer goes into all three. Watch what each one has to read, what it writes, and how much bigger the state gets.", ko: "같은 이체가 셋 모두에 들어갑니다. 각각이 무엇을 읽어야 하고, 무엇을 쓰고, 상태가 얼마나 커지는지 보세요." },
-    // ---- Run -------------------------------------------------------------------
-    RunTitle { en: "One transfer, three answers", ko: "이체 하나, 답 셋" },
-    RunIdle { en: "Press Enter to send.", ko: "Enter를 눌러 보냅니다." },
-    BriefNext { en: "Press Enter to begin.", ko: "Enter를 눌러 시작합니다." },
-    RunOpening { en: "Alice holds three coins of 10. Bob and Carol hold nothing. A pool holds 100 that anyone may pay into.", ko: "앨리스는 10짜리 코인 셋을 갖고 있습니다. 밥과 캐럴은 아무것도 없습니다. 공용 풀에는 누구나 넣을 수 있는 100이 있습니다." },
-    RunAfter { en: "Three models, one transfer. The balances agree; almost nothing else does.", ko: "같은 이체를 셋이 처리했습니다. 잔액은 일치하지만, 그 밖에는 거의 일치하지 않습니다." },
-    ColumnState { en: "State", ko: "상태" },
+
+    // ---- Stage names -----------------------------------------------------------
+    StageCoins { en: "Where money lives", ko: "돈이 있는 곳" },
+    StageSend { en: "Send one", ko: "한 번 보내기" },
+    StageGrow { en: "Change for a tenner", ko: "거스름돈" },
+    StageTune { en: "Your turn", ko: "직접 해 보기" },
+    StageTwice { en: "Spend it twice", ko: "두 번 쓰기" },
+    StageRecap { en: "Recap", ko: "정리" },
+
+    // ---- Stage 1: where money lives --------------------------------------------
+    CoinsOne { en: "There is more than one way to write down where money is.", ko: "돈이 어디에 있는지 적는 방법은 하나가 아닙니다." },
+    CoinsTwo { en: "Bitcoin counts coins. Your balance is whatever coins nobody has spent yet.", ko: "비트코인은 코인을 셉니다. 아직 아무도 쓰지 않은 코인이 곧 내 잔액입니다." },
+    CoinsThree { en: "Ethereum keeps a book. One line per person, and the line says how much.", ko: "이더리움은 장부를 씁니다. 사람마다 한 줄이고, 그 줄에 얼마인지 적혀 있습니다." },
+    CoinsFour { en: "Sui treats each coin as a thing with an owner written on it. Sending changes the owner.", ko: "Sui는 코인 하나하나를 주인이 적힌 물건처럼 다룹니다. 보낸다는 것은 그 주인을 바꾸는 일입니다." },
+    CoinsFive { en: "All three are running on the right, holding the same thing: Alice has three coins of ten.", ko: "오른쪽에 셋이 다 돌고 있고, 셋 다 같은 것을 들고 있습니다. 앨리스에게 10짜리 코인이 셋 있습니다." },
+    CoinsSix { en: "Watch the sizes. Right now they already disagree about how much space that takes.", ko: "크기를 보세요. 지금도 벌써 그것을 담는 데 드는 자리가 서로 다릅니다." },
+
+    // ---- Stage 2: send one -----------------------------------------------------
+    SendOne { en: "Alice sends Bob exactly ten — one whole coin, nothing left over.", ko: "앨리스가 밥에게 딱 10을 보냅니다. 코인 하나가 통째로 가고 남는 것이 없습니다." },
+    SendTwo { en: "The same transfer goes into all three at once.", ko: "같은 이체를 셋에 동시에 넣습니다." },
+    SendAccepted { en: "All three took it.", ko: "셋 다 받아들였습니다." },
+    SendRefused { en: "Not all of them took it. The reason is beside each one.", ko: "전부가 받아들이지는 않았습니다. 이유가 각 줄에 적혀 있습니다." },
+    SendUtxo { en: "Bitcoin's way: nothing new was stored. One coin changed hands whole.", ko: "비트코인 쪽은 새로 저장한 것이 없습니다. 코인 하나가 통째로 주인을 바꿨을 뿐입니다." },
+    SendAccount { en: "Ethereum's way grew by one line: Bob had no line in the book, so one was written for him.", ko: "이더리움 쪽은 한 줄 늘었습니다. 장부에 밥의 줄이 없었으니 새로 써 준 것입니다." },
+    SendObject { en: "Sui's way: nothing new either. The coin is the same thing, with a different owner on it.", ko: "Sui 쪽도 새로 생긴 것이 없습니다. 같은 물건에 적힌 주인만 바뀌었습니다." },
+    SendAsk { en: "So far so similar. Now send an amount that does not fit a coin.", ko: "여기까지는 비슷합니다. 이번에는 코인 하나에 딱 맞지 않는 금액을 보내 봅니다." },
+
+    // ---- Stage 3: change -------------------------------------------------------
+    GrowOne { en: "Alice sends Bob three. Her coins are worth ten each.", ko: "앨리스가 밥에게 3을 보냅니다. 앨리스의 코인은 하나에 10짜리입니다." },
+    GrowTwo { en: "You cannot send part of a coin, the same way you cannot hand over part of a banknote.", ko: "코인의 일부만 보낼 수는 없습니다. 지폐를 반으로 찢어 줄 수 없는 것과 같습니다." },
+    GrowUtxo { en: "Bitcoin's way grew. The ten was destroyed and two new coins were made: three for Bob, seven back to Alice. That seven is change.", ko: "비트코인 쪽은 커졌습니다. 10짜리를 없애고 코인 둘을 새로 만들었습니다. 3은 밥에게, 7은 앨리스에게 돌아옵니다. 그 7이 거스름돈입니다." },
+    GrowAccount { en: "Ethereum's way did not grow at all. Two numbers were edited. Nobody was created.", ko: "이더리움 쪽은 전혀 커지지 않았습니다. 숫자 둘을 고쳤을 뿐이고 새로 만든 것이 없습니다." },
+    GrowObject { en: "Sui's way grew too, for the same reason as Bitcoin: a thing was split, so there is a new thing.", ko: "Sui 쪽도 커졌습니다. 이유는 비트코인과 같습니다. 물건을 쪼갰으니 새 물건이 하나 생긴 것입니다." },
+    GrowLesson { en: "That is the first real difference. Counting coins means making change; keeping a book means editing numbers.", ko: "이것이 첫 번째 진짜 차이입니다. 코인을 세는 방식은 거스름돈을 만들어야 하고, 장부를 쓰는 방식은 숫자만 고치면 됩니다." },
+    GrowCost { en: "Every node on the network keeps this state forever. Change is not free.", ko: "이 상태는 네트워크의 모든 노드가 영원히 들고 있어야 합니다. 거스름돈은 공짜가 아닙니다." },
+
+    // ---- Stage 4: your turn ----------------------------------------------------
+    TuneOne { en: "Your turn. Two values are yours to set: how much, and who to.", ko: "이제 직접 해 보세요. 정할 값은 둘입니다. 얼마를, 누구에게." },
+    TuneThree { en: "Up and down pick a value, left and right change it, or just type a number. Enter sends.", ko: "위아래로 값을 고르고 좌우로 바꿉니다. 숫자를 그냥 입력해도 됩니다. Enter를 누르면 보냅니다." },
+    TuneFresh { en: "Each send starts again from the same three coins of ten, so two sends are worth comparing.", ko: "보낼 때마다 같은 10짜리 코인 셋에서 다시 시작합니다. 그래야 두 번을 견줄 수 있습니다." },
+    TuneTwo { en: "Start with exactly one coin's worth — 10 — and press Enter.", ko: "먼저 코인 하나와 딱 맞는 금액으로 해 보세요. 10으로 두고 Enter를 누릅니다." },
+    TuneAgain { en: "Now something smaller than one coin — 3, or 7 — and press Enter again.", ko: "이번에는 코인 하나보다 작은 금액입니다. 3이나 7로 바꾸고 다시 Enter를 누르세요." },
+    TuneSent { en: "Sent. The sizes on the right moved — or did not.", ko: "보냈습니다. 오른쪽 크기가 움직였거나, 그대로입니다." },
+    TuneNote { en: "Only the book came out the same size both times. It has no coins to break up, so it never has change to store.", ko: "두 번 다 크기가 그대로인 것은 장부뿐입니다. 쪼갤 코인이 없으니 넣어 둘 거스름돈도 없습니다." },
+
+    // ---- Stage 5: spend it twice ------------------------------------------------
+    TwiceOne { en: "Now the thing every one of these systems exists to stop: spending the same money twice.", ko: "이제 이 방식들이 존재하는 이유를 봅니다. 같은 돈을 두 번 쓰는 것을 막는 일입니다." },
+    TwiceTwo { en: "Two transfers are written before either is sent, so when they are written both look fine.", ko: "이체 두 건을 보내기 전에 미리 씁니다. 그래서 쓰는 시점에는 둘 다 멀쩡해 보입니다." },
+    TwiceThree { en: "Then both are sent. The first one goes in everywhere.", ko: "그다음 둘 다 보냅니다. 첫 번째는 어디서나 들어갑니다." },
+    TwiceUtxo { en: "Bitcoin's way stopped the second one: the coin it names is gone. It was destroyed by the first transfer.", ko: "비트코인 쪽이 두 번째를 막았습니다. 그 이체가 가리키는 코인이 없어졌기 때문입니다. 첫 번째 이체가 없애 버렸습니다." },
+    TwiceAccount { en: "Ethereum's way stopped it too, but for a different reason: every transfer carries a counter, and this one's counter has already been used.", ko: "이더리움 쪽도 막았지만 이유가 다릅니다. 이체마다 번호가 붙는데, 이 이체의 번호는 이미 쓰인 번호입니다." },
+    TwiceObject { en: "Sui's way stopped it for a third reason: the coin had already changed hands, so Alice was no longer its owner.", ko: "Sui 쪽은 세 번째 이유로 막았습니다. 그 코인은 이미 주인이 바뀌어서, 앨리스의 것이 아니게 됐습니다." },
+    TwiceLesson { en: "Three systems, three different things noticed. What a system checks is what a system is.", ko: "세 방식이 서로 다른 것을 알아챘습니다. 무엇을 검사하는가가 곧 그 방식의 성격입니다." },
+
+    // ---- Stage 6: recap ---------------------------------------------------------
+    RecapOne { en: "You have now used all three ways of writing down money.", ko: "돈을 적는 세 가지 방법을 전부 써 봤습니다." },
+    RecapTwo { en: "Bitcoin counts coins and makes change. Ethereum edits numbers in a book. Sui changes the owner written on a thing.", ko: "비트코인은 코인을 세고 거스름돈을 만듭니다. 이더리움은 장부의 숫자를 고칩니다. Sui는 물건에 적힌 주인을 바꿉니다." },
+    RecapThree { en: "The same transfer cost them different amounts of storage, and the same attack failed against them for different reasons.", ko: "같은 이체가 셋에게 서로 다른 저장 비용을 물렸고, 같은 공격이 서로 다른 이유로 실패했습니다." },
+    RecapFour { en: "Next time you read that a chain is \"UTXO-based\" or \"account-based\", you know what was actually being said.", ko: "다음에 어떤 체인이 「UTXO 기반」이다, 「계정 기반」이다 하는 말을 보면, 그것이 실제로 무슨 뜻인지 알게 됐습니다." },
+
+    // ---- The panel on the right -------------------------------------------------
+    PanelTitle { en: "The three ledgers", ko: "세 원장" },
     ColumnEntries { en: "entries", ko: "항목" },
-    ColumnSize { en: "Size", ko: "크기" },
-    ColumnReads { en: "Reads", ko: "읽기" },
-    ColumnWrites { en: "Writes", ko: "쓰기" },
-    ColumnGrowth { en: "growth", ko: "증가" },
-    ColumnBalance { en: "Alice", ko: "앨리스" },
+    ColumnChange { en: "change", ko: "변화" },
+    LabelHolds { en: "Alice holds", ko: "앨리스 보유" },
     LabelAccepted { en: "accepted", ko: "받아들임" },
     LabelRejected { en: "rejected", ko: "거절함" },
-    // ---- Tune ------------------------------------------------------------------
-    TuneTitle { en: "Change it and send again", ko: "바꿔서 다시 보내기" },
-    TuneHint { en: "Left and right change a value; type digits for your own number and press Enter.", ko: "왼쪽·오른쪽으로 값을 바꾸고, 직접 숫자를 입력한 뒤 Enter를 눌러도 됩니다." },
+    LabelStopped { en: "stopped it", ko: "막았음" },
+    LabelLetThrough { en: "let it through", ko: "통과시킴" },
+    WaitingToRun { en: "nothing sent yet", ko: "아직 보낸 것 없음" },
+
+    // ---- Knobs ------------------------------------------------------------------
     KnobAmount { en: "Amount", ko: "금액" },
-    KnobCoin { en: "Coin to spend", ko: "쓸 코인" },
     KnobRecipient { en: "Recipient", ko: "받는 사람" },
-    CoinAutomatic { en: "let the model choose", ko: "모델에게 맡기기" },
-    CoinFirst { en: "the first coin", ko: "첫 번째 코인" },
-    CoinSecond { en: "the second coin", ko: "두 번째 코인" },
-    CoinThird { en: "the third coin", ko: "세 번째 코인" },
     PartyBob { en: "Bob", ko: "밥" },
     PartyCarol { en: "Carol", ko: "캐럴" },
-    PartyPool { en: "the shared pool", ko: "공용 풀" },
-    TuneNote { en: "The account model ignores the coin you pick. That is the lesson: an account is one balance, so there is nothing to choose.", ko: "계정 방식은 어떤 코인을 골랐는지 무시합니다. 그것이 요점입니다. 계정은 잔액 하나라서 고를 것이 없습니다." },
-    // ---- Break -----------------------------------------------------------------
-    BreakTitle { en: "Spend it twice", ko: "두 번 쓰기" },
-    BreakHint { en: "Press Enter to write two transfers against the same state and send both.", ko: "Enter를 누르면 같은 상태를 보고 쓴 이체 두 건을 만들어 둘 다 보냅니다." },
-    BreakExplain { en: "Both transfers are written before either is sent, so both look valid when they are made. Every model takes the first. Watch where each one catches the second.", ko: "두 이체 모두 보내기 전에 작성되므로, 만들어질 때는 둘 다 유효해 보입니다. 세 방식 모두 첫 번째는 받아들입니다. 두 번째를 각각 어디서 잡아내는지 보세요." },
-    BreakStopped { en: "stopped", ko: "막음" },
-    BreakNotStopped { en: "let through", ko: "통과시킴" },
-    BreakAllStopped { en: "All three stopped it — at three different steps, for three different reasons.", ko: "셋 다 막았습니다. 서로 다른 단계에서, 서로 다른 이유로." },
-    // ---- Recap -----------------------------------------------------------------
-    RecapTitle { en: "What just happened", ko: "방금 본 것" },
-    RecapOne { en: "The three models agreed on every balance and on nothing else.", ko: "세 방식은 잔액에서만 일치했고 나머지는 전부 달랐습니다." },
-    RecapTwo { en: "A double spend dies at a different step in each: the coin is gone, the counter is wrong, the version is old.", ko: "두 번 쓰기는 각각 다른 단계에서 죽습니다. 코인이 사라졌거나, 번호가 틀렸거나, 판이 낡았습니다." },
-    RecapThree { en: "Two payments from one sender can run at the same time in two of the models and must queue in the third.", ko: "한 사람이 보내는 두 결제는 두 방식에서는 동시에 처리되고, 나머지 하나에서는 줄을 서야 합니다." },
-    RecapParallel { en: "Can two run at once?", ko: "둘이 동시에 될까?" },
-    RecapFromOne { en: "From one sender", ko: "한 사람이 둘 보낼 때" },
-    RecapToOne { en: "To one recipient", ko: "한 사람이 둘 받을 때" },
-    Yes { en: "yes", ko: "예" },
-    No { en: "no", ko: "아니오" },
-    // ---- Model names -----------------------------------------------------------
-    ModelUtxo { en: "UTXO", ko: "UTXO" },
-    ModelAccount { en: "Account", ko: "계정" },
-    ModelObject { en: "Object", ko: "객체" },
-    EntryUnspentOutput { en: "unspent outputs", ko: "쓰지 않은 출력" },
-    EntryAccount { en: "accounts", ko: "계정" },
-    EntryObject { en: "objects", ko: "객체" },
-    // ---- Validation steps ------------------------------------------------------
-    StepBuild { en: "writing it", ko: "작성" },
-    StepShape { en: "reading it", ko: "형식 검사" },
-    StepStateLookup { en: "looking it up", ko: "상태 조회" },
-    StepAuthorization { en: "checking the owner", ko: "소유 확인" },
-    StepFreshness { en: "checking it is current", ko: "최신 여부 확인" },
-    StepValue { en: "adding it up", ko: "금액 확인" },
-    // ---- Reasons ---------------------------------------------------------------
+    KeySend { en: "send it", ko: "보내기" },
+    KeyChange { en: "change the value", ko: "값 바꾸기" },
+
+    // ---- Model names -------------------------------------------------------------
+    ModelUtxo { en: "Bitcoin (UTXO)", ko: "비트코인 (UTXO)" },
+    ModelAccount { en: "Ethereum (account)", ko: "이더리움 (계정)" },
+    ModelObject { en: "Sui (object)", ko: "Sui (객체)" },
+    EntryUnspentOutput { en: "coins", ko: "코인" },
+    EntryAccount { en: "lines", ko: "장부의 줄" },
+    EntryObject { en: "things", ko: "물건" },
+
+    // ---- Validation steps ---------------------------------------------------------
+    StepBuild { en: "writing it", ko: "작성할 때" },
+    StepShape { en: "reading it", ko: "형식을 볼 때" },
+    StepStateLookup { en: "looking it up", ko: "상태를 찾을 때" },
+    StepAuthorization { en: "checking the owner", ko: "주인을 볼 때" },
+    StepFreshness { en: "checking it is current", ko: "최신인지 볼 때" },
+    StepValue { en: "adding it up", ko: "금액을 더할 때" },
+
+    // ---- Reasons -------------------------------------------------------------------
     WhyZeroAmount { en: "the amount is zero", ko: "금액이 0입니다" },
     WhyNoInputs { en: "there is nothing to spend", ko: "쓸 것이 없습니다" },
     WhyTooManyOutputs { en: "too many outputs", ko: "출력이 너무 많습니다" },
     WhyDuplicateInput { en: "the same coin is named twice", ko: "같은 코인을 두 번 적었습니다" },
-    WhyInputNotFound { en: "that coin is already spent", ko: "그 코인은 이미 쓰였습니다" },
+    WhyInputNotFound { en: "that coin is already gone", ko: "그 코인은 이미 없어졌습니다" },
     WhyBadSignature { en: "the signature does not match", ko: "서명이 맞지 않습니다" },
     WhyNotOwner { en: "the sender does not own it", ko: "보낸 사람의 것이 아닙니다" },
     WhyValueNotConserved { en: "the amounts do not add up", ko: "금액이 맞아떨어지지 않습니다" },
     WhyAmountOverflow { en: "the amount is too large", ko: "금액이 너무 큽니다" },
-    WhyAccountNotFound { en: "there is no such account", ko: "그런 계정이 없습니다" },
-    WhyNonceMismatch { en: "the counter has already moved on", ko: "번호가 이미 넘어갔습니다" },
+    WhyAccountNotFound { en: "there is no such line in the book", ko: "장부에 그런 줄이 없습니다" },
+    WhyNonceMismatch { en: "that counter has already been used", ko: "그 번호는 이미 쓰였습니다" },
     WhyInsufficientBalance { en: "the balance is too small", ko: "잔액이 모자랍니다" },
-    WhyObjectNotFound { en: "there is no such object", ko: "그런 객체가 없습니다" },
-    WhyNotSharedObject { en: "that object is not shared", ko: "공용 객체가 아닙니다" },
-    WhyStaleObjectVersion { en: "the object has moved on to a newer version", ko: "객체가 이미 다음 판으로 넘어갔습니다" },
+    WhyObjectNotFound { en: "there is no such thing", ko: "그런 물건이 없습니다" },
+    WhyNotSharedObject { en: "that thing is not shared", ko: "공용 물건이 아닙니다" },
+    WhyStaleObjectVersion { en: "the thing has moved on to a newer version", ko: "그 물건은 이미 다음 판으로 넘어갔습니다" },
     WhyNoCoinAvailable { en: "no coin is free to spend", ko: "쓸 수 있는 코인이 없습니다" },
     WhyCoinTooSmall { en: "that coin is too small", ko: "그 코인은 너무 작습니다" },
     WhyNoSuchCoin { en: "there is no coin there", ko: "거기에 코인이 없습니다" },
-    WhyModelMismatch { en: "that belongs to another model", ko: "다른 방식의 것입니다" },
-    // ---- Conflicts -------------------------------------------------------------
-    ConflictIndependent { en: "independent", ko: "서로 무관" },
-    ConflictWriteWrite { en: "both write the same entry", ko: "같은 항목에 둘 다 씁니다" },
-    ConflictReadWrite { en: "one writes what the other reads", ko: "한쪽이 쓰는 것을 다른 쪽이 읽습니다" },
-    ConflictModelMismatch { en: "not comparable", ko: "비교할 수 없음" },
+    WhyModelMismatch { en: "that belongs to another ledger", ko: "다른 원장의 것입니다" },
 }
 
-/// The name a model goes by on screen.
+/// The name a ledger goes by on screen. Named after the chain a reader has heard of, because
+/// "UTXO" means nothing until it has been seen working.
 pub fn model(model: Model) -> Msg {
     match model {
         Model::Utxo => Msg::ModelUtxo,
@@ -113,7 +141,7 @@ pub fn model(model: Model) -> Msg {
     }
 }
 
-/// What a model's state is made of.
+/// What a ledger's state is made of.
 pub fn entry_kind(kind: EntryKind) -> Msg {
     match kind {
         EntryKind::UnspentOutput => Msg::EntryUnspentOutput,
@@ -122,7 +150,7 @@ pub fn entry_kind(kind: EntryKind) -> Msg {
     }
 }
 
-/// The step a transaction died at.
+/// The step a transfer died at.
 pub fn step(step: CheckStep) -> Msg {
     match step {
         CheckStep::Build => Msg::StepBuild,

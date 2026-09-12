@@ -1,8 +1,8 @@
 # The Knowledge Quest standard
 
-A **Knowledge Quest (KQ)** is one finished piece of learning. A reader opens it, finds out why the
-subject matters, runs the real thing on their own machine, turns its values, tries to break it, and
-leaves knowing what happened.
+A **Knowledge Quest (KQ)** is one finished piece of learning. A reader opens it, is told one small
+thing, presses Enter, and watches that thing happen to the real mechanism on their own machine —
+then another, then another, until they can say what it does and why.
 
 nmtk is a program for holding a shelf of them. This document is what every quest is built against.
 
@@ -18,191 +18,191 @@ is right and this document is a bug.
 
 ---
 
-## 1. What a quest is
+## 1. A quest is a conversation, not a document
+
+This is the rule everything else follows from.
+
+The first version of nmtk put five paragraphs on the left of the screen and a running mechanism on
+the right. People read the first paragraph, skipped the rest, pressed keys until something moved,
+and came away having learned nothing. They were not lazy. Nobody reads a page of prose to get to
+the interesting part, and the interesting part was on the other side of the page.
+
+So a quest talks:
+
+> A sentence or two → the reader presses Enter → something real happens → a sentence about what
+> just happened → Enter → …
+
+The left panel is that conversation, oldest at the top, rising from the bottom of the panel exactly
+like a messenger. The right panel is the thing itself, running. Pressing Enter is the only thing a
+reader has to understand to get started.
+
+**Rules for beats** (`nmtk_kq::session::Beat`):
 
 | | |
 |---|---|
-| **Not** | an article with an animation next to it |
-| **Not** | a simulation that decides the outcome in advance |
-| **Is** | the real mechanism, running on this machine, with its values in the reader's hands |
+| One or two sentences | A beat needing three sentences is two beats. |
+| Under ~160 characters | Longer than that is a paragraph wearing a beat's clothes. |
+| Says one thing | "X is true, and also Y" is two beats. |
+| ELI5 | If a ten-year-old would stop reading, rewrite it. |
+| No jargon before it is earned | A word may be used once it has been watched happening. |
 
-The motto this is all built on: **study that isn't fun is labour, and nobody does labour they can avoid.**
+There are three voices:
 
-The test a quest has to pass: **the reader can change something and the result really changes.**
-If every reader sees the same ending, it is not a quest yet.
+| Voice | Drawn | Used for |
+|---|---|---|
+| `Say` | plain | The quest explaining. |
+| `Event(state)` | `+ x ~ >` and the state colour | Something that happened in the run. |
+| `Ask` | `▸` | Something the reader has to do first. |
+
+A quest builds its conversation in `transcript(language)`, on demand, from the work it has already
+done — never stored as text. Switching language rewrites the whole conversation, not the next line
+of it.
 
 ## 2. What a quest declares
 
-Plain data, available before the quest is opened, so the list can sort and filter without running
+Plain data, available before the quest is opened, so the shelf can sort and filter without running
 anything. See `nmtk_kq::meta::KqMeta`.
 
 | Field | Meaning |
 |---|---|
 | `id` | Permanent name, `area.topic` (e.g. `consensus.proof-of-work`). Never changes. |
-| `version` | `major.minor`. Major rises when the lesson itself changes. |
-| `released` | When the quest first shipped, in any version. |
-| `updated` | When *this* version shipped. |
+| `version` | The nmtk version this quest last shipped in. See §6. |
+| `released` | When the quest first shipped, in any version. UTC, to the second. |
+| `updated` | When *this* version shipped. UTC, to the second. |
 | `category` | The shelf: Consensus, Ledgers, Cryptography, Machine learning, Networking, Systems. |
-| `subcategory` | The narrower shelf, as a stable key (`proof-of-work`). Displayed through the quest's phrase table. |
-| `difficulty` | Gentle, Steady or Steep. |
+| `subcategory` | The narrower shelf, as a stable key (`proof-of-work`), worded by the phrase table. |
+| `difficulty` | One of five. See §4. |
 | `minutes` | Honest estimate of a first pass. |
-| `needs` | Cores and memory below which the quest will be slow. It still opens; the list says so. |
-| `stages` | Which of the five stages this quest has. |
+| `needs` | Minimum **and** recommended. See §5. |
+| `stages` | Three or more. See §3. |
 | `tags` | Stable search keys (`bitcoin`, `hashing`). |
 
-## 3. The five stages
+## 3. Stages
 
-Every quest walks the same path. `Brief` and `Run` are required; the rest are offered when the
-subject deserves them. A reader jumps straight to any stage with `1`–`5`.
+A quest has **at least three stages** and may have dozens. Two stages is a screen with a footnote.
 
-| Stage | Key | What happens |
-|---|---|---|
-| **Brief** | `1` | Why this is worth an hour. One screen, no jargon, ends with what the reader is about to see. |
-| **Run** | `2` | The real thing runs. Numbers move. Nothing is decided in advance. |
-| **Tune** | `3` | The reader changes values and the run answers. |
-| **Break** | `4` | The reader attacks it and finds out what holds. |
-| **Recap** | `5` | What just happened, in the order it happened. |
+Each stage declares a key, a role and its own difficulty:
 
-A quest with no honest attack does not invent one; it leaves `Break` out.
-
-## 4. The screen
-
-The shell draws the frame. A quest draws only inside the right-hand panel.
-
-```
- NMTK  ·  Proof of work  ·  Run                                          EN   ← shell
-╭ Proof of work ───────────╮╭──────────────────────────────────────────────╮
-│                          ││                                              │
-│  the explanation,        ││  the quest's own panel:                      │
-│  38% of the width        ││  62% of the width                            │
-│                          ││                                              │
-╰──────────────────────────╯╰──────────────────────────────────────────────╯
- Enter run  ·  Space pause  ·  r reset  ·  l language  ·  q back           ← shell
+```rust
+StageSpec::new("twice", StageRole::Break, Difficulty::Medium)
 ```
 
-- Minimum terminal: **80×24**. Draw for that first; use extra room, never require it.
-- Repaint at most **ten times a second**, from the drawing thread only.
-- The explanation panel is written by the quest, in the reader's language, and changes with the
-  stage.
-
-## 5. Colour
-
-nmtk is **black and white**. Structure is carried by weight, spacing and reversal, so the program
-reads the same on a light terminal, a dark one, and a monochrome one.
-
-Colour says one thing: **state**. There are four, and no others.
-
-| State | Colour | Mark | Means |
-|---|---|---|---|
-| Good | green | `+` | It worked, it verified, it is the honest chain |
-| Bad | red | `x` | It failed, it was rejected, an attacker did it |
-| Working | yellow | `~` | It is running |
-| Chosen | blue | `>` | This is what you are pointing at |
-
-Every state carries its mark as well as its colour, because a reader can turn colour off and must
-lose nothing. Never paint a background: the reader's terminal owns it.
-
-All values live in `nmtk_kq::theme`. A quest that picks its own colours is a bug.
-
-## 6. Keys
-
-The shell owns these on every screen:
-
-| Key | Does |
+| Role | What happens there |
 |---|---|
-| `↑` `↓` / `j` `k` | move between items |
-| `←` `→` / `h` `l` | turn the chosen knob |
-| `Enter` | go — start the run, take the next step, accept a typed number |
-| `Space` | pause and resume |
-| `r` | reset the run |
-| `1`–`5` | jump to a stage |
-| `Tab` | switch panel |
-| `l` | English ⇄ 한국어 |
-| `s` | settings |
-| `?` | keys |
-| `q` / `Esc` | back |
+| `Explain` | Why this is worth the time, and what is about to happen. |
+| `Run` | The real thing runs. |
+| `Tune` | The reader changes values and the run answers. |
+| `Break` | The reader attacks it. |
+| `Recap` | What just happened, in order, in the reader's own numbers. |
 
-A quest receives `nmtk_kq::session::Action`, not key codes. It may add its own keys through
-`KqSession::keys`, but never redefines one above.
+Rules:
 
-## 7. Knobs
+- **A stage may be entered directly.** Tab walks them; a reader who jumps to the last stage must
+  get a stage that works, so every stage sets up whatever state it needs on entry.
+- **Difficulty may vary by stage.** A quest may open very easy and end hard.
+- **Requirements may not vary by stage.** They are declared once, for the quest. A reader who was
+  told they could run this must be able to finish it.
+- **A stage's name is the quest's own words**, looked up by key through its phrase table.
 
-Everything a reader can change is a `Knob`. Every knob offers **presets and typing**: presets for
-the reader who wants a good answer now, typing for the reader who wants *their* number. A knob with
-presets only has decided for the reader what is worth trying, which is the opposite of the point.
+## 4. Five difficulties
 
-Kinds: `Count` (whole numbers), `Share` (a percentage), `Decimal`, `Choice`, `Toggle`.
+`Difficulty::{VeryEasy, Easy, Medium, Hard, VeryHard}`, drawn as `•····` through `•••••` so the
+level reads with the colour off.
 
-Out-of-range input is refused and the old value stays. Typing shows a cursor; `Esc` discards it.
-While a number is being typed, report it through `KqSession::typing` — the shell then hands digits
-to the quest instead of using `1`–`5` to jump between stages.
+The quest's own `difficulty` is what the shelf sorts on. `steepest_stage()` is what the hardest
+stage reaches, which may be higher.
+
+## 5. Minimum and recommended
+
+```rust
+Requirements::new(
+    MachineNeeds::new(2, 1 << 30),   // minimum: it runs
+    MachineNeeds::new(8, 4 << 30),   // recommended: it runs the way it was written to
+)
+```
+
+The shelf prints both and then says where *this* machine sits — `Fit::{Recommended, Minimum,
+Below}` — measured against what `MachineProfile::detect()` found. A quest below the minimum still
+opens and sizes itself down; it says so rather than refusing.
+
+A quest that runs anywhere declares `Requirements::ANY` and the shelf prints one line instead of
+three.
+
+## 6. Versions
+
+- nmtk and every quest start at **0.0.1**.
+- **A push is a version bump.** Not a date, not a day's work — the push.
+- A quest's version is **the nmtk version it shipped in**. They move together.
+- Minor or patch is a judgement call; `1.0.0` only on an explicit instruction.
+- Timestamps are **UTC, to the second** (`2026-09-12T10:22:31Z`).
+- Every version of a quest stays reachable from the shelf with `v`.
+
+## 7. Values the reader turns
+
+`nmtk_kq::knob::Knob`. Every knob offers **both** ways of choosing:
+
+- **presets and arrows**, for the reader who wants a good answer now;
+- **typed digits**, for the reader who wants *their* number.
+
+A knob that only offers presets has decided for the reader what is worth trying, which is the
+opposite of the point. Out-of-range typing is refused and the old value stays.
+
+Because digits belong to the values, **stages are walked with Tab**, not with number keys. Where a
+stage has no values to turn, `1`–`9` reach the first nine stages directly.
 
 ## 8. Words
 
-Every quest carries **its own phrase table**, built with `nmtk_i18n::messages!`. Two quests being
-written at the same time never touch the same file.
+- **English is written first and is never missing.** Every other language is a column beside it
+  (`nmtk_i18n::messages!`), and a missing column falls back to English rather than to a blank.
+- **Engines never produce words.** `nmtk-pow`, `nmtk-ledger`, `nmtk-transformer` and `nmtk-zk`
+  return numbers and enums. Every sentence lives in a quest's phrase table.
+- **What the quest says must match what the engine said.** If prose names a reason — "the coin is
+  already gone" — a test asserts the engine really returns that reason. Prose that drifts from the
+  machine is the worst bug this program can have, because it is invisible.
+- **Never make a language agree a plural.** Write `coins 3`, not `3 coins`; `lines 1` reads, `1
+  lines` does not.
 
-- **English is the source of truth** and is never missing.
-- Korean is optional per line and falls back to English rather than to a blank.
-- Engines return numbers and enums. **An engine never builds a sentence** — that is what keeps a
-  third language from touching the learning code.
+## 9. Drawing
 
-Write for someone who has not read the subject before. Name real things by their real names
-(nonce, UTXO, nullifier) and gloss each one the first time.
+- Black and white. Red, yellow, blue and green carry **state only**: `State::{Good, Bad, Working,
+  Chosen}`, each with a one-column mark (`+ x ~ >`) so the screen reads with colour off.
+- **Korean and Japanese glyphs take two columns.** Never use `str::len()` or `format!("{:<10}")` on
+  anything a reader will see. Use `nmtk_kq::text::{width, pad, truncate, wrap}`.
+- The smallest screen is **80×24**. Anything smaller gets a message, not a broken layout.
+- A row that will not fit **drops whole items rather than cutting one in half**. Half a word is
+  worse than a missing word.
+- Nothing is drawn without a label. A graph with no title and no axis teaches nothing.
 
-## 9. Alignment
+## 10. Running the work
 
-A Korean or Japanese glyph fills two terminal cells, so `format!("{:<12}")` lines a table up in
-English and pulls it apart in Korean. Use `nmtk_kq::text::{width, pad, truncate}` for every column
-you align. A table that only looks right in one language is a bug in both.
+- **One heavy run at a time, per machine.** Mining beside an attack halves both, and a 51% attack
+  that cannot win because the screen is stealing its cores is a lie about proof of work. Stop the
+  other run first.
+- Work happens on worker threads; `tick()` is called about ten times a second on the drawing
+  thread and only reads their latest state. It never blocks and never does the work.
+- `close()` stops every thread and is always called before a session is dropped.
+- A quest with no worker threads reports `RunState::Idle` and draws no status mark. A mark nobody
+  can explain is clutter.
 
-## 10. Engines
+## 11. The shape of a quest crate
 
-The code that does the work lives apart from the code that draws it (`crates/nmtk-pow`,
-`nmtk-ledger`, `nmtk-transformer`, `nmtk-zk`). An engine:
-
-- knows nothing about ratatui, the theme, or the language;
-- returns plain data — numbers, enums, structs;
-- runs long work on its own threads behind a handle whose `snapshot()` is cheap and holds no lock;
-- is deterministic when given a seed, so a test can assert on an outcome.
-
-```rust
-pub struct Config { /* what the reader can change */ }
-pub struct Handle { /* owns the threads */ }
-impl Handle {
-    pub fn snapshot(&self) -> Snapshot;
-    pub fn pause(&self);
-    pub fn resume(&self);
-    pub fn stop(self);
-}
+```
+crates/kq-<topic>/src/
+    lib.rs        the KqMeta, the stage list, the Kq impl — no words, no logic
+    phrases.rs    every word, English first
+    session.rs    the stage scripts, the deeds, the right-hand panel
 ```
 
-Work that finishes instantly is a plain function instead.
+The engine it drives is a separate crate and knows nothing about any of this.
 
-**One heavy run at a time.** A session that starts a second run stops the first one first. Two runs
-sharing the cores halve each other, and a reader comparing them is reading noise — this was a real
-bug: mining left running behind a 51% attack made the attack look impossible.
+## 12. Checklist before a quest ships
 
-## 11. Versions
-
-A quest's `id` never changes. Its `version` rises, and **every version stays in the program**: a
-reader who learned from an older one can open exactly what they saw. The list shows the newest of
-each quest; older versions are one keypress away.
-
-Raise `major` when the lesson changes enough that a returning reader would be surprised. Raise
-`minor` for everything else. Set `updated` to the day the version ships; leave `released` alone.
-
-## 12. What a quest must never do
-
-- **Touch the network.** Not for updates, not for telemetry, not for anything. nmtk opens no
-  sockets.
-- **Work on the drawing thread.** `tick()` reads the latest state and returns.
-- **Fake a number.** Everything on screen came from something that really ran here.
-- **Invent interface.** Colours, borders, keys and shapes come from the standard.
-
-## 13. Adding a quest
-
-1. Write the engine in its own crate if the subject needs one: plain data out, no screen, no words.
-2. Write the quest crate: `KqMeta`, a phrase table, the stages, the knobs, a `KqSession`.
-3. Register it in the catalogue. Keep the previous version registered.
-4. Tests: the engine's behaviour, and the quest drawing at 80×24 in both languages.
+- [ ] Three or more stages, each with a name in every language.
+- [ ] Every beat is one or two sentences and passes the length test.
+- [ ] The first beat of the first stage is understandable by someone who has never heard of the
+      subject.
+- [ ] Every value a reader can turn accepts typed numbers as well as arrows.
+- [ ] Every claim the prose makes about the engine is covered by a test.
+- [ ] The quest reads at 80×24, and in every language it declares.
+- [ ] `Requirements` are honest on a small machine.
+- [ ] No `unsafe`, no network, no file written outside `~/.config/nmtk`.

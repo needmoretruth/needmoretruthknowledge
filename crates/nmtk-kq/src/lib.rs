@@ -1,42 +1,48 @@
 //! The Knowledge Quest standard.
 //!
-//! A **KQ** is one finished piece of learning: a reader opens it, reads why it matters, runs the
-//! real thing on their own machine, turns its values, tries to break it, and leaves knowing what
-//! happened. nmtk is a program for holding a shelf of them.
+//! A **KQ** is one finished piece of learning. A reader opens it and the quest talks to them: a
+//! sentence or two, then something really happens on their machine, then a sentence about what
+//! just happened. They turn values, break it, and leave knowing something they did not know.
 //!
-//! This crate is the standard every quest is built against, and it exists for two reasons.
-//! The first is that four quests written by four different hands must feel like one program — the
-//! same keys, the same shapes, the same places to look. The second is that a settled standard is
-//! cheaper to build against: there is nothing to invent, only a shape to fill.
+//! This crate is the standard every quest is built against, and it exists for two reasons. The
+//! first is that quests written by different hands must feel like one program — the same keys, the
+//! same shapes, the same places to look. The second is that a settled standard is cheaper to build
+//! against: there is nothing to invent, only a shape to fill.
+//!
+//! The motto it is all built on: **study that isn't fun is labour, and nobody does labour they can
+//! avoid.**
 //!
 //! # What a quest owes
 //!
-//! - **Facts about itself** ([`meta`]) — id, version, dates, category, difficulty, length, what it
-//!   needs from the machine. Plain data, so the list can sort and filter without opening anything.
-//! - **Its own words** — every quest carries its own phrase table (`nmtk_i18n::messages!`), English
-//!   first, Korean optional. Two quests being written at once never touch the same file.
-//! - **Stages** ([`meta::StageKind`]) — `Brief`, `Run`, and as many of `Tune`, `Break` and `Recap`
-//!   as the subject deserves. `Brief` and `Run` are not optional: a quest that cannot be run is an
-//!   article, and articles belong somewhere else.
+//! - **Facts about itself** ([`meta`]) — id, version, UTC stamps, category, difficulty, length,
+//!   the minimum and recommended machine. Plain data, so the list sorts and filters without
+//!   opening anything.
+//! - **At least three stages** ([`meta::MIN_STAGES`]), each with its own difficulty and its own
+//!   role. How many is up to the quest; two is a screen with a footnote, not a lesson.
+//! - **A conversation** ([`session::Beat`]) — short beats a reader walks through with Enter, never
+//!   a wall of prose.
+//! - **Its own words** — every quest carries its own phrase table (`nmtk_i18n::messages!`), one
+//!   column per language, English required and never missing.
 //! - **Knobs** ([`knob`]) — everything a reader can change, each offering presets *and* typing.
-//! - **A session** ([`session::KqSession`]) — which owns the threads, answers [`session::Action`]s,
-//!   and draws into the right-hand panel.
 //!
 //! # What a quest must not do
 //!
 //! - Touch the network. Not once, not for anything.
 //! - Do its work on the drawing thread. `tick` reads the latest state and returns.
+//! - Run two heavy things at once. Starting a second run stops the first.
 //! - Invent its own colours, borders or keys. [`theme`] holds every value, and it is black and
 //!   white with four state colours.
 //! - Fake a result. Every number on screen came from something that really ran.
 //!
 //! # Versions
 //!
-//! A quest's [`meta::KqId`] never changes; its [`meta::KqVersion`] rises. Old versions stay in the
-//! program and stay openable, because a reader who learned from one should be able to go back to
-//! exactly what they saw.
+//! There is one version number for the whole program, starting at `0.0.1`, and a quest's version
+//! is the nmtk version it was last shipped in. It rises when something is pushed, never while work
+//! is in progress. Old versions stay in the program and stay openable, because a reader who
+//! learned from one should be able to go back to exactly what they saw.
 
 pub mod catalogue;
+pub mod conversation;
 pub mod knob;
 pub mod meta;
 pub mod session;
@@ -46,6 +52,9 @@ pub mod widgets;
 
 pub use catalogue::{Catalogue, Filter, SortKey};
 pub use knob::{Knob, KnobValue};
-pub use meta::{Category, Date, Difficulty, KqId, KqMeta, KqVersion, Requirements, StageKind};
-pub use session::{Action, Kq, KqSession, Reaction, RunState};
+pub use meta::{
+    Category, Difficulty, Fit, KqId, KqMeta, MachineNeeds, Requirements, StageRole, StageSpec,
+    Stamp, Version,
+};
+pub use session::{Action, Beat, Kq, KqSession, Reaction, RunState, Voice};
 pub use theme::{State, Theme};

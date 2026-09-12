@@ -67,7 +67,10 @@ fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> Stri
                 format!("[ {} ]", app.settings.worker_threads)
             }
         }
-        SettingItem::Colour => format!("[ {} ]", if app.settings.colour { "on" } else { "off" }),
+        SettingItem::Colour => format!(
+            "[ {} ]",
+            t(if app.settings.colour { Msg::SettingsOn } else { Msg::SettingsOff }, language)
+        ),
     }
 }
 

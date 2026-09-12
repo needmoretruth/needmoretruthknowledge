@@ -15,8 +15,9 @@ use ratatui::widgets::{Block, BorderType, Padding};
 pub const MIN_WIDTH: u16 = 80;
 /// Smallest screen nmtk will draw on.
 pub const MIN_HEIGHT: u16 = 24;
-/// Share of a subject screen given to the explanation; the rest goes to the run.
-pub const EXPLAIN_PERCENT: u16 = 38;
+/// Share of a quest screen given to the conversation; the rest shows the run itself.
+/// The conversation is the lesson, so it takes the wider half.
+pub const EXPLAIN_PERCENT: u16 = 55;
 /// Never repaint more often than this.
 pub const FRAME_MILLIS: u64 = 100;
 

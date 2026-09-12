@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use nmtk_kq::Theme;
+use nmtk_kq::text::width;
 
 /// `NMTK · <screen>` on the left, the language tag on the right.
 pub fn title_bar(frame: &mut Frame, area: Rect, theme: Theme, title: &str, language: Language) {
@@ -23,15 +24,28 @@ pub fn title_bar(frame: &mut Frame, area: Rect, theme: Theme, title: &str, langu
 }
 
 /// The keys that work on this screen, written as `key label` pairs separated by dots.
+///
+/// A pair that will not fit is left out whole. The alternative — letting the row run past the
+/// edge — cuts a key's name in half and leaves the reader looking at `q 뒤`, which is how the last
+/// version hid the way out of the program on a narrow terminal.
 pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, String)]) {
+    const GAP: &str = "  ·  ";
+    let room = area.width as usize;
     let mut spans = vec![Span::raw(" ")];
-    for (index, (key, label)) in keys.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled("  ·  ", theme.muted()));
+    let mut used = 1;
+    for (key, label) in keys {
+        let pair = width(key) + 1 + width(label);
+        let gap = if used > 1 { GAP.len() } else { 0 };
+        if used + gap + pair > room {
+            continue;
+        }
+        if gap > 0 {
+            spans.push(Span::styled(GAP, theme.muted()));
         }
         spans.push(Span::styled((*key).to_string(), theme.heading()));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(label.clone(), theme.muted()));
+        used += gap + pair;
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

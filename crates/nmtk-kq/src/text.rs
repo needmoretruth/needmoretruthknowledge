@@ -66,6 +66,70 @@ pub fn truncate(text: &str, columns: usize) -> String {
     out
 }
 
+/// Breaks `text` into lines no wider than `columns` cells.
+///
+/// Wrapping is done here rather than by the drawing library because the conversation has to know
+/// how many lines it occupies before it draws them — that is what makes scrolling to the newest
+/// beat exact rather than approximate.
+///
+/// Words are kept whole where they fit. A word longer than the whole width is cut rather than
+/// allowed to run off the edge. Korean and Japanese have no spaces to break on, so a run of wide
+/// glyphs breaks wherever it must.
+pub fn wrap(text: &str, columns: usize) -> Vec<String> {
+    if columns == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+
+    let mut flush = |line: &mut String, used: &mut usize| {
+        lines.push(std::mem::take(line));
+        *used = 0;
+    };
+
+    for word in text.split(' ') {
+        if word.is_empty() {
+            continue;
+        }
+        let word_width = width(word);
+        // A space before the word, unless the line is empty.
+        let gap = usize::from(!line.is_empty());
+        if used + gap + word_width <= columns {
+            if gap == 1 {
+                line.push(' ');
+            }
+            line.push_str(word);
+            used += gap + word_width;
+            continue;
+        }
+        if !line.is_empty() {
+            flush(&mut line, &mut used);
+        }
+        if word_width <= columns {
+            line.push_str(word);
+            used = word_width;
+            continue;
+        }
+        // Longer than a whole line: break it wherever the width runs out.
+        for c in word.chars() {
+            let w = char_width(c);
+            if used + w > columns {
+                flush(&mut line, &mut used);
+            }
+            line.push(c);
+            used += w;
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +149,36 @@ mod tests {
     #[test]
     fn text_already_wide_enough_is_left_alone() {
         assert_eq!(pad("Zero-knowledge", 4), "Zero-knowledge");
+    }
+
+    #[test]
+    fn wrapping_never_exceeds_the_width_it_was_given() {
+        let english = "Every chain has to answer one question: where is the money, and who says so?";
+        for line in wrap(english, 28) {
+            assert!(width(&line) <= 28, "line too wide: {line:?}");
+        }
+        let korean = "모든 체인은 한 가지 질문에 답해야 합니다. 돈이 어디에 있는가?";
+        for line in wrap(korean, 28) {
+            assert!(width(&line) <= 28, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn wrapping_keeps_words_whole() {
+        let lines = wrap("one two three four", 9);
+        assert_eq!(lines, vec!["one two", "three", "four"]);
+    }
+
+    #[test]
+    fn a_word_longer_than_the_line_is_cut_rather_than_lost() {
+        let lines = wrap("supercalifragilistic", 8);
+        assert!(lines.len() > 1);
+        assert_eq!(lines.concat(), "supercalifragilistic");
+    }
+
+    #[test]
+    fn wrapping_empty_text_still_gives_one_line() {
+        assert_eq!(wrap("", 20), vec![String::new()]);
     }
 
     #[test]

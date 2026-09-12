@@ -1,21 +1,33 @@
 //! Knowledge Quest: one coin, three sets of ledger rules.
 //!
-//! The reader writes one transfer and watches UTXO, account and object ledgers each take it their
-//! own way — different things read, different things written, different state left behind. Then
-//! they spend the same coin twice and watch all three refuse it at three different steps.
+//! The reader is told one small thing, presses Enter, and watches it happen to three real ledgers
+//! at once. By the end they have sent a coin under Bitcoin's rules, Ethereum's and Sui's, tried to
+//! spend it twice, and seen three different reasons why they could not.
 //!
-//! This quest is the worked example of the standard in `nmtk-kq`: metadata that the list can sort
-//! without opening anything, its own phrase table, five stages, knobs that take presets *and*
-//! typed numbers, and an engine (`nmtk-ledger`) that never says a word.
+//! This quest is the worked example of the standard in `nmtk-kq`: a conversation rather than a
+//! wall of text, stages with their own difficulty, knobs that take presets *and* typed numbers,
+//! and an engine (`nmtk-ledger`) that never says a word.
 
 mod phrases;
 mod session;
 
 use nmtk_core::{Language, MachineProfile};
-use nmtk_kq::meta::{Category, Date, Difficulty, KqId, KqMeta, KqVersion, Requirements, StageKind};
+use nmtk_kq::meta::{
+    Category, Difficulty, KqId, KqMeta, Requirements, StageRole, StageSpec, Stamp, Version,
+};
 use nmtk_kq::session::{Kq, KqSession};
 
 use crate::phrases::Msg;
+
+/// The stages, in the order a reader walks them.
+const STAGES: [StageSpec; 6] = [
+    StageSpec::new("coins", StageRole::Explain, Difficulty::VeryEasy),
+    StageSpec::new("send", StageRole::Run, Difficulty::VeryEasy),
+    StageSpec::new("grow", StageRole::Run, Difficulty::Easy),
+    StageSpec::new("tune", StageRole::Tune, Difficulty::Easy),
+    StageSpec::new("twice", StageRole::Break, Difficulty::Medium),
+    StageSpec::new("recap", StageRole::Recap, Difficulty::VeryEasy),
+];
 
 /// The quest as it sits in the list.
 pub struct Ledgers;
@@ -24,22 +36,16 @@ impl Kq for Ledgers {
     fn meta(&self) -> KqMeta {
         KqMeta {
             id: KqId("ledgers.transaction-models"),
-            version: KqVersion::new(1, 0),
-            released: Date::new(2026, 9, 12),
-            updated: Date::new(2026, 9, 12),
+            version: Version::new(0, 0, 1),
+            released: Stamp::new(2026, 9, 12, 10, 22, 31),
+            updated: Stamp::new(2026, 9, 12, 10, 22, 31),
             category: Category::Ledgers,
             subcategory: "transaction-models",
-            difficulty: Difficulty::Steady,
-            minutes: 25,
+            difficulty: Difficulty::Easy,
+            minutes: 20,
             // Three small ledgers in memory. Any machine that runs nmtk runs this.
             needs: Requirements::ANY,
-            stages: &[
-                StageKind::Brief,
-                StageKind::Run,
-                StageKind::Tune,
-                StageKind::Break,
-                StageKind::Recap,
-            ],
+            stages: &STAGES,
             tags: &["bitcoin", "ethereum", "sui", "utxo", "double-spend", "parallelism"],
         }
     }
@@ -56,6 +62,17 @@ impl Kq for Ledgers {
         Msg::Subcategory.text(language)
     }
 
+    fn stage_name(&self, key: &str, language: Language) -> &'static str {
+        match key {
+            "coins" => Msg::StageCoins.text(language),
+            "send" => Msg::StageSend.text(language),
+            "grow" => Msg::StageGrow.text(language),
+            "tune" => Msg::StageTune.text(language),
+            "twice" => Msg::StageTwice.text(language),
+            _ => Msg::StageRecap.text(language),
+        }
+    }
+
     fn open(&self, _machine: &MachineProfile) -> Box<dyn KqSession> {
         Box::new(session::Session::new())
     }
@@ -63,7 +80,7 @@ impl Kq for Ledgers {
 
 #[cfg(test)]
 mod tests {
-    use nmtk_kq::meta::StageKind;
+    use nmtk_kq::meta::MIN_STAGES;
 
     use super::*;
 
@@ -71,16 +88,34 @@ mod tests {
     fn the_quest_declares_what_the_list_needs() {
         let meta = Ledgers.meta();
         assert_eq!(meta.id.as_str(), "ledgers.transaction-models");
-        assert!(meta.stages.contains(&StageKind::Brief));
-        assert!(meta.stages.contains(&StageKind::Run));
-        assert!(meta.minutes > 0);
+        assert!(meta.is_well_formed());
+        assert!(meta.stages.len() >= MIN_STAGES);
     }
 
     #[test]
     fn it_has_a_name_in_both_languages() {
         assert_eq!(Ledgers.title(Language::ENGLISH), "Ledger models");
         assert_eq!(Ledgers.title(Language::KOREAN), "원장 방식");
-        assert!(!Ledgers.summary(Language::KOREAN).is_empty());
+    }
+
+    #[test]
+    fn every_stage_is_named() {
+        for stage in Ledgers.meta().stages {
+            for language in Language::ALL {
+                assert!(
+                    !Ledgers.stage_name(stage.key, *language).is_empty(),
+                    "{} has no name in {language}",
+                    stage.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_quest_opens_gently_and_gets_harder() {
+        let stages = Ledgers.meta().stages;
+        assert_eq!(stages[0].difficulty, Difficulty::VeryEasy);
+        assert_eq!(Ledgers.meta().steepest_stage(), Difficulty::Medium);
     }
 
     #[test]

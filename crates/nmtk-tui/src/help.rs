@@ -1,4 +1,7 @@
 //! The key list, and the one promise worth repeating: nothing here goes online.
+//!
+//! Every key on this screen does something. A help screen that names a key which does nothing is
+//! worse than no help screen, because the reader who tries it concludes the program is broken.
 
 use nmtk_i18n::{Msg, t};
 use ratatui::Frame;
@@ -8,29 +11,41 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use nmtk_kq::Theme;
 
-const KEYS: [(&str, Msg); 8] = [
-    ("↑ ↓  j k", Msg::KeyMove),
-    ("Enter", Msg::KeyOpen),
-    ("Space", Msg::KeyPause),
-    ("r", Msg::KeyReset),
-    ("Tab", Msg::KeyPanel),
-    ("l", Msg::KeyLanguage),
-    ("s", Msg::KeySettings),
-    ("q  Esc", Msg::KeyBack),
+/// The keys, grouped by where they work. `None` in place of a key starts a new group.
+const KEYS: [(Option<&str>, Msg); 17] = [
+    (None, Msg::HelpEverywhere),
+    (Some("l"), Msg::KeyLanguage),
+    (Some("s"), Msg::KeySettings),
+    (Some("?"), Msg::KeyHelp),
+    (Some("q  Esc"), Msg::KeyBack),
+    (None, Msg::HelpOnTheShelf),
+    (Some("↑ ↓  j k"), Msg::KeyMove),
+    (Some("Enter"), Msg::KeyOpen),
+    (Some("o"), Msg::LabelSort),
+    (Some("f"), Msg::LabelFilter),
+    (Some("v"), Msg::LabelVersion),
+    (None, Msg::HelpInAQuest),
+    (Some("Enter"), Msg::KeyContinue),
+    (Some("Tab"), Msg::KeyStage),
+    (Some("↑ ↓"), Msg::KeyChoose),
+    (Some("← →  0-9"), Msg::KeyType),
+    (Some("PgUp PgDn"), Msg::KeyScroll),
 ];
 
 pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, theme: Theme) {
     let [keys_area, note_area] =
-        Layout::vertical([Constraint::Min(KEYS.len() as u16 + 2), Constraint::Length(4)])
+        Layout::vertical([Constraint::Min(KEYS.len() as u16 + 2), Constraint::Length(3)])
             .areas(area);
 
     let rows: Vec<Line> = KEYS
         .iter()
-        .map(|(key, label)| {
-            Line::from(vec![
-                Span::styled(format!("{key:<12}"), theme.heading()),
+        .map(|(key, label)| match key {
+            Some(key) => Line::from(vec![
+                Span::styled(format!("  {key:<12}"), theme.heading()),
                 Span::styled(t(*label, language), theme.plain()),
-            ])
+            ]),
+            // A group heading. The blank column keeps the keys under it lined up.
+            None => Line::from(Span::styled(t(*label, language), theme.muted())),
         })
         .collect();
     frame.render_widget(

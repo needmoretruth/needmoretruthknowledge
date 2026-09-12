@@ -83,15 +83,15 @@ impl Matrix {
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0.0f32; 4];
-    let mut lanes_a = a.chunks_exact(4);
-    let mut lanes_b = b.chunks_exact(4);
-    for (x, y) in lanes_a.by_ref().zip(lanes_b.by_ref()) {
+    let (lanes_a, tail_a) = a.as_chunks::<4>();
+    let (lanes_b, tail_b) = b.as_chunks::<4>();
+    for (x, y) in lanes_a.iter().zip(lanes_b) {
         acc[0] += x[0] * y[0];
         acc[1] += x[1] * y[1];
         acc[2] += x[2] * y[2];
         acc[3] += x[3] * y[3];
     }
-    let tail: f32 = lanes_a.remainder().iter().zip(lanes_b.remainder()).map(|(x, y)| x * y).sum();
+    let tail: f32 = tail_a.iter().zip(tail_b).map(|(x, y)| x * y).sum();
     ((acc[0] + acc[1]) + (acc[2] + acc[3])) + tail
 }
 

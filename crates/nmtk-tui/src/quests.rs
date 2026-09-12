@@ -1,8 +1,8 @@
 //! The shelf: every quest, in whatever order the reader asked for.
 
-use nmtk_core::Language;
+use nmtk_core::{Language, MachineProfile, format};
 use nmtk_i18n::{Msg, t};
-use nmtk_kq::meta::{Category, Difficulty};
+use nmtk_kq::meta::{Category, Difficulty, Fit, MachineNeeds, Requirements};
 use nmtk_kq::session::Kq;
 use nmtk_kq::text::{pad, truncate};
 use nmtk_kq::theme::{State, Theme};
@@ -132,8 +132,7 @@ fn render_detail(
     .wrap(Wrap { trim: true });
     frame.render_widget(summary, summary_area);
 
-    let met = meta.needs.met_by(&app.machine);
-    let facts = vec![
+    let mut facts = vec![
         Line::from(vec![
             Span::styled(t(category(meta.category), language), theme.muted()),
             Span::styled(" · ", theme.muted()),
@@ -141,7 +140,11 @@ fn render_detail(
         ]),
         Line::from(vec![
             Span::styled(format!("{} ", meta.difficulty.marks()), theme.muted()),
-            Span::styled(t(difficulty(meta.difficulty), language), theme.plain()),
+            Span::styled(pad(t(difficulty(meta.difficulty), language), 14), theme.plain()),
+            Span::styled(
+                format!("{} {}", meta.stages.len(), t(Msg::LabelStages, language)),
+                theme.muted(),
+            ),
         ]),
         Line::from(vec![
             Span::styled(format!("{} ", t(Msg::LabelLength, language)), theme.muted()),
@@ -153,40 +156,70 @@ fn render_detail(
         Line::from(""),
         Line::from(vec![
             Span::styled(format!("{} ", t(Msg::LabelUpdated, language)), theme.muted()),
-            Span::styled(meta.updated.to_string(), theme.plain()),
+            Span::styled(meta.updated.date(), theme.plain()),
             Span::styled(format!("  v{}", meta.version), theme.muted()),
         ]),
-        needs_line(meta.needs.cores, language, theme),
-        Line::from(Span::styled(
-            t(if met { Msg::NeedsMet } else { Msg::NeedsShort }, language),
-            theme.state(if met { State::Good } else { State::Bad }),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("{} ", t(Msg::LabelSort, language)), theme.muted()),
-            Span::styled(t(sort_name(app.sort), language), theme.plain()),
-            Span::styled(format!("   {} ", t(Msg::LabelFilter, language)), theme.muted()),
-            Span::styled(t(filter_name(&app.filter), language), theme.plain()),
-        ]),
     ];
+    facts.extend(needs_lines(&meta.needs, &app.machine, language, theme));
+    facts.push(Line::from(""));
+    facts.push(Line::from(vec![
+        Span::styled(format!("{} ", t(Msg::LabelSort, language)), theme.muted()),
+        Span::styled(t(sort_name(app.sort), language), theme.plain()),
+        Span::styled(format!("   {} ", t(Msg::LabelFilter, language)), theme.muted()),
+        Span::styled(t(filter_name(&app.filter), language), theme.plain()),
+    ]));
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: true }), facts_area);
 }
 
-/// What the quest asks of the machine. A quest that asks for nothing says so.
-fn needs_line(cores: usize, language: Language, theme: Theme) -> Line<'static> {
-    if cores <= 1 {
-        return Line::from(Span::styled(t(Msg::NeedsAny, language), theme.muted()));
+/// The two bars a quest sets, and where this machine sits against them.
+///
+/// A quest that runs anywhere says only that. Printing "Minimum 1 core" on a quest that needs
+/// nothing is noise the reader has to read past to find the quests that do need something.
+fn needs_lines(
+    needs: &Requirements,
+    machine: &MachineProfile,
+    language: Language,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    if *needs == Requirements::ANY {
+        return vec![Line::from(Span::styled(t(Msg::NeedsAny, language), theme.muted()))];
     }
-    Line::from(vec![
-        Span::styled(format!("{} ", t(Msg::LabelNeeds, language)), theme.muted()),
-        Span::styled(
-            format!(
-                "{cores} {}",
-                t(if cores == 1 { Msg::LabelCore } else { Msg::LabelCores }, language)
-            ),
-            theme.plain(),
-        ),
-    ])
+    let fit = needs.fit(machine);
+    let (state, word) = match fit {
+        Fit::Recommended => (State::Good, Msg::FitRecommended),
+        Fit::Minimum => (State::Working, Msg::FitMinimum),
+        Fit::Below => (State::Bad, Msg::FitBelow),
+    };
+    vec![
+        bar_line(Msg::LabelMinimum, needs.minimum, language, theme),
+        bar_line(Msg::LabelRecommended, needs.recommended, language, theme),
+        Line::from(vec![
+            Span::styled(format!("{} ", state.mark()), theme.state(state)),
+            Span::styled(t(word, language), theme.state(state)),
+        ]),
+    ]
+}
+
+/// `Minimum      4 cores   2.0 GiB`, with the memory left off when the quest does not care.
+fn bar_line(
+    label: Msg,
+    needs: MachineNeeds,
+    language: Language,
+    theme: Theme,
+) -> Line<'static> {
+    let cores = format!(
+        "{} {}",
+        needs.cores,
+        t(if needs.cores == 1 { Msg::LabelCore } else { Msg::LabelCores }, language)
+    );
+    let mut spans = vec![
+        Span::styled(pad(t(label, language), 13), theme.muted()),
+        Span::styled(pad(&cores, 10), theme.plain()),
+    ];
+    if needs.memory_bytes > 0 {
+        spans.push(Span::styled(format::bytes(needs.memory_bytes), theme.plain()));
+    }
+    Line::from(spans)
 }
 
 pub fn category(category: Category) -> Msg {
@@ -200,11 +233,13 @@ pub fn category(category: Category) -> Msg {
     }
 }
 
-fn difficulty(difficulty: Difficulty) -> Msg {
+pub fn difficulty(difficulty: Difficulty) -> Msg {
     match difficulty {
-        Difficulty::Gentle => Msg::DifficultyGentle,
-        Difficulty::Steady => Msg::DifficultySteady,
-        Difficulty::Steep => Msg::DifficultySteep,
+        Difficulty::VeryEasy => Msg::DifficultyVeryEasy,
+        Difficulty::Easy => Msg::DifficultyEasy,
+        Difficulty::Medium => Msg::DifficultyMedium,
+        Difficulty::Hard => Msg::DifficultyHard,
+        Difficulty::VeryHard => Msg::DifficultyVeryHard,
     }
 }
 
