@@ -7,7 +7,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::Subject;
-use crate::theme::{EXPLAIN_PERCENT, Theme};
+use nmtk_kq::theme::{EXPLAIN_PERCENT, Theme};
 
 /// Splits a subject screen into its two panels: explanation, then the run.
 pub fn split(area: Rect) -> [Rect; 2] {

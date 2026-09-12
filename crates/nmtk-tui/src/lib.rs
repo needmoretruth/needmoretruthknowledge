@@ -11,7 +11,6 @@ mod home;
 mod logo;
 mod settings_screen;
 mod subject;
-pub mod theme;
 pub mod widgets;
 
 use std::io;
@@ -23,7 +22,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
 use crate::app::{App, Screen};
-use crate::theme::{FRAME_MILLIS, MIN_HEIGHT, MIN_WIDTH, Theme};
+use nmtk_kq::theme::{FRAME_MILLIS, MIN_HEIGHT, MIN_WIDTH, Theme};
 
 /// Runs nmtk until the reader quits, restoring the terminal whatever happens.
 pub fn run() -> io::Result<()> {

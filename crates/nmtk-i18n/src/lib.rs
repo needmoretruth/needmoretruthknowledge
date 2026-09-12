@@ -7,9 +7,13 @@
 //! Engines never reach into this table. They return numbers and enums; the screen decides how to
 //! say them. That is why a new language costs one column here and nothing anywhere else.
 
-use nmtk_core::Language;
+pub use nmtk_core::Language;
 
-/// Declares the message table. Korean is optional per line.
+/// Declares a message table. Korean is optional per line.
+///
+/// Every KQ calls this for its own phrases, so two quests being written at the same time never
+/// touch the same file.
+#[macro_export]
 macro_rules! messages {
     ($( $(#[$doc:meta])* $key:ident : $en:literal $( => $ko:literal )? ),* $(,)?) => {
         /// One line of text on screen, named by what it says rather than where it appears.
@@ -18,12 +22,12 @@ macro_rules! messages {
 
         impl Msg {
             /// The line in the chosen language, falling back to English.
-            pub fn text(self, language: Language) -> &'static str {
+            pub fn text(self, language: $crate::Language) -> &'static str {
                 match (self, language) {
-                    $( (Msg::$key, Language::English) => $en, )*
-                    $( $( (Msg::$key, Language::Korean) => $ko, )? )*
+                    $( (Msg::$key, $crate::Language::English) => $en, )*
+                    $( $( (Msg::$key, $crate::Language::Korean) => $ko, )? )*
                     #[allow(unreachable_patterns)]
-                    (other, _) => other.text(Language::English),
+                    (other, _) => other.text($crate::Language::English),
                 }
             }
 

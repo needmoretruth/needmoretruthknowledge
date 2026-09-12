@@ -14,3 +14,8 @@ ff = { workspace = true }
 group = { workspace = true }
 pasta_curves = { workspace = true }
 halo2_proofs = { workspace = true }
+# halo2_proofs 0.3 takes its prover randomness through the rand_core 0.6 `RngCore` trait, and
+# neither it nor pasta_curves re-exports that crate. Without naming it here there is no way to hand
+# `create_proof` an RNG at all. No new code enters the build: rand_core 0.6.4 is already compiled as
+# a dependency of halo2_proofs.
+rand_core = "0.6"

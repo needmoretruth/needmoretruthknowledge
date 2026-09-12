@@ -9,7 +9,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, HomeItem};
 use crate::logo;
-use crate::theme::Theme;
+use nmtk_kq::Theme;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let language = app.language();
@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     render_logo(frame, logo_area, theme, room_for_logo);
 
     let motto = Paragraph::new(vec![
-        Line::from(Span::styled(t(Msg::Motto, language), theme.accent())),
+        Line::from(Span::styled(t(Msg::Motto, language), theme.heading())),
         Line::from(Span::styled(t(Msg::AppSubtitle, language), theme.muted())),
     ])
     .alignment(Alignment::Center);
@@ -77,9 +77,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn render_logo(frame: &mut Frame, area: Rect, theme: Theme, large: bool) {
     let lines: Vec<Line> = if large {
-        logo::LARGE.iter().map(|row| Line::from(Span::styled(*row, theme.accent()))).collect()
+        logo::LARGE.iter().map(|row| Line::from(Span::styled(*row, theme.heading()))).collect()
     } else {
-        vec![Line::from(""), Line::from(Span::styled(logo::SMALL, theme.accent()))]
+        vec![Line::from(""), Line::from(Span::styled(logo::SMALL, theme.heading()))]
     };
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }

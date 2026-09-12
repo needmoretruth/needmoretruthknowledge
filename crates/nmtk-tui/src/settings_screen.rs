@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, SettingItem};
-use crate::theme::Theme;
+use nmtk_kq::Theme;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let area = centred(area, 72);
@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let style = if index == selected { theme.selected() } else { theme.plain() };
             Line::from(vec![
                 Span::styled(format!("{marker}{:<16}", t(item.title(), language)), style),
-                Span::styled(value_of(*item, app, language), theme.accent()),
+                Span::styled(value_of(*item, app, language), theme.heading()),
             ])
         })
         .collect();
@@ -41,7 +41,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(about.block(theme.panel()), about_area);
 
     if let Some(status) = app.status {
-        let style = if status == Msg::SettingsSaved { theme.ok() } else { theme.danger() };
+        let style = if status == Msg::SettingsSaved { theme.good() } else { theme.bad() };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(format!(" {}", t(status, language)), style))),
             status_area,

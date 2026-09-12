@@ -13,6 +13,7 @@ description = "Run proof of work, ledger models, transformers and zero-knowledge
 [workspace.dependencies]
 nmtk-core = { path = "crates/nmtk-core" }
 nmtk-i18n = { path = "crates/nmtk-i18n" }
+nmtk-kq = { path = "crates/nmtk-kq" }
 nmtk-pow = { path = "crates/nmtk-pow" }
 nmtk-ledger = { path = "crates/nmtk-ledger" }
 nmtk-transformer = { path = "crates/nmtk-transformer" }

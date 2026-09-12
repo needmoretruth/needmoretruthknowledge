@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::theme::Theme;
+use nmtk_kq::Theme;
 
 const KEYS: [(&str, Msg); 8] = [
     ("↑ ↓  j k", Msg::KeyMove),
@@ -28,7 +28,7 @@ pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, them
         .iter()
         .map(|(key, label)| {
             Line::from(vec![
-                Span::styled(format!("{key:<12}"), theme.accent()),
+                Span::styled(format!("{key:<12}"), theme.heading()),
                 Span::styled(t(*label, language), theme.plain()),
             ])
         })
@@ -39,6 +39,6 @@ pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, them
     );
 
     let note =
-        Paragraph::new(t(Msg::HelpOffline, language)).style(theme.ok()).wrap(Wrap { trim: true });
+        Paragraph::new(t(Msg::HelpOffline, language)).style(theme.good()).wrap(Wrap { trim: true });
     frame.render_widget(note.block(theme.panel()), note_area);
 }

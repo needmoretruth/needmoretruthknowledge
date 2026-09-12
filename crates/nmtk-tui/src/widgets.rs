@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Sparkline};
 
-use crate::theme::Theme;
+use nmtk_kq::Theme;
 
 /// A column of `name    value` rows, names quiet and values plain.
 pub fn stats(frame: &mut Frame, area: Rect, theme: Theme, rows: &[(&str, String)]) {
@@ -64,7 +64,7 @@ pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64]) {
     let span = (high - low).max(f64::EPSILON);
     let scaled: Vec<u64> =
         finite.iter().map(|v| (((v - low) / span) * 100.0).round() as u64).collect();
-    frame.render_widget(Sparkline::default().data(&scaled).style(theme.accent()), area);
+    frame.render_widget(Sparkline::default().data(&scaled).style(theme.heading()), area);
 }
 
 #[cfg(test)]
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn a_full_bar_fills_the_width() {
         let theme = Theme::new(true);
-        let text = draw(40, 1, |frame, area| bar(frame, area, theme, "miner", 1.0, theme.ok()));
+        let text = draw(40, 1, |frame, area| bar(frame, area, theme, "miner", 1.0, theme.good()));
         assert_eq!(text.matches('█').count(), 26);
         assert!(!text.contains('░'));
     }
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn a_bar_of_nonsense_draws_empty_rather_than_panicking() {
         let theme = Theme::new(true);
-        let text = draw(40, 1, |frame, area| bar(frame, area, theme, "miner", f64::NAN, theme.ok()));
+        let text = draw(40, 1, |frame, area| bar(frame, area, theme, "miner", f64::NAN, theme.good()));
         assert!(!text.contains('█'));
     }
 

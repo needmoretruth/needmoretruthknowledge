@@ -7,12 +7,12 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::theme::Theme;
+use nmtk_kq::Theme;
 
 /// `NMTK · <screen>` on the left, the language tag on the right.
 pub fn title_bar(frame: &mut Frame, area: Rect, theme: Theme, title: &str, language: Language) {
     let left = Line::from(vec![
-        Span::styled(" NMTK", theme.accent().patch(theme.strong())),
+        Span::styled(" NMTK", theme.heading()),
         Span::styled("  ·  ", theme.muted()),
         Span::styled(title.to_string(), theme.plain()),
     ]);
@@ -35,7 +35,7 @@ pub fn key_bar(
         if index > 0 {
             spans.push(Span::styled("  ·  ", theme.muted()));
         }
-        spans.push(Span::styled((*key).to_string(), theme.accent()));
+        spans.push(Span::styled((*key).to_string(), theme.heading()));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(t(*label, language), theme.muted()));
     }
@@ -47,7 +47,7 @@ pub fn too_small(frame: &mut Frame, theme: Theme, language: Language) {
     let area = frame.area();
     let message = Paragraph::new(vec![
         Line::from(""),
-        Line::from(Span::styled(t(Msg::TerminalTooSmall, language), theme.danger())),
+        Line::from(Span::styled(t(Msg::TerminalTooSmall, language), theme.bad())),
         Line::from(Span::styled(format!("{}x{}", area.width, area.height), theme.muted())),
     ])
     .alignment(Alignment::Center);
