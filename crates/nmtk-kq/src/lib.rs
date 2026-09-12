@@ -40,6 +40,7 @@ pub mod catalogue;
 pub mod knob;
 pub mod meta;
 pub mod session;
+pub mod text;
 pub mod theme;
 pub mod widgets;
 

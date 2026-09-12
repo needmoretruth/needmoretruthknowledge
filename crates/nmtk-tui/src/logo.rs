@@ -17,6 +17,3 @@ pub const LARGE: [&str; 6] = [
 pub const LARGE_WIDTH: u16 = 38;
 /// Rows the large logo needs.
 pub const LARGE_HEIGHT: u16 = 6;
-
-/// What to show when the large logo does not fit.
-pub const SMALL: &str = "N M T K";

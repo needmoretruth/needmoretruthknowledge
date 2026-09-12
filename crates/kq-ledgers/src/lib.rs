@@ -12,9 +12,7 @@ mod phrases;
 mod session;
 
 use nmtk_core::{Language, MachineProfile};
-use nmtk_kq::meta::{
-    Category, Date, Difficulty, KqId, KqMeta, KqVersion, Requirements, StageKind,
-};
+use nmtk_kq::meta::{Category, Date, Difficulty, KqId, KqMeta, KqVersion, Requirements, StageKind};
 use nmtk_kq::session::{Kq, KqSession};
 
 use crate::phrases::Msg;

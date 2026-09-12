@@ -26,8 +26,13 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    pub const ALL: [SortKey; 5] =
-        [SortKey::Category, SortKey::Title, SortKey::Difficulty, SortKey::Newest, SortKey::Shortest];
+    pub const ALL: [SortKey; 5] = [
+        SortKey::Category,
+        SortKey::Title,
+        SortKey::Difficulty,
+        SortKey::Newest,
+        SortKey::Shortest,
+    ];
 }
 
 /// What the list is narrowed to.

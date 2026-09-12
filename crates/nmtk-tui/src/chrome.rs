@@ -23,13 +23,7 @@ pub fn title_bar(frame: &mut Frame, area: Rect, theme: Theme, title: &str, langu
 }
 
 /// The keys that work on this screen, written as `key label` pairs separated by dots.
-pub fn key_bar(
-    frame: &mut Frame,
-    area: Rect,
-    theme: Theme,
-    keys: &[(&str, Msg)],
-    language: Language,
-) {
+pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, String)]) {
     let mut spans = vec![Span::raw(" ")];
     for (index, (key, label)) in keys.iter().enumerate() {
         if index > 0 {
@@ -37,7 +31,7 @@ pub fn key_bar(
         }
         spans.push(Span::styled((*key).to_string(), theme.heading()));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(t(*label, language), theme.muted()));
+        spans.push(Span::styled(label.clone(), theme.muted()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

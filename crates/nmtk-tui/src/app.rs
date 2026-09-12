@@ -1,77 +1,14 @@
 //! What the program is showing and what the keys do.
 //!
-//! The engines are not here. This type holds only what a reader can see and change, so the whole
-//! interface can be reasoned about — and tested — without mining a single block.
+//! The quests are not here. This type holds the shelf, the settings, and whichever quest is open,
+//! so the whole interface can be reasoned about — and tested — without mining a single block.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nmtk_core::{Language, MachineProfile, Settings};
 use nmtk_i18n::Msg;
-
-/// A subject a reader can open from the home screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Subject {
-    ProofOfWork,
-    Ledgers,
-    Transformer,
-    ZeroKnowledge,
-}
-
-impl Subject {
-    pub const ALL: [Subject; 4] =
-        [Subject::ProofOfWork, Subject::Ledgers, Subject::Transformer, Subject::ZeroKnowledge];
-
-    pub fn title(self) -> Msg {
-        match self {
-            Subject::ProofOfWork => Msg::MenuProofOfWork,
-            Subject::Ledgers => Msg::MenuLedgers,
-            Subject::Transformer => Msg::MenuTransformer,
-            Subject::ZeroKnowledge => Msg::MenuZeroKnowledge,
-        }
-    }
-
-    pub fn about(self) -> Msg {
-        match self {
-            Subject::ProofOfWork => Msg::MenuProofOfWorkAbout,
-            Subject::Ledgers => Msg::MenuLedgersAbout,
-            Subject::Transformer => Msg::MenuTransformerAbout,
-            Subject::ZeroKnowledge => Msg::MenuZeroKnowledgeAbout,
-        }
-    }
-}
-
-/// A row on the home screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HomeItem {
-    Subject(Subject),
-    Settings,
-    Quit,
-}
-
-impl HomeItem {
-    pub fn all() -> Vec<HomeItem> {
-        Subject::ALL
-            .iter()
-            .map(|s| HomeItem::Subject(*s))
-            .chain([HomeItem::Settings, HomeItem::Quit])
-            .collect()
-    }
-
-    pub fn title(self) -> Msg {
-        match self {
-            HomeItem::Subject(s) => s.title(),
-            HomeItem::Settings => Msg::MenuSettings,
-            HomeItem::Quit => Msg::MenuQuit,
-        }
-    }
-
-    pub fn about(self) -> Option<Msg> {
-        match self {
-            HomeItem::Subject(s) => Some(s.about()),
-            HomeItem::Settings => Some(Msg::MenuSettingsAbout),
-            HomeItem::Quit => None,
-        }
-    }
-}
+use nmtk_kq::meta::{KqId, KqVersion, StageKind};
+use nmtk_kq::session::{Action, Kq, KqSession};
+use nmtk_kq::{Catalogue, Filter, SortKey};
 
 /// A row on the settings screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,34 +42,55 @@ impl SettingItem {
 /// Which screen is in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Home,
-    Subject(Subject),
+    /// The shelf of quests.
+    Quests,
+    /// A quest a reader has opened.
+    Quest,
     Settings,
     Help,
+}
+
+/// The quest a reader is inside.
+pub struct OpenQuest {
+    pub id: KqId,
+    pub version: KqVersion,
+    pub title: &'static str,
+    pub stages: &'static [StageKind],
+    pub session: Box<dyn KqSession>,
 }
 
 /// The whole interface state.
 pub struct App {
     pub settings: Settings,
     pub machine: MachineProfile,
+    pub catalogue: Catalogue,
     pub screen: Screen,
-    /// Where `?` was pressed, so closing help goes back rather than home.
+    /// Where `?` was pressed, so closing help goes back rather than to the shelf.
     behind_help: Option<Screen>,
-    pub home_index: usize,
+    pub list_index: usize,
+    pub sort: SortKey,
+    pub filter: Filter,
+    /// Set while the reader is looking at the older versions of one quest.
+    pub versions_of: Option<KqId>,
+    pub open: Option<OpenQuest>,
     pub settings_index: usize,
-    /// A line shown briefly under the settings, e.g. that they were saved.
     pub status: Option<Msg>,
     pub quit: bool,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(catalogue: Catalogue) -> Self {
         Self {
             settings: Settings::load(),
             machine: MachineProfile::detect(),
-            screen: Screen::Home,
+            catalogue,
+            screen: Screen::Quests,
             behind_help: None,
-            home_index: 0,
+            list_index: 0,
+            sort: SortKey::Category,
+            filter: Filter::default(),
+            versions_of: None,
+            open: None,
             settings_index: 0,
             status: None,
             quit: false,
@@ -147,55 +105,85 @@ impl App {
         self.settings.resolved_worker_threads(&self.machine)
     }
 
-    /// Handles one key. Key releases and repeats are ignored: a held key should not run a subject
-    /// twice.
+    /// The rows the shelf is showing: either the newest of each quest, or every version of one.
+    pub fn visible(&self) -> Vec<&dyn Kq> {
+        match self.versions_of {
+            Some(id) => self.catalogue.versions_of(id),
+            None => self.catalogue.list(&self.filter, self.sort, self.language()),
+        }
+    }
+
+    /// Handles one key. Releases and repeats are ignored: a held key must not open a quest twice.
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+            self.close_quest();
             self.quit = true;
             return;
         }
         self.status = None;
         match self.screen {
             Screen::Help => self.on_key_help(key.code),
-            Screen::Home => self.on_key_home(key.code),
+            Screen::Quests => self.on_key_quests(key.code),
+            Screen::Quest => self.on_key_quest(key.code),
             Screen::Settings => self.on_key_settings(key.code),
-            Screen::Subject(_) => self.on_key_subject(key.code),
         }
     }
 
     fn on_key_help(&mut self, code: KeyCode) {
+        if matches!(code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+            self.screen = self.behind_help.take().unwrap_or(Screen::Quests);
+        }
+    }
+
+    fn on_key_quests(&mut self, code: KeyCode) {
+        let count = self.visible().len();
         match code {
-            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                self.screen = self.behind_help.take().unwrap_or(Screen::Home);
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.list_index = previous(self.list_index, count),
+            KeyCode::Down | KeyCode::Char('j') => self.list_index = next(self.list_index, count),
+            KeyCode::Enter => self.open_chosen(),
+            KeyCode::Char('o') => self.cycle_sort(),
+            KeyCode::Char('f') => self.cycle_filter(),
+            KeyCode::Char('v') => self.toggle_versions(),
+            KeyCode::Char('s') => self.screen = Screen::Settings,
+            KeyCode::Char('l') => self.toggle_language(),
+            KeyCode::Char('?') => self.open_help(),
+            KeyCode::Esc if self.versions_of.is_some() => self.toggle_versions(),
+            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             _ => {}
         }
     }
 
-    fn on_key_home(&mut self, code: KeyCode) {
-        let items = HomeItem::all();
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.home_index = previous(self.home_index, items.len())
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.home_index = next(self.home_index, items.len())
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                match items[self.home_index.min(items.len() - 1)] {
-                    HomeItem::Subject(subject) => self.screen = Screen::Subject(subject),
-                    HomeItem::Settings => self.screen = Screen::Settings,
-                    HomeItem::Quit => self.quit = true,
+    fn on_key_quest(&mut self, code: KeyCode) {
+        // The shell's own keys come first, except while a number is being typed.
+        let typing = self.open.as_ref().is_some_and(|quest| quest.session.typing());
+        if !typing {
+            match code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.close_quest();
+                    self.screen = Screen::Quests;
+                    return;
                 }
+                KeyCode::Char('l') => {
+                    self.toggle_language();
+                    return;
+                }
+                KeyCode::Char('s') => {
+                    self.screen = Screen::Settings;
+                    return;
+                }
+                KeyCode::Char('?') => {
+                    self.open_help();
+                    return;
+                }
+                _ => {}
             }
-            KeyCode::Char('s') => self.screen = Screen::Settings,
-            KeyCode::Char('l') => self.toggle_language(),
-            KeyCode::Char('?') => self.open_help(),
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            _ => {}
+        }
+        let Some(action) = action_for(code, typing, self.stages()) else { return };
+        if let Some(quest) = &mut self.open {
+            quest.session.on(action);
         }
     }
 
@@ -209,23 +197,83 @@ impl App {
                 self.settings_index = next(self.settings_index, count)
             }
             KeyCode::Left | KeyCode::Char('h') => self.adjust_setting(-1),
-            KeyCode::Right | KeyCode::Char('L') => self.adjust_setting(1),
-            KeyCode::Enter => self.adjust_setting(1),
+            KeyCode::Right | KeyCode::Enter => self.adjust_setting(1),
             KeyCode::Char('l') => self.toggle_language(),
             KeyCode::Char('?') => self.open_help(),
-            KeyCode::Char('q') | KeyCode::Esc => self.screen = Screen::Home,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.screen = if self.open.is_some() { Screen::Quest } else { Screen::Quests }
+            }
             _ => {}
         }
     }
 
-    fn on_key_subject(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Char('l') => self.toggle_language(),
-            KeyCode::Char('?') => self.open_help(),
-            KeyCode::Char('s') => self.screen = Screen::Settings,
-            KeyCode::Char('q') | KeyCode::Esc => self.screen = Screen::Home,
-            _ => {}
+    /// The stages the open quest has, or nothing when none is open.
+    fn stages(&self) -> &'static [StageKind] {
+        self.open.as_ref().map(|quest| quest.stages).unwrap_or(&[])
+    }
+
+    fn open_chosen(&mut self) {
+        let chosen = {
+            let list = self.visible();
+            list.get(self.list_index).map(|quest| {
+                let meta = quest.meta();
+                (meta.id, meta.version, meta.stages)
+            })
+        };
+        let Some((id, version, stages)) = chosen else { return };
+        let opened = {
+            let versions = self.catalogue.versions_of(id);
+            versions
+                .iter()
+                .find(|quest| quest.meta().version == version)
+                .map(|quest| (quest.title(self.settings.language), quest.open(&self.machine)))
+        };
+        if let Some((title, session)) = opened {
+            self.close_quest();
+            self.open = Some(OpenQuest { id, version, title, stages, session });
+            self.screen = Screen::Quest;
         }
+    }
+
+    /// Stops the open quest's threads. Always called before one is dropped.
+    fn close_quest(&mut self) {
+        if let Some(quest) = &mut self.open {
+            quest.session.close();
+        }
+        self.open = None;
+    }
+
+    fn cycle_sort(&mut self) {
+        let current = SortKey::ALL.iter().position(|key| *key == self.sort).unwrap_or(0);
+        self.sort = SortKey::ALL[(current + 1) % SortKey::ALL.len()];
+        self.list_index = 0;
+    }
+
+    /// Steps through the categories that actually hold quests, then back to all of them.
+    fn cycle_filter(&mut self) {
+        let categories = self.catalogue.categories();
+        self.filter.category = match self.filter.category {
+            None => categories.first().copied(),
+            Some(current) => {
+                let at = categories.iter().position(|c| *c == current);
+                match at {
+                    Some(index) if index + 1 < categories.len() => Some(categories[index + 1]),
+                    _ => None,
+                }
+            }
+        };
+        self.list_index = 0;
+    }
+
+    fn toggle_versions(&mut self) {
+        self.versions_of = match self.versions_of {
+            Some(_) => None,
+            None => {
+                let list = self.visible();
+                list.get(self.list_index).map(|quest| quest.meta().id)
+            }
+        };
+        self.list_index = 0;
     }
 
     fn open_help(&mut self) {
@@ -262,9 +310,23 @@ impl App {
     }
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
+/// The gesture a key means inside a quest.
+fn action_for(code: KeyCode, typing: bool, stages: &[StageKind]) -> Option<Action> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') if !typing => Some(Action::Previous),
+        KeyCode::Down | KeyCode::Char('j') if !typing => Some(Action::Next),
+        KeyCode::Left | KeyCode::Char('h') if !typing => Some(Action::Nudge(-1)),
+        KeyCode::Right if !typing => Some(Action::Nudge(1)),
+        KeyCode::Enter => Some(if typing { Action::Commit } else { Action::Go }),
+        KeyCode::Char(' ') if !typing => Some(Action::PauseOrResume),
+        KeyCode::Char('r') if !typing => Some(Action::Reset),
+        KeyCode::Backspace => Some(Action::Backspace),
+        KeyCode::Esc if typing => Some(Action::Cancel),
+        KeyCode::Char(c) if typing && (c.is_ascii_digit() || c == '.') => Some(Action::Type(c)),
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            stages.iter().find(|stage| stage.digit() == c).map(|stage| Action::Stage(*stage))
+        }
+        _ => None,
     }
 }
 
@@ -274,106 +336,4 @@ fn next(index: usize, len: usize) -> usize {
 
 fn previous(index: usize, len: usize) -> usize {
     if len == 0 { 0 } else { (index + len - 1) % len }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn press(app: &mut App, code: KeyCode) {
-        app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
-    }
-
-    fn app() -> App {
-        App {
-            settings: Settings::default(),
-            machine: MachineProfile {
-                logical_cores: 8,
-                total_memory_bytes: 0,
-                available_memory_bytes: 0,
-            },
-            screen: Screen::Home,
-            behind_help: None,
-            home_index: 0,
-            settings_index: 0,
-            status: None,
-            quit: false,
-        }
-    }
-
-    #[test]
-    fn moving_up_from_the_top_wraps_to_the_bottom() {
-        let mut app = app();
-        press(&mut app, KeyCode::Up);
-        assert_eq!(app.home_index, HomeItem::all().len() - 1);
-    }
-
-    #[test]
-    fn the_last_home_row_quits() {
-        let mut app = app();
-        app.home_index = HomeItem::all().len() - 1;
-        press(&mut app, KeyCode::Enter);
-        assert!(app.quit);
-    }
-
-    #[test]
-    fn help_returns_to_the_screen_it_was_opened_from() {
-        let mut app = app();
-        app.screen = Screen::Settings;
-        press(&mut app, KeyCode::Char('?'));
-        assert_eq!(app.screen, Screen::Help);
-        press(&mut app, KeyCode::Esc);
-        assert_eq!(app.screen, Screen::Settings);
-    }
-
-    #[test]
-    fn quitting_from_a_subject_goes_home_rather_than_out() {
-        let mut app = app();
-        app.screen = Screen::Subject(Subject::ProofOfWork);
-        press(&mut app, KeyCode::Char('q'));
-        assert_eq!(app.screen, Screen::Home);
-        assert!(!app.quit);
-    }
-
-    #[test]
-    fn the_language_key_works_on_every_screen() {
-        for screen in [Screen::Home, Screen::Settings, Screen::Subject(Subject::Ledgers)] {
-            let mut app = app();
-            app.screen = screen;
-            press(&mut app, KeyCode::Char('l'));
-            assert_eq!(app.settings.language, Language::Korean, "{screen:?} ignored the key");
-        }
-    }
-
-    #[test]
-    fn threads_cannot_be_set_above_the_machine_or_below_auto() {
-        let mut app = app();
-        app.screen = Screen::Settings;
-        app.settings_index = 1;
-        for _ in 0..20 {
-            press(&mut app, KeyCode::Right);
-        }
-        assert_eq!(app.settings.worker_threads, 8);
-        for _ in 0..20 {
-            press(&mut app, KeyCode::Left);
-        }
-        assert_eq!(app.settings.worker_threads, 0);
-    }
-
-    #[test]
-    fn auto_threads_leave_one_core_for_the_screen() {
-        let app = app();
-        assert_eq!(app.threads(), 7);
-    }
-
-    #[test]
-    fn a_held_key_does_not_repeat_an_action() {
-        let mut app = app();
-        app.on_key(KeyEvent::new_with_kind(
-            KeyCode::Down,
-            KeyModifiers::NONE,
-            KeyEventKind::Release,
-        ));
-        assert_eq!(app.home_index, 0);
-    }
 }

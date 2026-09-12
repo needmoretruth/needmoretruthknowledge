@@ -76,7 +76,12 @@ mod tests {
 
     fn draw(width: u16, height: u16, f: impl FnOnce(&mut Frame, Rect)) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("backend");
-        terminal.draw(|frame| { let area = frame.area(); f(frame, area) }).expect("draw");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                f(frame, area)
+            })
+            .expect("draw");
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
             .map(|y| {
@@ -99,7 +104,8 @@ mod tests {
     #[test]
     fn a_bar_of_nonsense_draws_empty_rather_than_panicking() {
         let theme = Theme::new(true);
-        let text = draw(40, 1, |frame, area| bar(frame, area, theme, "miner", f64::NAN, theme.good()));
+        let text =
+            draw(40, 1, |frame, area| bar(frame, area, theme, "miner", f64::NAN, theme.good()));
         assert!(!text.contains('█'));
     }
 

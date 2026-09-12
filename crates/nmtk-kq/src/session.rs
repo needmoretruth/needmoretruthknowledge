@@ -110,6 +110,14 @@ pub trait KqSession {
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language);
     /// The keys this quest adds to the bottom bar, beyond the ones every screen has.
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)>;
+    /// Whether a number is being typed into a knob right now.
+    ///
+    /// While this is true the shell hands digits to the quest; otherwise `1`–`5` jump between
+    /// stages. A quest with no typed knobs leaves this alone.
+    fn typing(&self) -> bool {
+        false
+    }
+
     /// Stops any worker threads. Always called before the session is dropped.
     fn close(&mut self);
 }

@@ -102,11 +102,8 @@ impl KnobValue {
             }
             KnobValue::Choice { current, count } => {
                 if *count > 0 {
-                    *current = if up {
-                        (*current + 1) % *count
-                    } else {
-                        (*current + *count - 1) % *count
-                    };
+                    *current =
+                        if up { (*current + 1) % *count } else { (*current + *count - 1) % *count };
                 }
             }
             KnobValue::Toggle { current } => *current = !*current,
@@ -241,7 +238,13 @@ mod tests {
     fn a_share_is_typed_the_way_it_is_shown() {
         let mut knob = Knob::new(
             "attacker",
-            KnobValue::Share { current: 0.3, min: 0.0, max: 1.0, step: 0.01, presets: &[0.3, 0.51] },
+            KnobValue::Share {
+                current: 0.3,
+                min: 0.0,
+                max: 1.0,
+                step: 0.01,
+                presets: &[0.3, 0.51],
+            },
         );
         for c in "51".chars() {
             knob.type_char(c);

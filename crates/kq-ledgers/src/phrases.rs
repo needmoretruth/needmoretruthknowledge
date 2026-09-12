@@ -4,7 +4,7 @@
 //! table is where they become something a reader understands. Keeping the two apart is what lets a
 //! third language arrive without the ledger code noticing.
 
-use nmtk_ledger::{CheckStep, Conflict, EntryKind, Model, RejectionKind};
+use nmtk_ledger::{CheckStep, EntryKind, Model, RejectionKind};
 
 nmtk_i18n::messages! {
     // ---- The quest itself ------------------------------------------------------
@@ -22,14 +22,15 @@ nmtk_i18n::messages! {
     // ---- Run -------------------------------------------------------------------
     RunTitle: "One transfer, three answers" => "이체 하나, 답 셋",
     RunIdle: "Press Enter to send." => "Enter를 눌러 보냅니다.",
+    BriefNext: "Press Enter to begin." => "Enter를 눌러 시작합니다.",
     RunOpening: "Alice holds three coins of 10. Bob and Carol hold nothing. A pool holds 100 that anyone may pay into." => "앨리스는 10짜리 코인 셋을 갖고 있습니다. 밥과 캐럴은 아무것도 없습니다. 공용 풀에는 누구나 넣을 수 있는 100이 있습니다.",
     RunAfter: "Three models, one transfer. The balances agree; almost nothing else does." => "같은 이체를 셋이 처리했습니다. 잔액은 일치하지만, 그 밖에는 거의 일치하지 않습니다.",
     ColumnState: "State" => "상태",
-    ColumnEntries: "Entries" => "항목",
+    ColumnEntries: "entries" => "항목",
     ColumnSize: "Size" => "크기",
     ColumnReads: "Reads" => "읽기",
     ColumnWrites: "Writes" => "쓰기",
-    ColumnGrowth: "Growth" => "증가",
+    ColumnGrowth: "growth" => "증가",
     ColumnBalance: "Alice" => "앨리스",
     LabelAccepted: "accepted" => "받아들임",
     LabelRejected: "rejected" => "거절함",
@@ -164,15 +165,5 @@ pub fn why(kind: RejectionKind) -> Msg {
         RejectionKind::CoinTooSmall => Msg::WhyCoinTooSmall,
         RejectionKind::NoSuchCoin => Msg::WhyNoSuchCoin,
         RejectionKind::ModelMismatch => Msg::WhyModelMismatch,
-    }
-}
-
-/// Whether two transfers collide, and how.
-pub fn conflict(conflict: &Conflict) -> Msg {
-    match conflict {
-        Conflict::Independent => Msg::ConflictIndependent,
-        Conflict::WriteWrite(_) => Msg::ConflictWriteWrite,
-        Conflict::ReadWrite(_) => Msg::ConflictReadWrite,
-        Conflict::ModelMismatch => Msg::ConflictModelMismatch,
     }
 }

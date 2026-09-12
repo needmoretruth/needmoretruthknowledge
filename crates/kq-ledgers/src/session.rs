@@ -4,6 +4,7 @@ use nmtk_core::{Language, format};
 use nmtk_kq::knob::{Knob, KnobValue};
 use nmtk_kq::meta::StageKind;
 use nmtk_kq::session::{Action, KqSession, Reaction, RunState};
+use nmtk_kq::text::pad;
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::widgets;
 use nmtk_ledger::{
@@ -133,8 +134,8 @@ impl Session {
     /// Writes two transfers against the same state and sends both.
     fn spend_twice(&mut self) {
         let first = self.request();
-        let second = TransferRequest::new(self.alice, self.carol, self.amount())
-            .with_coin(self.coin());
+        let second =
+            TransferRequest::new(self.alice, self.carol, self.amount()).with_coin(self.coin());
         self.double = Some(self.scenario.double_spend(&first, &second));
         self.state = RunState::Done;
     }
@@ -174,10 +175,7 @@ impl Session {
         for model in Model::ALL {
             let fact = facts.get(model);
             lines.push(Line::from(vec![
-                Span::styled(
-                    pad(phrases::model(model).text(language), 10),
-                    theme.heading(),
-                ),
+                Span::styled(pad(phrases::model(model).text(language), 10), theme.heading()),
                 Span::styled(
                     phrases::entry_kind(fact.entry_kind).text(language).to_string(),
                     theme.muted(),
@@ -303,6 +301,10 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Go => match self.stage {
+                StageKind::Brief => {
+                    self.go_to(StageKind::Run);
+                    Reaction::Handled
+                }
                 StageKind::Run | StageKind::Tune => {
                     self.send();
                     Reaction::Handled
@@ -414,11 +416,12 @@ impl KqSession for Session {
         match self.stage {
             StageKind::Brief | StageKind::Run => {
                 let lines = self.model_lines(language, theme);
-                let hint = if self.transfer.is_none() { Msg::RunIdle } else { Msg::LabelAccepted };
+                let hint =
+                    if self.stage == StageKind::Brief { Msg::BriefNext } else { Msg::RunIdle };
                 let [rows, footer] =
                     Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
                 frame.render_widget(Paragraph::new(lines), rows);
-                if self.transfer.is_none() {
+                if self.transfer.is_none() || self.stage == StageKind::Brief {
                     frame.render_widget(
                         Paragraph::new(Line::from(Span::styled(
                             hint.text(language),
@@ -469,17 +472,11 @@ impl KqSession for Session {
         }
     }
 
-    fn close(&mut self) {}
-}
-
-/// `name` padded to `width` columns, counting characters rather than bytes.
-fn pad(text: &str, width: usize) -> String {
-    let used = text.chars().count();
-    let mut out = text.to_string();
-    for _ in used..width {
-        out.push(' ');
+    fn typing(&self) -> bool {
+        self.knob_count() > 0 && self.knobs[self.chosen].draft().is_some()
     }
-    out
+
+    fn close(&mut self) {}
 }
 
 fn outcome_line(outcome: &ApplyOutcome, language: Language, theme: Theme) -> Line<'static> {
@@ -488,7 +485,9 @@ fn outcome_line(outcome: &ApplyOutcome, language: Language, theme: Theme) -> Lin
     let mut spans = vec![
         Span::styled(format!("  {} ", state.mark()), theme.state(state)),
         Span::styled(
-            if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }.text(language).to_string(),
+            if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }
+                .text(language)
+                .to_string(),
             theme.state(state),
         ),
     ];
@@ -540,4 +539,83 @@ fn yes_no(
         })
         .collect::<Vec<_>>()
         .join("   ")
+}
+
+#[cfg(test)]
+mod tests {
+    use nmtk_kq::meta::StageKind;
+    use nmtk_kq::session::{Action, KqSession};
+
+    use super::*;
+
+    #[test]
+    fn a_transfer_is_accepted_by_all_three_models() {
+        let mut session = Session::new();
+        session.go_to(StageKind::Run);
+        session.on(Action::Go);
+        let transfer = session.transfer.expect("a transfer was sent");
+        for (model, outcome) in transfer.iter() {
+            assert!(outcome.accepted(), "{model:?} refused an ordinary transfer");
+        }
+    }
+
+    #[test]
+    fn the_three_models_grow_by_different_amounts() {
+        let mut session = Session::new();
+        session.on(Action::Go);
+        session.go_to(StageKind::Run);
+        session.on(Action::Go);
+        let transfer = session.transfer.expect("a transfer was sent");
+        let growth: Vec<i64> = transfer.iter().map(|(_, o)| o.size_delta()).collect();
+        assert!(
+            growth.iter().any(|delta| *delta != growth[0]),
+            "every model grew the same, so the comparison teaches nothing: {growth:?}"
+        );
+    }
+
+    #[test]
+    fn spending_twice_is_stopped_by_all_three_for_different_reasons() {
+        let mut session = Session::new();
+        session.go_to(StageKind::Break);
+        session.on(Action::Go);
+        let reports = session.double.expect("a double spend was attempted");
+        let mut reasons = Vec::new();
+        for (model, report) in reports.iter() {
+            assert!(report.stopped(), "{model:?} let the same coin be spent twice");
+            reasons.push(report.stopped_by());
+        }
+        reasons.sort_by_key(|reason| format!("{reason:?}"));
+        reasons.dedup();
+        assert_eq!(reasons.len(), 3, "the models gave the same reason, which is the lesson lost");
+    }
+
+    #[test]
+    fn a_typed_amount_is_taken_and_a_silly_one_is_not() {
+        let mut session = Session::new();
+        session.go_to(StageKind::Tune);
+        for c in "25".chars() {
+            session.on(Action::Type(c));
+        }
+        assert!(session.typing());
+        session.on(Action::Commit);
+        assert_eq!(session.amount(), 25);
+
+        for c in "900".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert_eq!(session.amount(), 25, "an out-of-range amount was accepted");
+    }
+
+    #[test]
+    fn reset_puts_the_coins_back() {
+        let mut session = Session::new();
+        session.go_to(StageKind::Run);
+        session.on(Action::Go);
+        let after = session.scenario.balances(&session.alice.address());
+        session.on(Action::Reset);
+        let back = session.scenario.balances(&session.alice.address());
+        assert_ne!(after.utxo, back.utxo, "the transfer never happened");
+        assert_eq!(back.utxo, 30, "reset did not restore the opening holdings");
+    }
 }
