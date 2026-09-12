@@ -53,6 +53,8 @@ nmtk_i18n::messages! {
     TrainNoise { en: "Early on it is noise. Then it is a word. Then it is the sentence.", ko: "처음에는 잡음이고, 그다음에는 단어가 되고, 그다음에는 문장이 됩니다." },
     TrainDone { en: "That is the whole of it. There is no other ingredient.", ko: "그게 전부입니다. 다른 재료는 없습니다." },
     TrainGrid { en: "The grid on the right is the attention of the most recent forward pass: one row per position, one column per position it could look back at.", ko: "오른쪽 격자는 가장 최근 순전파의 어텐션입니다. 가로 한 줄이 한 자리, 세로 한 칸이 그 자리가 돌아본 자리입니다." },
+    TrainSlowing { en: "The fall has flattened out. Most of what this model will learn, it learned in the first few hundred steps.", ko: "내려가는 기세가 꺾였습니다. 이 모델이 배울 것의 대부분은 처음 몇백 스텝에서 이미 배웠습니다." },
+    TrainStillFalling { en: "It is still falling. This run has not found its floor yet.", ko: "아직 내려가고 있습니다. 이번 판은 바닥을 아직 못 찾았습니다." },
     TrainGridRead { en: "A dark cell means that row drew heavily on that column. Left and right change which layer and head you are looking at.", ko: "칸이 진할수록 그 줄이 그 칸에 많이 기댔다는 뜻입니다. 좌우로 어느 층, 어느 헤드를 볼지 바꿉니다." },
 
     // ---- Stage 4: your settings ----------------------------------------------------

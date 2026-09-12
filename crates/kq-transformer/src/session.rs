@@ -98,6 +98,8 @@ enum Step {
 /// What a [`Step::Tell`] is about.
 #[derive(Debug, Clone, Copy)]
 enum Topic {
+    /// Whether the loss is still falling or has flattened out.
+    Progress,
     /// How this run compares with the one before it.
     Settings,
     /// The lesson of one attack, said only if that attack is what ran.
@@ -157,13 +159,19 @@ const TRAIN: &[Step] = &[
     Await(Until::Steps(1)),
     Say(Msg::TrainLoss),
     Say(Msg::TrainScale),
+    // The grid is on screen from the first step, so it is explained there rather than after the
+    // run: a reader watched an unreadable field of shaded blocks for ninety seconds.
+    Say(Msg::TrainGrid),
+    Say(Msg::TrainGridRead),
     Await(Until::Steps(300)),
     Say(Msg::TrainAnswer),
     Say(Msg::TrainNoise),
+    // Something to say in the long flat stretch, where the conversation used to run out of
+    // sentences while the clock kept going.
+    Await(Until::Steps(1_000)),
+    Tell(Topic::Progress),
     Await(Until::Finished),
     Say(Msg::TrainDone),
-    Say(Msg::TrainGrid),
-    Say(Msg::TrainGridRead),
 ];
 
 /// The reader's own shape, answered by a real run.
@@ -989,7 +997,32 @@ impl Session {
         if let Some(error) = self.refused {
             lines.extend(self.refusal_lines(error, width, language, theme));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        self.draw_with_the_run(frame, area, lines, theme, language);
+    }
+
+    /// The settings, and under them whatever room is left given to the run itself.
+    ///
+    /// Without this the tuning stage showed a list of values and nothing else while a
+    /// twenty-six-second training ran, so the reader had started something with nothing to watch.
+    fn draw_with_the_run(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lines: Vec<Line<'static>>,
+        theme: Theme,
+        language: Language,
+    ) {
+        /// Rows the run needs before it is worth drawing rather than crowding the settings out.
+        const ROOM_FOR_THE_RUN: u16 = 12;
+        let used = lines.len() as u16;
+        if self.latest.is_none() || area.height < used + ROOM_FOR_THE_RUN {
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
+        let [settings, run] =
+            Layout::vertical([Constraint::Length(used), Constraint::Min(0)]).areas(area);
+        frame.render_widget(Paragraph::new(lines), settings);
+        self.render_run(frame, run, theme, language);
     }
 
     fn render_break(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
@@ -1287,6 +1320,7 @@ impl Session {
     /// A sentence about the run that just finished, built from its own numbers.
     fn tell(&self, topic: Topic, language: Language) -> String {
         match topic {
+            Topic::Progress => self.tell_progress(language),
             Topic::Settings => self.tell_settings(language),
             Topic::Attack { kind, multiplier, lesson } => {
                 // The lesson is only true of the run it was written about. A reader who pressed
@@ -1299,6 +1333,31 @@ impl Session {
                 message.text(language).to_string()
             }
         }
+    }
+
+    /// Whether the loss is still falling, measured rather than assumed.
+    ///
+    /// The last quarter of the history is held against the first: a run that has flattened has
+    /// given up most of its fall already, and a run that has not is still on its way down.
+    fn tell_progress(&self, language: Language) -> String {
+        let history = self.latest.as_ref().map(|s| s.loss_history.as_slice()).unwrap_or(&[]);
+        if history.len() < 8 {
+            return Msg::TrainStillFalling.text(language).to_string();
+        }
+        let quarter = (history.len() / 4).max(1);
+        let early = history[..quarter].iter().sum::<f32>() / quarter as f32;
+        let late = history[history.len() - quarter..].iter().sum::<f32>() / quarter as f32;
+        let mid = history[quarter..history.len() - quarter].to_vec();
+        let middle = if mid.is_empty() { late } else { mid.iter().sum::<f32>() / mid.len() as f32 };
+        // Flat when the latest stretch has given up far less than the run did getting here.
+        let whole = (early - late).abs();
+        let recent = (middle - late).abs();
+        let message = if whole > 0.0 && recent < whole * 0.2 {
+            Msg::TrainSlowing
+        } else {
+            Msg::TrainStillFalling
+        };
+        message.text(language).to_string()
     }
 
     /// This run held against the one before it: what the reader changed, and what it cost.
@@ -2200,6 +2259,23 @@ mod tests {
             );
         }
         session.close();
+    }
+
+    /// The grid is on screen from the first step. Its explanation used to arrive after the run
+    /// had finished, so a reviewer watched an unreadable field of shaded blocks for ninety seconds.
+    #[test]
+    fn the_attention_grid_is_explained_while_it_is_on_screen() {
+        let finished = TRAIN
+            .iter()
+            .position(|step| matches!(step, Await(Until::Finished)))
+            .expect("the training stage waits for the run to end");
+        for message in [Msg::TrainGrid, Msg::TrainGridRead] {
+            let at = TRAIN
+                .iter()
+                .position(|step| matches!(step, Say(m) if *m == message))
+                .unwrap_or_else(|| panic!("{message:?} is not in the training stage"));
+            assert!(at < finished, "{message:?} is only said once the run is over");
+        }
     }
 
     /// A reviewer pressed Enter without choosing the attack the conversation had just named, and
