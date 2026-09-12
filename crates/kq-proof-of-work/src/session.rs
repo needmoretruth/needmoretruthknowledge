@@ -214,8 +214,9 @@ const SCRIPTS: [&[Step]; 6] = [WHY, PUZZLE, MINE_STAGE, TUNE_STAGE, ATTACK_STAGE
 
 /// Something that happened, kept as numbers so the conversation can be said again in any language.
 enum Happening {
-    MiningStarted { threads: usize, bits: u64 },
-    Block { height: u64, gap: Duration, miner: usize },
+    MiningStarted { miners: usize, threads: usize, bits: u64 },
+    Block { height: u64, gap: Duration, miner: usize, on_the_chain: bool },
+    FallingBehind { by: u64, elapsed: Duration },
     AttackStarted { share: f64, confirmations: u64 },
     Paid,
     Released { confirmations: u64 },
@@ -238,6 +239,13 @@ pub struct Session {
     log: Vec<Logged>,
     /// Blocks the log has already reported, so the same block is never said twice.
     reported_blocks: u64,
+    /// The blocks already spoken about, by hash.
+    ///
+    /// Height is not enough: two miners can solve the same height, and both are real.
+    said_blocks: std::collections::HashSet<Hash256>,
+    /// The deficit the conversation has already remarked on, so a long losing attack says
+    /// something every few blocks instead of going quiet for two minutes.
+    said_deficit: u64,
     /// Whether the attack's milestones have been said yet.
     said_paid: bool,
     said_released: bool,
@@ -269,6 +277,8 @@ impl Session {
             revealed: 0,
             log: Vec::new(),
             reported_blocks: 0,
+            said_blocks: std::collections::HashSet::new(),
+            said_deficit: 0,
             said_paid: false,
             said_released: false,
             said_ended: false,
@@ -542,6 +552,8 @@ impl Session {
     /// produced.
     fn forget_run(&mut self) {
         self.reported_blocks = 0;
+        self.said_blocks.clear();
+        self.said_deficit = 0;
         self.said_paid = false;
         self.said_released = false;
         self.said_ended = false;
@@ -1036,6 +1048,21 @@ impl Session {
             Msg::LabelFurthestBehind.text(language),
             blocks(snapshot.max_deficit, language),
         ));
+        // What the attack is waiting for. A screen that shows a race with no finishing line asks
+        // the reader to sit through two minutes without telling them it is two minutes.
+        if snapshot.outcome.is_none() {
+            let config = AttackConfig::new(snapshot.bits, 1, 1);
+            let limit = config.give_up_after.unwrap_or_default().as_secs_f64();
+            rows.push((
+                Msg::LabelGivesUp.text(language),
+                format!(
+                    "{}  {} {}",
+                    span(limit, language),
+                    Msg::UnitOrBlocks.text(language),
+                    config.give_up_after_public_blocks
+                ),
+            ));
+        }
         let seen = snapshot
             .confirmations_when_reverted
             .or(snapshot.confirmations_at_release)
@@ -1252,9 +1279,13 @@ impl Session {
                     self.reported_blocks = 0;
                     self.start_run();
                     if let Some(snapshot) = &self.mining_snapshot {
+                        // The miner count goes in the opening line because the block lines name
+                        // whoever found each block, and a reader met "found by Miner 2" without
+                        // having been told there was more than one.
+                        let miners = snapshot.miners.len();
                         let threads = snapshot.miners.iter().map(|m| m.threads).sum();
                         let bits = u64::from(self.zero_bits());
-                        self.say(Happening::MiningStarted { threads, bits });
+                        self.say(Happening::MiningStarted { miners, threads, bits });
                     }
                 }
                 Attack => {
@@ -1290,24 +1321,51 @@ impl Session {
 
     /// Reads the running engines and turns anything new into beats.
     fn notice(&mut self) {
-        let blocks: Vec<(u64, Duration, usize)> = match &self.mining_snapshot {
+        // Two miners can solve the same height at once and both are recorded, so the filter is
+        // on what has already been said rather than on the height alone: otherwise the pair read
+        // as one block reported twice, the second with a gap of nothing.
+        let blocks: Vec<(u64, Duration, usize, bool)> = match &self.mining_snapshot {
             Some(snapshot) if self.mining.is_some() => snapshot
                 .recent_blocks
                 .iter()
-                .filter(|block| block.height > self.reported_blocks)
-                .map(|block| (block.height, block.since_previous, block.miner.0 as usize))
+                .filter(|block| !self.said_blocks.contains(&block.hash))
+                .map(|block| {
+                    (
+                        block.height,
+                        block.since_previous,
+                        block.miner.0 as usize,
+                        block.in_best_chain,
+                    )
+                })
                 .collect(),
             _ => Vec::new(),
         };
-        for (height, gap, miner) in blocks {
+        if !blocks.is_empty()
+            && let Some(snapshot) = &self.mining_snapshot
+        {
+            self.said_blocks.extend(snapshot.recent_blocks.iter().map(|block| block.hash));
+        }
+        for (height, gap, miner, on_the_chain) in blocks {
             self.reported_blocks = self.reported_blocks.max(height);
-            self.say(Happening::Block { height, gap, miner });
+            self.say(Happening::Block { height, gap, miner, on_the_chain });
         }
 
-        let Some(snapshot) = &self.attack_snapshot else { return };
         if self.attack.is_none() {
             return;
         }
+        // Every few blocks of deficit, rather than once at the end: an attack that loses spends
+        // two minutes doing so, and a screen that says nothing for two minutes reads as a hang.
+        const BLOCKS_BETWEEN_REMARKS: u64 = 3;
+        let losing = self.attack_snapshot.as_ref().filter(|snapshot| {
+            snapshot.outcome.is_none()
+                && snapshot.max_deficit >= self.said_deficit + BLOCKS_BETWEEN_REMARKS
+        });
+        if let Some((by, elapsed)) = losing.map(|s| (s.max_deficit, s.elapsed)) {
+            self.said_deficit = by;
+            self.say(Happening::FallingBehind { by, elapsed });
+        }
+
+        let Some(snapshot) = &self.attack_snapshot else { return };
         let paid = snapshot.payment_height.is_some();
         let released = snapshot.victim_released;
         let at_release = snapshot.confirmations_at_release.unwrap_or(0);
@@ -1333,16 +1391,18 @@ impl Session {
     /// One happening, said in the reader's language.
     fn beat_for(&self, what: &Happening, language: Language) -> Beat {
         match what {
-            Happening::MiningStarted { threads, bits } => Beat::event(format!(
-                "{}  ·  {} {}  ·  {} {} {}",
+            Happening::MiningStarted { miners, threads, bits } => Beat::event(format!(
+                "{}  ·  {} {}  ·  {} {}  ·  {} {} {}",
                 Msg::EventMiningStarted.text(language),
+                Msg::KnobMiners.text(language),
+                miners,
                 Msg::KnobThreads.text(language),
                 threads,
                 Msg::KnobDifficulty.text(language),
                 bits,
                 Msg::UnitZeroBits.text(language),
             )),
-            Happening::Block { height, gap, miner } => Beat::outcome(
+            Happening::Block { height, gap, miner, on_the_chain: true } => Beat::outcome(
                 State::Good,
                 format!(
                     "{} {}  ·  {} {}  ·  {} {}",
@@ -1352,6 +1412,26 @@ impl Session {
                     span(gap.as_secs_f64(), language),
                     Msg::EventFoundBy.text(language),
                     phrases::miner_name(*miner).text(language),
+                ),
+            ),
+            Happening::FallingBehind { by, elapsed } => Beat::outcome(
+                State::Working,
+                format!(
+                    "{}  ·  {}  ·  {}",
+                    Msg::EventFallingBehind.text(language),
+                    blocks(*by, language),
+                    span(elapsed.as_secs_f64(), language),
+                ),
+            ),
+            // The loser of a race is not another block: it is the same height, done twice.
+            Happening::Block { height, miner, .. } => Beat::outcome(
+                State::Bad,
+                format!(
+                    "{} {}  ·  {} {}",
+                    Msg::EventBlock.text(language),
+                    height,
+                    phrases::miner_name(*miner).text(language),
+                    Msg::EventLostRace.text(language),
                 ),
             ),
             Happening::AttackStarted { share, confirmations } => Beat::event(format!(
@@ -1769,6 +1849,8 @@ fn short_hash(hash: Hash256) -> String {
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    use nmtk_kq::session::Voice;
 
     use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, split};
     use ratatui::Terminal;
@@ -2225,6 +2307,54 @@ mod tests {
 
     /// A reader reaches the recap by pressing Tab, which is `go_to`, and their numbers have to
     /// survive the journey. Six of the seven rows once read "not run yet" after a real run.
+    /// Two miners can solve the same height, and both are recorded. A reviewer read the pair as
+    /// one block reported twice — "+ block 10 · gap 7s" then "+ block 10 · gap 0.00s" — with a
+    /// green mark on the one the panel was marking red.
+    #[test]
+    fn the_loser_of_a_race_is_not_said_as_another_block() {
+        let session = session();
+        let english = Language::ENGLISH;
+        let won = Happening::Block {
+            height: 10,
+            gap: Duration::from_secs(7),
+            miner: 1,
+            on_the_chain: true,
+        };
+        let lost = Happening::Block {
+            height: 10,
+            gap: Duration::from_secs(0),
+            miner: 2,
+            on_the_chain: false,
+        };
+        let won = session.beat_for(&won, english);
+        let lost = session.beat_for(&lost, english);
+        println!("won:  {}\nlost: {}", won.text, lost.text);
+        assert_ne!(won.text, lost.text, "the two blocks read the same");
+        assert!(lost.text.contains("not on the chain"), "{}", lost.text);
+        assert!(
+            matches!(won.voice, Voice::Event(Some(State::Good))),
+            "the block on the chain is not marked good"
+        );
+        assert!(
+            matches!(lost.voice, Voice::Event(Some(State::Bad))),
+            "the block that lost the race is not marked apart"
+        );
+    }
+
+    /// "found by Miner 2" arrived before anything had said there was more than one miner.
+    #[test]
+    fn the_opening_line_of_a_run_says_how_many_miners_there_are() {
+        let session = session();
+        for language in Language::ALL {
+            let said = session
+                .beat_for(&Happening::MiningStarted { miners: 2, threads: 11, bits: 27 }, *language)
+                .text;
+            println!("{language}: {said}");
+            let miners = Msg::KnobMiners.text(*language);
+            assert!(said.contains(miners), "the miner count is missing from {said:?}");
+        }
+    }
+
     /// A reviewer pressed Enter without moving anything and was told "blocks cost twice what
     /// they did", and was told "above half it catches up" under an attacker holding 27%.
     #[test]

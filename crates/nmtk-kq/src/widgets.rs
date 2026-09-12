@@ -120,13 +120,23 @@ pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64], label:
     // that way round, and "0.4 → 3.3" says the opposite of what happened.
     let first = finite.first().copied().unwrap_or(low);
     let last = finite.last().copied().unwrap_or(high);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(label.to_string(), theme.muted()),
-            Span::styled(format!("   {}  \u{2192}  {}", short(first), short(last)), theme.muted()),
-        ])),
-        name_area,
-    );
+    // The bars are drawn between the lowest and highest value in the window, not between zero and
+    // the highest, so the bottom row is full whenever nothing dipped near the low. Without the two
+    // numbers that say where the box starts and ends, that reads as a graph stuck on full.
+    let direction = format!("   {}  \u{2192}  {}", short(first), short(last));
+    let scale = format!("{}  \u{2026}  {}", short(low), short(high));
+    let head = crate::text::width(label) + crate::text::width(&direction);
+    let room = name_area.width as usize;
+    let mut spans = vec![
+        Span::styled(label.to_string(), theme.muted()),
+        Span::styled(direction, theme.muted()),
+    ];
+    if head + 2 + crate::text::width(&scale) <= room {
+        let gap = room - head - crate::text::width(&scale);
+        spans.push(Span::styled(" ".repeat(gap), theme.muted()));
+        spans.push(Span::styled(scale, theme.muted()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), name_area);
     frame.render_widget(Sparkline::default().data(&scaled).style(theme.heading()), line_area);
 }
 

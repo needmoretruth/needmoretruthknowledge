@@ -160,6 +160,14 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
                 vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack), say("?", Msg::KeyHelp)]
             };
             if let Some(quest) = &app.open {
+                // Space works but no quest names it, and a reviewer found it by guessing. It is
+                // offered while there is something to pause and not while there is not.
+                if matches!(
+                    quest.session.run_state(),
+                    nmtk_kq::session::RunState::Running | nmtk_kq::session::RunState::Paused
+                ) {
+                    keys.push(say("Space", Msg::KeyPause));
+                }
                 keys.extend(
                     quest.session.keys(language).into_iter().map(|(k, l)| (k, l.to_string())),
                 );
