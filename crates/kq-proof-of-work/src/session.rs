@@ -243,9 +243,10 @@ pub struct Session {
     ///
     /// Height is not enough: two miners can solve the same height, and both are real.
     said_blocks: std::collections::HashSet<Hash256>,
-    /// The deficit the conversation has already remarked on, so a long losing attack says
-    /// something every few blocks instead of going quiet for two minutes.
+    /// The deficit the conversation has already remarked on, and when it last remarked, so a
+    /// long losing attack says something every so often instead of going quiet for two minutes.
     said_deficit: u64,
+    last_remark_at: Duration,
     /// Whether the attack's milestones have been said yet.
     said_paid: bool,
     said_released: bool,
@@ -279,6 +280,7 @@ impl Session {
             reported_blocks: 0,
             said_blocks: std::collections::HashSet::new(),
             said_deficit: 0,
+            last_remark_at: Duration::ZERO,
             said_paid: false,
             said_released: false,
             said_ended: false,
@@ -554,6 +556,7 @@ impl Session {
         self.reported_blocks = 0;
         self.said_blocks.clear();
         self.said_deficit = 0;
+        self.last_remark_at = Duration::ZERO;
         self.said_paid = false;
         self.said_released = false;
         self.said_ended = false;
@@ -1353,15 +1356,21 @@ impl Session {
         if self.attack.is_none() {
             return;
         }
-        // Every few blocks of deficit, rather than once at the end: an attack that loses spends
-        // two minutes doing so, and a screen that says nothing for two minutes reads as a hang.
-        const BLOCKS_BETWEEN_REMARKS: u64 = 3;
+        // An attack that loses spends two minutes losing, and a screen that says nothing for two
+        // minutes reads as a hang. Whichever comes first: another couple of blocks behind, or
+        // half a minute of nothing said.
+        const BLOCKS_BETWEEN_REMARKS: u64 = 2;
+        const SECONDS_BETWEEN_REMARKS: u64 = 30;
         let losing = self.attack_snapshot.as_ref().filter(|snapshot| {
             snapshot.outcome.is_none()
-                && snapshot.max_deficit >= self.said_deficit + BLOCKS_BETWEEN_REMARKS
+                && snapshot.max_deficit > 0
+                && (snapshot.max_deficit >= self.said_deficit + BLOCKS_BETWEEN_REMARKS
+                    || snapshot.elapsed
+                        >= self.last_remark_at + Duration::from_secs(SECONDS_BETWEEN_REMARKS))
         });
         if let Some((by, elapsed)) = losing.map(|s| (s.max_deficit, s.elapsed)) {
             self.said_deficit = by;
+            self.last_remark_at = elapsed;
             self.say(Happening::FallingBehind { by, elapsed });
         }
 
