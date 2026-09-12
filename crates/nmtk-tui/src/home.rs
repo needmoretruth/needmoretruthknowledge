@@ -90,4 +90,3 @@ fn centred(area: Rect, width: u16) -> Rect {
     let x = area.x + (area.width - width) / 2;
     Rect { x, width, ..area }
 }
-

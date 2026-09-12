@@ -38,8 +38,7 @@ pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, them
         keys_area,
     );
 
-    let note = Paragraph::new(t(Msg::HelpOffline, language))
-        .style(theme.ok())
-        .wrap(Wrap { trim: true });
+    let note =
+        Paragraph::new(t(Msg::HelpOffline, language)).style(theme.ok()).wrap(Wrap { trim: true });
     frame.render_widget(note.block(theme.panel()), note_area);
 }

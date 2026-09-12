@@ -57,12 +57,9 @@ fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let [title_area, body_area, keys_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [title_area, body_area, keys_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+            .areas(area);
 
     chrome::title_bar(frame, title_area, theme, screen_title(app, language), language);
 
@@ -70,9 +67,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Screen::Home => home::render(frame, body_area, app, theme),
         Screen::Settings => settings_screen::render(frame, body_area, app, theme),
         Screen::Help => help::render(frame, body_area, language, theme),
-        Screen::Subject(subject) => {
-            subject::render(frame, body_area, subject, language, theme)
-        }
+        Screen::Subject(subject) => subject::render(frame, body_area, subject, language, theme),
     }
 
     chrome::key_bar(frame, keys_area, theme, keys_for(app.screen), language);
@@ -125,8 +120,11 @@ mod tests {
     fn app_on(screen: Screen, language: Language) -> App {
         let mut app = App::new();
         app.settings = Settings { language, ..Settings::default() };
-        app.machine =
-            MachineProfile { logical_cores: 12, total_memory_bytes: 14_000_000_000, available_memory_bytes: 0 };
+        app.machine = MachineProfile {
+            logical_cores: 12,
+            total_memory_bytes: 14_000_000_000,
+            available_memory_bytes: 0,
+        };
         app.screen = screen;
         app
     }

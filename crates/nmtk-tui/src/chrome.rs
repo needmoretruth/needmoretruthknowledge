@@ -23,7 +23,13 @@ pub fn title_bar(frame: &mut Frame, area: Rect, theme: Theme, title: &str, langu
 }
 
 /// The keys that work on this screen, written as `key label` pairs separated by dots.
-pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, Msg)], language: Language) {
+pub fn key_bar(
+    frame: &mut Frame,
+    area: Rect,
+    theme: Theme,
+    keys: &[(&str, Msg)],
+    language: Language,
+) {
     let mut spans = vec![Span::raw(" ")];
     for (index, (key, label)) in keys.iter().enumerate() {
         if index > 0 {
@@ -42,10 +48,7 @@ pub fn too_small(frame: &mut Frame, theme: Theme, language: Language) {
     let message = Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled(t(Msg::TerminalTooSmall, language), theme.danger())),
-        Line::from(Span::styled(
-            format!("{}x{}", area.width, area.height),
-            theme.muted(),
-        )),
+        Line::from(Span::styled(format!("{}x{}", area.width, area.height), theme.muted())),
     ])
     .alignment(Alignment::Center);
     frame.render_widget(message, area);

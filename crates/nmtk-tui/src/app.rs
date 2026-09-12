@@ -184,12 +184,13 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.home_index = next(self.home_index, items.len())
             }
-            KeyCode::Enter | KeyCode::Char(' ') => match items[self.home_index.min(items.len() - 1)]
-            {
-                HomeItem::Subject(subject) => self.screen = Screen::Subject(subject),
-                HomeItem::Settings => self.screen = Screen::Settings,
-                HomeItem::Quit => self.quit = true,
-            },
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                match items[self.home_index.min(items.len() - 1)] {
+                    HomeItem::Subject(subject) => self.screen = Screen::Subject(subject),
+                    HomeItem::Settings => self.screen = Screen::Settings,
+                    HomeItem::Quit => self.quit = true,
+                }
+            }
             KeyCode::Char('s') => self.screen = Screen::Settings,
             KeyCode::Char('l') => self.toggle_language(),
             KeyCode::Char('?') => self.open_help(),
@@ -253,8 +254,11 @@ impl App {
     }
 
     fn remember(&mut self) {
-        self.status =
-            Some(if self.settings.save().is_ok() { Msg::SettingsSaved } else { Msg::SettingsNotSaved });
+        self.status = Some(if self.settings.save().is_ok() {
+            Msg::SettingsSaved
+        } else {
+            Msg::SettingsNotSaved
+        });
     }
 }
 
