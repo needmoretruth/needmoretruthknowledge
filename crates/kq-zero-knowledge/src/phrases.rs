@@ -85,6 +85,7 @@ nmtk_i18n::messages! {
     SidesThree { en: "The onlooker is the reason any of this exists.", ko: "지켜보는 사람이 이 모든 것이 존재하는 이유입니다." },
     SidesFour { en: "On a shielded chain they see that a transaction happened, the proof, a nullifier, and a commitment standing in for the new note.", ko: "가려진 체인에서 그 사람은 거래가 있었다는 것, 증명, 널리파이어, 그리고 새 쪽지를 대신하는 커밋먼트를 봅니다." },
     SidesNullifier { en: "A nullifier is a one-off tag that says \"this note is spent\" without saying which note it was.", ko: "널리파이어는 「이 쪽지는 이미 썼다」를 말하되 어느 쪽지였는지는 말하지 않는 일회용 표식입니다." },
+    SidesZcash { en: "This payment is shaped like Zcash's: a note, a commitment standing in for it in public, and a nullifier that spends it exactly once.", ko: "이 결제의 모양은 Zcash의 것입니다. 쪽지가 있고, 공개된 자리에서 그것을 대신하는 커밋먼트가 있고, 그 쪽지를 딱 한 번만 쓰게 하는 널리파이어가 있습니다." },
     SidesFive { en: "They do not see the amount, the sender or the recipient.", ko: "금액도, 보낸 사람도, 받는 사람도 보이지 않습니다." },
     SidesSix { en: "On a transparent chain all three are public to everyone, forever.", ko: "투명한 체인에서는 셋 다 모두에게 영원히 공개됩니다." },
     SidesSeven { en: "Up and down move between the four systems. The attacker's rows are the ones that change.", ko: "위아래로 네 방식 사이를 옮깁니다. 바뀌는 것은 공격자의 줄입니다." },

@@ -347,6 +347,9 @@ const SIDES: &[Step] = &[
     Say(Msg::SidesThree),
     Say(Msg::SidesFour),
     Say(Msg::SidesNullifier),
+    // Where the shape came from, once its three words have been earned. A reader who has heard
+    // of Zcash gets an anchor, and the quest stops borrowing a design without saying whose.
+    Say(Msg::SidesZcash),
     Say(Msg::SidesFive),
     Say(Msg::SidesSix),
     Say(Msg::SidesSeven),
