@@ -41,6 +41,31 @@ pub fn stat_lines(rows: &[(&str, String)], width: usize, theme: Theme) -> Vec<Li
         .collect()
 }
 
+/// `lines` cut to the rows there are, with the last of them marked when the rest were dropped.
+///
+/// A `Paragraph` draws what fits and drops the rest without a word, and the row it stops on is a
+/// line that ran on, drawn exactly like a line that ended. A reader who has just watched a model
+/// answer cannot tell whether the sentence stopped there or the panel did. The mark is the
+/// difference, and it is the same `…` a cut line carries anywhere else.
+pub fn fit(mut lines: Vec<Line<'static>>, rows: usize, width: usize) -> Vec<Line<'static>> {
+    if lines.len() <= rows {
+        return lines;
+    }
+    lines.truncate(rows);
+    let Some(last) = lines.last_mut() else { return lines };
+    let used: usize = last.spans.iter().map(|span| crate::text::width(&span.content)).sum();
+    let Some(span) = last.spans.last_mut() else { return lines };
+    if used < width {
+        span.content = format!("{}…", span.content).into();
+        return lines;
+    }
+    // No room beside the line for the mark, so the mark takes the end of the line itself.
+    let room = crate::text::width(&span.content).saturating_sub(used + 1 - width);
+    span.content =
+        if room == 0 { "…".to_string() } else { crate::text::truncate(&span.content, room) }.into();
+    lines
+}
+
 /// [`stat_lines`], drawn into an area.
 pub fn stats(frame: &mut Frame, area: Rect, theme: Theme, rows: &[(&str, String)]) {
     let lines = stat_lines(rows, area.width as usize, theme);

@@ -6,11 +6,11 @@
 //! waits for a step and never takes one.
 
 use nmtk_core::{Language, MachineProfile, format};
-use nmtk_kq::knob::{Knob, KnobValue};
+use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
 use nmtk_kq::text::{char_width, column, truncate, width as cells};
 use nmtk_kq::theme::{State, Theme};
-use nmtk_kq::widgets::{self, stat_lines, wrapped};
+use nmtk_kq::widgets::{self, fit, stat_lines, wrapped};
 use nmtk_transformer::model::AttentionSnapshot;
 use nmtk_transformer::{
     CORPUS, EXPANSION, Optimizer, PROMPT, StartError, Tokenizer, TrainingConfig, TrainingHandle,
@@ -57,6 +57,11 @@ const ATTACK_COUNT: usize = 3;
 const ATTACK_RUNAWAY: usize = 0;
 const ATTACK_NO_WARMUP: usize = 1;
 const ATTACK_PLAIN_SGD: usize = 2;
+
+/// Cells between two values worth trying, and the gap kept after the last of them. A row that
+/// ends in the panel's last column cannot say whether another value was cut off it; a gap as wide
+/// as the one between two values can.
+const PRESET_GAP: usize = 3;
 
 /// Five shades, darkest last. Attention is structure, so it is drawn in black and white; the four
 /// state colours are kept for state.
@@ -147,6 +152,7 @@ const PIECES: &[Step] = &[
     Say(Msg::PiecesHeads),
     Say(Msg::PiecesLayers),
     Say(Msg::PiecesWindow),
+    Say(Msg::PiecesCharacters),
     Say(Msg::PiecesCount),
     Say(Msg::PiecesPromise),
 ];
@@ -205,6 +211,7 @@ const BREAK: &[Step] = &[
         lesson: Msg::BreakAfterRunaway,
     }),
     Say(Msg::BreakWarmupOne),
+    Say(Msg::BreakGradient),
     Say(Msg::BreakWarmupTwo),
     Say(Msg::BreakWarmupThree),
     Ask(Msg::BreakAskWarmup),
@@ -212,8 +219,10 @@ const BREAK: &[Step] = &[
     Await(Until::Finished),
     Tell(Topic::Attack { kind: ATTACK_NO_WARMUP, multiplier: 10.0, lesson: Msg::BreakAfterWarmup }),
     Say(Msg::BreakSgdOne),
+    Say(Msg::BreakSgdName),
     Say(Msg::BreakSgdTwo),
     Say(Msg::BreakSgdThree),
+    Say(Msg::BreakAdamName),
     Ask(Msg::BreakAskSgd),
     Run(Attack),
     Await(Until::Finished),
@@ -239,11 +248,29 @@ const SCRIPTS: [&[Step]; 6] = [QUESTION, PIECES, TRAIN, TUNE, BREAK, RECAP];
 
 /// Something that happened, kept as numbers so it can be said again in any language.
 enum Happening {
-    Started { weights: usize, steps: usize },
-    Loss { loss: f32, step: usize },
-    GotIt { step: usize },
-    Ended { loss: f32, seconds: f64, fell: bool },
+    Started {
+        weights: usize,
+        steps: usize,
+    },
+    Loss {
+        loss: f32,
+        step: usize,
+    },
+    GotIt {
+        step: usize,
+    },
+    Ended {
+        loss: f32,
+        seconds: f64,
+        fell: bool,
+    },
     Refused(Msg),
+    /// A typed number that fell outside the knob's range, with where it landed.
+    PulledIn {
+        to: String,
+    },
+    /// A typed number the knob could not read at all.
+    NotANumber,
 }
 
 /// One happening, filed against the step the reader was on when it happened.
@@ -286,6 +313,9 @@ pub struct Session {
     running_broken: bool,
     /// The worker's latest numbers, copied out on the drawing thread.
     latest: Option<TrainingSnapshot>,
+    /// The knob values the run in progress was started with, so turning one can be told apart
+    /// from pressing Enter twice.
+    running_with: Option<Settled>,
     /// The last run that finished with sensible settings.
     honest: Option<Finished>,
     /// The sensible run before that one, so "compare it with the one before" has something to
@@ -321,6 +351,7 @@ impl Session {
             running_config: None,
             running_broken: false,
             latest: None,
+            running_with: None,
             honest: None,
             previous: None,
             ran: None,
@@ -528,22 +559,29 @@ impl Session {
                 // A knob whose value will not fit beside its name puts the value under it. The
                 // stage has a dozen blank rows below, and "a runaway learning ra…" spent one of
                 // them on an ellipsis instead of on the two words it had cut.
-                if cells(&value) <= room {
-                    return vec![Line::from(vec![
+                let mut lines = if cells(&value) <= room {
+                    vec![Line::from(vec![
                         mark,
                         Span::styled(column(label.text(language), label_width), theme.plain()),
                         Span::styled(value, style),
+                    ])]
+                } else {
+                    let mut lines = vec![Line::from(vec![
+                        mark,
+                        Span::styled(
+                            truncate(label.text(language), panel.saturating_sub(2)),
+                            theme.plain(),
+                        ),
                     ])];
-                }
-                let mut lines = vec![Line::from(vec![
-                    mark,
-                    Span::styled(
-                        truncate(label.text(language), panel.saturating_sub(2)),
-                        theme.plain(),
-                    ),
-                ])];
-                for chunk in wrap(&value, panel.saturating_sub(4)) {
-                    lines.push(Line::from(Span::styled(format!("    {chunk}"), style)));
+                    for chunk in wrap(&value, panel.saturating_sub(4)) {
+                        lines.push(Line::from(Span::styled(format!("    {chunk}"), style)));
+                    }
+                    lines
+                };
+                // The values worth trying belong under the knob they are about. Drawn at the foot
+                // of the list they read as advice about the last knob, whichever one was chosen.
+                if picked {
+                    lines.extend(self.preset_lines(panel, language, theme));
                 }
                 lines
             })
@@ -579,15 +617,11 @@ impl Session {
 
     /// The presets of the chosen knob, so a reader can see what is worth typing.
     ///
-    /// A list too long for the panel loses whole values off the end rather than being cut where
-    /// the width runs out: "4,0" is a number the reader cannot type, and worse than no fourth
-    /// suggestion at all.
-    fn presets_line(
-        &self,
-        panel: usize,
-        language: Language,
-        theme: Theme,
-    ) -> Option<Line<'static>> {
+    /// A list too long for one row folds onto the next rather than losing its last values: "4,0"
+    /// is a number the reader cannot type, and a value dropped off the end is one the reader never
+    /// learns about. Every row also stops [`PRESET_GAP`] cells short of the panel edge, because a
+    /// row that ends in the last column cannot say whether a fourth value was cut off it.
+    fn preset_lines(&self, panel: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let values: Vec<String> = match self.stage_knobs().get(self.chosen).map(|k| &k.value) {
             Some(KnobValue::Count { presets, .. }) => {
                 presets.iter().map(|p| format::count(*p)).collect()
@@ -598,26 +632,40 @@ impl Session {
             _ => Vec::new(),
         };
         if values.is_empty() {
-            return None;
+            return Vec::new();
         }
         let lead = format!("  {}  ", Msg::LabelPresets.text(language));
-        let mut room = panel.saturating_sub(cells(&lead));
-        let mut shown: Vec<String> = Vec::new();
+        let indent = cells(&lead);
+        let room = panel.saturating_sub(indent + PRESET_GAP);
+        let mut rows: Vec<String> = Vec::new();
+        let mut row = String::new();
         for value in values {
-            let wanted = cells(&value) + usize::from(!shown.is_empty()) * 3;
-            if wanted > room {
+            if cells(&value) > room {
+                // Narrower than a single value: a half-written number is worse than none.
                 break;
             }
-            room -= wanted;
-            shown.push(value);
+            let wanted = cells(&value) + if row.is_empty() { 0 } else { PRESET_GAP };
+            if cells(&row) + wanted > room {
+                rows.push(std::mem::take(&mut row));
+            }
+            if !row.is_empty() {
+                row.push_str(&" ".repeat(PRESET_GAP));
+            }
+            row.push_str(&value);
         }
-        if shown.is_empty() {
-            return None;
+        if !row.is_empty() {
+            rows.push(row);
         }
-        Some(Line::from(vec![
-            Span::styled(lead, theme.muted()),
-            Span::styled(shown.join("   "), theme.plain()),
-        ]))
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let lead = if index == 0 { lead.clone() } else { " ".repeat(indent) };
+                Line::from(vec![
+                    Span::styled(lead, theme.muted()),
+                    Span::styled(row, theme.plain()),
+                ])
+            })
+            .collect()
     }
 
     // ---- numbers -------------------------------------------------------------
@@ -766,35 +814,35 @@ impl Session {
             split.extend(wrapped("  ", &seen, width, theme.muted(), theme.muted()));
             split
         };
-        // Two columns go to the row label, and the newest positions are the interesting ones.
-        let columns = width.saturating_sub(2).min(attention.length);
-        let rows = height.saturating_sub(3).min(attention.length);
-        if columns == 0 || rows == 0 {
-            return lines;
+        // The grid is square — every position against every position — so the window on to it is
+        // square too. The line above it carries one number, and one number can only be true of the
+        // characters across the top and of the rows down the side at once when there are as many
+        // of one as of the other. Two columns go to the row label; the newest positions are the
+        // interesting ones.
+        let mut shown = width.saturating_sub(2).min(attention.length);
+        let mut legend = self.grid_legend(shown, attention, width, language, theme);
+        // How tall that line is depends on the number in it, and shrinking the window never
+        // lengthens that number, so settling the two against each other takes one pass.
+        for _ in 0..2 {
+            let room = height.saturating_sub(lines.len() + legend.len() + 1);
+            if shown <= room {
+                break;
+            }
+            shown = room;
+            legend = self.grid_legend(shown, attention, width, language, theme);
         }
-        let first_key = attention.length - columns;
-        let first_query = attention.length - rows;
-        // Say when there is more than fits. A grid that silently drops half its rows reads as the
-        // whole thing, and a reader who trusts it has been told something false.
-        if rows < attention.length || columns < attention.length {
-            lines.extend(wrapped(
-                "",
-                &format!(
-                    "{} {rows} / {}   {}",
-                    Msg::AttentionNewest.text(language),
-                    attention.length,
-                    Msg::AttentionMarks.text(language)
-                ),
-                width,
-                theme.muted(),
-                theme.muted(),
-            ));
+        if shown == 0 {
+            // A heading over a box with no row in it promises a grid that never arrives, and a
+            // reader who started a run watches the empty box for the whole of it.
+            return Vec::new();
         }
+        lines.extend(legend);
+        let first = attention.length - shown;
         let header: String =
-            (first_key..attention.length).map(|k| visible(attention.tokens.get(k))).collect();
+            (first..attention.length).map(|k| visible(attention.tokens.get(k))).collect();
         lines.push(Line::from(Span::styled(format!("  {header}"), theme.muted())));
-        for query in first_query..attention.length {
-            let cells: String = (first_key..attention.length)
+        for query in first..attention.length {
+            let cells: String = (first..attention.length)
                 .map(|key| shade(attention.weight(layer, head, query, key).unwrap_or(0.0)))
                 .collect();
             lines.push(Line::from(vec![
@@ -803,6 +851,33 @@ impl Session {
             ]));
         }
         lines
+    }
+
+    /// The line above the grid that says how much of it is on screen, and how the characters that
+    /// stand in for a space and a line break are drawn. Nothing at all when the whole grid fits.
+    fn grid_legend(
+        &self,
+        shown: usize,
+        attention: &AttentionSnapshot,
+        width: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        if shown >= attention.length {
+            return Vec::new();
+        }
+        wrapped(
+            "",
+            &format!(
+                "{} {shown} / {}   {}",
+                Msg::AttentionNewest.text(language),
+                attention.length,
+                Msg::AttentionMarks.text(language)
+            ),
+            width,
+            theme.muted(),
+            theme.muted(),
+        )
     }
 
     /// One line saying what a finished run ended up at.
@@ -873,7 +948,7 @@ impl Session {
             ))),
             heading,
         );
-        frame.render_widget(Paragraph::new(stat_lines(&rows, area.width as usize, theme)), table);
+        paragraph(frame, table, stat_lines(&rows, area.width as usize, theme));
         frame.render_widget(Paragraph::new(Vec::<Line>::new()), footer);
     }
 
@@ -883,7 +958,7 @@ impl Session {
             if let Some(error) = self.refused {
                 lines.extend(self.refusal_lines(error, area.width as usize, language, theme));
             }
-            frame.render_widget(Paragraph::new(lines), area);
+            paragraph(frame, area, lines);
             return;
         }
         let [stats, curve, answer, attention] = Layout::vertical([
@@ -893,23 +968,18 @@ impl Session {
             Constraint::Min(0),
         ])
         .areas(area);
-        frame.render_widget(
-            Paragraph::new(stat_lines(&self.stat_rows(language), stats.width as usize, theme)),
-            stats,
-        );
+        paragraph(frame, stats, stat_lines(&self.stat_rows(language), stats.width as usize, theme));
         self.render_curve(frame, curve, theme, language);
-        frame.render_widget(
-            Paragraph::new(self.answer_lines(answer.width as usize, language, theme)),
-            answer,
-        );
-        frame.render_widget(
-            Paragraph::new(self.attention_lines(
+        paragraph(frame, answer, self.answer_lines(answer.width as usize, language, theme));
+        paragraph(
+            frame,
+            attention,
+            self.attention_lines(
                 attention.width as usize,
                 attention.height as usize,
                 language,
                 theme,
-            )),
-            attention,
+            ),
         );
     }
 
@@ -952,7 +1022,6 @@ impl Session {
         ];
         let width = area.width as usize;
         let mut lines = self.knob_lines(&labels, width, language, theme);
-        lines.extend(self.presets_line(width, language, theme));
         lines.push(Line::from(""));
         let chose = format!(
             "{}  ({} · {} · {})",
@@ -1016,12 +1085,12 @@ impl Session {
         const ROOM_FOR_THE_RUN: u16 = 12;
         let used = lines.len() as u16;
         if self.latest.is_none() || area.height < used + ROOM_FOR_THE_RUN {
-            frame.render_widget(Paragraph::new(lines), area);
+            paragraph(frame, area, lines);
             return;
         }
         let [settings, run] =
             Layout::vertical([Constraint::Length(used), Constraint::Min(0)]).areas(area);
-        frame.render_widget(Paragraph::new(lines), settings);
+        paragraph(frame, settings, lines);
         self.render_run(frame, run, theme, language);
     }
 
@@ -1029,7 +1098,6 @@ impl Session {
         let width = area.width as usize;
         let labels = [Msg::LabelAttack, Msg::LabelMultiplier];
         let mut lines = self.knob_lines(&labels, width, language, theme);
-        lines.extend(self.presets_line(width, language, theme));
         lines.push(Line::from(""));
 
         let sensible = self.tuned();
@@ -1118,7 +1186,7 @@ impl Session {
         if let Some(error) = self.refused {
             lines.extend(self.refusal_lines(error, width, language, theme));
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        paragraph(frame, area, lines);
     }
 
     fn render_recap(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
@@ -1126,15 +1194,16 @@ impl Session {
         // broken run instead, described the same way — it is still what happened.
         let finished = self.honest.as_ref().or(self.broken.as_ref());
         let Some(finished) = finished else {
-            frame.render_widget(
-                Paragraph::new(wrapped(
+            paragraph(
+                frame,
+                area,
+                wrapped(
                     "",
                     Msg::RecapNothing.text(language),
                     area.width as usize,
                     theme.muted(),
                     theme.muted(),
-                )),
-                area,
+                ),
             );
             return;
         };
@@ -1154,7 +1223,7 @@ impl Session {
                 Msg::RecapLoss.text(language),
                 match first {
                     Some(start) => format!(
-                        "{} -> {}",
+                        "{} → {}",
                         loss_text(start, language),
                         loss_text(snapshot.loss, language)
                     ),
@@ -1238,7 +1307,7 @@ impl Session {
                 lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.plain())));
             }
         }
-        frame.render_widget(Paragraph::new(lines), area);
+        paragraph(frame, area, lines);
     }
 
     /// A sentence of guidance, wrapped to the panel.
@@ -1296,6 +1365,36 @@ impl Session {
         self.refused = None;
     }
 
+    /// Whether the reader has turned a knob since the run in progress started.
+    fn knobs_moved(&self) -> bool {
+        match &self.running_with {
+            Some(settled) => !settled.still(self.knobs()),
+            None => false,
+        }
+    }
+
+    /// Runs this stage's work again with the values now on screen, in place of the run before it,
+    /// so the sentence that reads the result is about the run that just happened.
+    fn rerun(&mut self) -> Reaction {
+        if self.knobs().is_empty() {
+            return Reaction::Ignored;
+        }
+        let script = self.script();
+        let upto = self.revealed.min(script.len().saturating_sub(1));
+        let Some(at) = script[..=upto].iter().rposition(|step| matches!(step, Run(_))) else {
+            return Reaction::Ignored;
+        };
+        if at == 0 {
+            return Reaction::Ignored;
+        }
+        self.stop();
+        self.forget_run();
+        self.log.retain(|logged| logged.step < at);
+        self.revealed = at - 1;
+        self.advance();
+        Reaction::Handled
+    }
+
     /// Forgets what has been said about the run in progress, without touching finished ones.
     fn forget_run(&mut self) {
         self.milestone = 0;
@@ -1329,8 +1428,29 @@ impl Session {
                 let asked = self
                     .ran
                     .is_some_and(|(k, m)| k == kind && (m - multiplier).abs() < multiplier * 0.01);
-                let message = if asked { lesson } else { Msg::BreakNotThatRun };
-                message.text(language).to_string()
+                if asked {
+                    return lesson.text(language).to_string();
+                }
+                // The reader ran something else. Saying "the line is skipped" leaves the screen
+                // with a run on it and nothing about that run; this reads the run instead.
+                let mut text = Msg::BreakNotThatRun.text(language).to_string();
+                if let Some(history) = self.latest.as_ref().map(|s| s.loss_history.as_slice())
+                    && let (Some(first), Some(last)) = (history.first(), history.last())
+                {
+                    text.push_str(&format!(
+                        "  ·  {} {:.3} → {:.3}",
+                        Msg::BreakRanAt.text(language),
+                        first,
+                        last
+                    ));
+                    let learned = last < first;
+                    text.push(' ');
+                    text.push_str(
+                        if learned { Msg::BreakItLearned } else { Msg::BreakItDidNot }
+                            .text(language),
+                    );
+                }
+                text
             }
         }
     }
@@ -1395,6 +1515,8 @@ impl Session {
         }
         self.revealed += 1;
         if let Run(deed) = script[self.revealed] {
+            let settled = Settled::of(self.knobs());
+            self.running_with = Some(settled);
             self.forget_run();
             let config = match deed {
                 Train => {
@@ -1518,6 +1640,16 @@ impl Session {
                 Beat::outcome(if *fell { State::Good } else { State::Bad }, text)
             }
             Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+            Happening::PulledIn { to } => Beat::outcome(
+                State::Chosen,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventOutsideRange.text(language),
+                    Msg::EventSetTo.text(language),
+                    to,
+                ),
+            ),
+            Happening::NotANumber => Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)),
         }
     }
 }
@@ -1581,14 +1713,23 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Go => {
+                // A knob turned since this stage's run started asks for the run to be done again
+                // with what is on screen. That comes before carrying the conversation on: the
+                // sentences after a run are about that run, and they would be about the old one.
+                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                    return Reaction::Handled;
+                }
                 if let Some(Await(until)) = self.script().get(self.revealed)
                     && !self.satisfied(*until)
                 {
                     return Reaction::Ignored;
                 }
-                // The end of a stage is not the end of the quest, but walking on from here is
-                // the shell's business: it is what knows there is another stage to walk to.
-                if self.advance() { Reaction::Handled } else { Reaction::Ignored }
+                if self.advance() {
+                    return Reaction::Handled;
+                }
+                // Where there are knobs, Enter runs it again with the values on screen; walking
+                // on is Tab's job. Where there are none the shell walks.
+                self.rerun()
             }
             Action::PauseOrResume => match &self.handle {
                 Some(handle) => {
@@ -1631,13 +1772,17 @@ impl KqSession for Session {
                 }
                 None => Reaction::Ignored,
             },
-            Action::Commit => match self.stage_knobs_mut() {
-                Some(knob) => {
-                    knob.commit();
-                    Reaction::Handled
+            Action::Commit => {
+                let Some(knob) = self.stage_knobs_mut() else { return Reaction::Ignored };
+                // A number that goes nowhere reads as a broken key unless the screen says what
+                // happened to it.
+                match knob.commit() {
+                    Typed::PulledIn { to } => self.say(Happening::PulledIn { to }),
+                    Typed::NotANumber => self.say(Happening::NotANumber),
+                    Typed::Taken | Typed::Nothing => {}
                 }
-                None => Reaction::Ignored,
-            },
+                Reaction::Handled
+            }
             Action::Cancel => match self.stage_knobs_mut() {
                 Some(knob) => {
                     knob.cancel();
@@ -1722,6 +1867,11 @@ impl KqSession for Session {
             ],
             _ => Vec::new(),
         }
+    }
+
+    fn go_name(&self, language: Language) -> Option<&'static str> {
+        let runnable = !self.knobs().is_empty() && (self.at_end() || self.knobs_moved());
+        runnable.then(|| Msg::KeyRunIt.text(language))
     }
 
     fn typing(&self) -> bool {
@@ -1811,6 +1961,16 @@ fn attack_knobs() -> Vec<Knob> {
 }
 
 // ---- small helpers -----------------------------------------------------------
+
+/// Draws `lines` into `area`, saying so when there were more of them than there are rows.
+///
+/// Every panel here is a list of lines drawn into a box someone else sized, and a `Paragraph`
+/// drops whatever does not fit without a word. What it drops is the end of the panel — the run's
+/// own answer, most often — and the row it stops on looks exactly like the end of the text.
+fn paragraph(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    frame
+        .render_widget(Paragraph::new(fit(lines, area.height as usize, area.width as usize)), area);
+}
 
 fn count_of(knob: &Knob) -> u64 {
     match knob.value {
@@ -1992,6 +2152,37 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+
+    #[test]
+    fn enter_at_the_end_of_a_stage_with_knobs_runs_it_again_rather_than_walking_away() {
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        // Straight to the end of the conversation: what is tested is what Enter does once the
+        // stage has nothing left to say, not how long a real training run takes to get there.
+        session.revealed = TUNE.len() - 1;
+        assert!(session.at_end(), "the stage should have said everything by now");
+        let last_run = TUNE.iter().rposition(|step| matches!(step, Run(_))).expect("a run");
+        assert_eq!(session.on(Action::Go), Reaction::Handled, "Enter walked away instead");
+        assert_eq!(session.revealed, last_run + 1, "Enter did not rewind to the run");
+        session.close();
+    }
+
+    #[test]
+    fn a_number_past_the_end_of_a_knob_says_where_it_landed() {
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        for c in "99999".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        let landed = session.knobs()[0].display();
+        let said = session.transcript(Language::ENGLISH);
+        assert!(
+            said.iter().any(|beat| beat.text.contains(&landed)),
+            "the reader was not told where the number landed: {landed}"
+        );
+        session.close();
+    }
 
     fn machine() -> MachineProfile {
         MachineProfile {
@@ -2242,6 +2433,155 @@ mod tests {
                 STEP_PRESETS.iter().any(|preset| format::count(*preset) == **value),
                 "{value:?} is not one of the values worth trying, it is half of one:\n{line}"
             );
+        }
+    }
+
+    /// Every span of a drawn line, as the reader sees it.
+    fn text_of(line: &Line<'static>) -> String {
+        line.spans.iter().map(|span| span.content.to_string()).collect()
+    }
+
+    /// The row of characters naming the columns was drawn as wide as the panel allowed while the
+    /// line above it counted the rows: at 41 columns it named 39 characters over a grid its own
+    /// label called 10. A reader cannot point at a column and say which character it is when the
+    /// number above the grid is about the other side of it.
+    #[test]
+    fn the_grid_names_exactly_as_many_columns_as_its_label_counts() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        part_way(&mut session);
+        let rows: Vec<String> = session
+            .attention_lines(41, 12, Language::ENGLISH, Theme::new(true))
+            .iter()
+            .map(text_of)
+            .collect();
+        session.close();
+        let counted: usize = rows
+            .iter()
+            .find(|row| row.contains(Msg::AttentionNewest.text(Language::ENGLISH)))
+            .and_then(|row| row.split_whitespace().nth(1)?.parse().ok())
+            .expect("the grid never says how much of itself is on screen");
+        let header = rows.len() - counted - 1;
+        assert_eq!(
+            rows[header].trim().chars().count(),
+            counted,
+            "the label counts {counted} and the header names another number:\n{rows:#?}"
+        );
+        for row in &rows[header + 1..] {
+            assert_eq!(row.chars().count(), counted + 2, "a grid row is not as wide as its header");
+        }
+    }
+
+    /// The tuning stage leaves the grid a row or two under the four blocks above it, and a reader
+    /// who started a second run there watched an empty box under "Where the model looked" for the
+    /// whole of it.
+    #[test]
+    fn a_grid_with_no_room_for_a_row_draws_nothing_rather_than_a_heading() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TUNE);
+        part_way(&mut session);
+        let theme = Theme::new(true);
+        for height in 0..=4 {
+            let lines = session.attention_lines(41, height, Language::ENGLISH, theme);
+            assert!(lines.is_empty(), "{height} rows drew a heading with no grid under it");
+        }
+        assert!(
+            session.attention_lines(41, 9, Language::ENGLISH, theme).len() > 4,
+            "the grid did not draw where there was room for it"
+        );
+        session.close();
+    }
+
+    /// The broken run's answer ran off the bottom of the break panel and the row above it filled
+    /// the last column, so the sentence read as if the model had stopped there.
+    #[test]
+    fn a_panel_with_more_to_say_than_rows_marks_the_line_it_stops_on() {
+        let mut session = furnished(STAGE_BREAK);
+        session.chosen = BREAK_MULTIPLIER;
+        let wrecked = TrainingSnapshot {
+            loss: f32::NAN,
+            completion: "l".repeat(40),
+            ..session.latest.clone().expect("a run part way through")
+        };
+        session.latest = Some(wrecked.clone());
+        session.broken = Some(Finished { snapshot: wrecked, rate: 9.0 });
+        let rows = panel_rows(&session, nmtk_kq::theme::MIN_WIDTH, Language::ENGLISH);
+        session.close();
+        let drawn = rows.iter().flat_map(|row| row.chars()).filter(|c| *c == 'l').count();
+        assert!(drawn < 40, "the panel held the whole answer, so this measures nothing now");
+        let last = rows.iter().rev().find(|row| !row.trim().is_empty()).expect("nothing was drawn");
+        assert!(last.ends_with('…'), "the panel stopped mid-answer without saying so: {last:?}");
+    }
+
+    /// One recap line wrote "->" where every other arrow the program draws is "→".
+    #[test]
+    fn every_arrow_the_panel_draws_is_the_same_arrow() {
+        for stage in 0..SCRIPTS.len() {
+            let mut session = furnished(stage);
+            for language in Language::ALL {
+                for row in panel_rows(&session, ROOMY, *language) {
+                    assert!(
+                        !row.contains("->"),
+                        "stage {stage}: {row:?} draws an arrow of its own"
+                    );
+                }
+            }
+            session.close();
+        }
+    }
+
+    /// The values worth trying were drawn at the foot of the whole list, so a reader who had
+    /// chosen the learning rate read them as advice about the steps.
+    #[test]
+    fn the_values_worth_trying_sit_under_the_knob_they_belong_to() {
+        let english = Language::ENGLISH;
+        let mut session = furnished(STAGE_TUNE);
+        for knob in 0..session.stage_knobs().len() {
+            session.chosen = knob;
+            let rows = panel_rows(&session, ROOMY, english);
+            let chosen = rows
+                .iter()
+                .position(|row| row.starts_with(State::Chosen.mark()))
+                .expect("no knob is marked as the chosen one");
+            let presets = rows
+                .iter()
+                .position(|row| row.contains(Msg::LabelPresets.text(english)))
+                .expect("no values worth trying are drawn");
+            assert_eq!(presets, chosen + 1, "knob {knob}: the suggestions are under another knob");
+        }
+        session.close();
+    }
+
+    /// The learning rate's suggestions ended in the panel's last column, where a reader cannot
+    /// tell whether a fourth value was cut off it, and the longest list lost its last values.
+    #[test]
+    fn the_values_worth_trying_fold_rather_than_filling_the_last_column() {
+        let english = Language::ENGLISH;
+        let label = Msg::LabelPresets.text(english);
+        for (stage, knob, presets) in [
+            (STAGE_TUNE, TUNE_RATE, RATE_PRESETS),
+            (STAGE_BREAK, BREAK_MULTIPLIER, MULTIPLIER_PRESETS),
+        ] {
+            for total in [nmtk_kq::theme::MIN_WIDTH, 100] {
+                let mut session = furnished(stage);
+                session.chosen = knob;
+                let rows = panel_rows(&session, total, english);
+                session.close();
+                let words: Vec<&str> = rows.iter().flat_map(|row| row.split_whitespace()).collect();
+                for preset in presets {
+                    let value = decimal_text(*preset);
+                    assert!(
+                        words.contains(&value.as_str()),
+                        "stage {stage} at {total}: {value} is not on screen at all"
+                    );
+                }
+                for row in rows.iter().filter(|row| row.contains(label)) {
+                    assert!(
+                        cells(row) + PRESET_GAP <= panel_width(total),
+                        "stage {stage} at {total}: {row:?} runs to the panel edge"
+                    );
+                }
+            }
         }
     }
 
@@ -2592,7 +2932,7 @@ mod tests {
         session.go_to(STAGE_RECAP);
         session.honest = Some(finished);
         let screen = draw(&session, 80, 24);
-        assert!(screen.contains("3.310 -> 0.412"), "no loss from end to end:\n{screen}");
+        assert!(screen.contains("3.310 → 0.412"), "no loss from end to end:\n{screen}");
         assert!(screen.contains("need more truth knowledge"), "no answer:\n{screen}");
     }
 
