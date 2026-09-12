@@ -29,7 +29,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let mark = if current { State::Good.mark() } else { " " };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{mark} "), theme.state(State::Good)),
-                Span::styled(format!("{:<24}", entry.endonym()), theme.plain()),
+                // Measured in terminal cells, not characters: 한국어 is three characters and six
+                // cells, and a column counted in characters puts the code three cells adrift.
+                Span::styled(nmtk_kq::text::column(entry.endonym(), 24), theme.plain()),
                 Span::styled(entry.code().to_string(), theme.muted()),
             ]))
             .style(if index == chosen { theme.selected() } else { theme.plain() })

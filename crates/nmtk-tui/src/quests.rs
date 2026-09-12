@@ -194,6 +194,13 @@ fn render_detail(
             Span::styled(format!("  v{}", meta.version), theme.muted()),
         ]),
     ];
+    // The mark beside a finished quest is a mark; this is the sentence that says what it means.
+    if app.settings.has_finished(meta.id.as_str()) {
+        facts.push(Line::from(vec![
+            Span::styled(format!("{} ", State::Good.mark()), theme.state(State::Good)),
+            Span::styled(t(Msg::QuestFinished, language), theme.plain()),
+        ]));
+    }
     facts.extend(needs_lines(&meta.needs, &app.machine, language, theme));
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: true }), facts_area);
 }

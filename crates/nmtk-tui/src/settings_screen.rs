@@ -8,16 +8,22 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, SettingItem};
 use nmtk_kq::Theme;
-use nmtk_kq::text::pad;
+use nmtk_kq::text::{column, wrap as wrap_text};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let area = centred(area, 72);
     let language = app.language();
     let selected = app.settings_index.min(SettingItem::ALL.len() - 1);
 
-    let [rows_area, about_area, status_area] = Layout::vertical([
+    // The explanation box is as tall as the explanation. Stretching it down the screen left
+    // twenty blank rows framed in a border, which reads as something missing.
+    let about = t(SettingItem::ALL[selected].about(), language);
+    let about_rows =
+        wrap_text(about, area.width.saturating_sub(4) as usize).len().clamp(1, 8) as u16;
+    let [rows_area, about_area, _, status_area] = Layout::vertical([
         Constraint::Length(SettingItem::ALL.len() as u16 + 2),
-        Constraint::Min(3),
+        Constraint::Length(about_rows + 2),
+        Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -29,16 +35,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let marker = if index == selected { "▸ " } else { "  " };
             let style = if index == selected { theme.selected() } else { theme.plain() };
             Line::from(vec![
-                Span::styled(format!("{marker}{}", pad(t(item.title(), language), 18)), style),
+                Span::styled(format!("{marker}{}", column(t(item.title(), language), 18)), style),
                 Span::styled(value_of(*item, app, language), theme.heading()),
             ])
         })
         .collect();
     frame.render_widget(Paragraph::new(rows).block(theme.panel()), rows_area);
 
-    let about = Paragraph::new(t(SettingItem::ALL[selected].about(), language))
-        .style(theme.muted())
-        .wrap(Wrap { trim: true });
+    let about = Paragraph::new(about).style(theme.muted()).wrap(Wrap { trim: true });
     frame.render_widget(about.block(theme.panel()), about_area);
 
     if let Some(status) = app.status {

@@ -269,10 +269,12 @@ impl App {
         match code {
             KeyCode::Tab => {
                 self.step_stage(1);
+                self.note_if_finished();
                 return;
             }
             KeyCode::BackTab => {
                 self.step_stage(-1);
+                self.note_if_finished();
                 return;
             }
             _ => {}
@@ -286,6 +288,10 @@ impl App {
         if taken == Reaction::Handled {
             // A beat the reader caused is a beat they want to see.
             self.transcript_follows = true;
+            // The keypress that reveals the last beat of the last stage is the one that finishes
+            // the quest, and it is handled by the quest — so the mark has to be made here too,
+            // or a reader who reads to the very end is never recorded as having got there.
+            self.note_if_finished();
             return;
         }
         // Enter at the end of a stage carries the reader into the next one. A quest knows where
