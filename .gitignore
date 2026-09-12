@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# nmtk — only what nmtk needs is tracked here.
+# Rule of thumb: if it is generated, personal, secret, or written for an AI
+# assistant, it does not belong in this repository.
+# ---------------------------------------------------------------------------
+
+# Rust build output (Cargo.lock IS tracked: this repository ships a binary)
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# AI assistant files — never published
+CLAUDE.md
+CLAUDE.md.*
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.claude/
+.claude*/
+.cursor/
+.cursorrules
+.aider*
+.continue/
+.windsurf/
+.codeium/
+.github/copilot-instructions.md
+*.session.json
+*.transcript.jsonl
+
+# Internal working notes (owner-facing, Korean) — kept on this machine only
+/notes/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*.gpg
+credentials*.json
+secrets.*
+.netrc
+.wrangler/
+.dev.vars
+
+# Local runs, trained weights, captured output
+*.log
+/runs/
+/models/
+*.nmtk-model
+*.ckpt
+*.safetensors
+/scratch/
+/tmp/
+
+# Editors and operating systems
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Web tooling (only if a site lands in this repository later)
+node_modules/
+dist/
+.next/
+.cache/
