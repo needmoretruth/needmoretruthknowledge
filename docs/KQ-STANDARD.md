@@ -58,6 +58,20 @@ A quest builds its conversation in `transcript(language)`, on demand, from the w
 done — never stored as text. Switching language rewrites the whole conversation, not the next line
 of it.
 
+**Waiting is part of the conversation.** A stage that starts a real run stops there and lets the
+run answer: beats arrive as blocks are mined or the loss falls, and the conversation carries itself
+on when the thing it was about to describe has happened. Two methods keep that honest:
+
+| | |
+|---|---|
+| `can_advance()` | Enter does something right now. False while a run is being waited on. |
+| `at_end()` | This stage has said everything it has to say. |
+
+Both are false in the middle of a run, and the shell needs to tell those apart: at the end of a
+stage Enter walks into the next one, and in the middle of a run it does nothing, which is what the
+reader is being told. A quest never walks itself into the next stage — only the shell knows there
+is one.
+
 ## 2. What a quest declares
 
 Plain data, available before the quest is opened, so the shelf can sort and filter without running
@@ -161,6 +175,8 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
   machine is the worst bug this program can have, because it is invisible.
 - **Never make a language agree a plural.** Write `coins 3`, not `3 coins`; `lines 1` reads, `1
   lines` does not.
+- **Label first, value after.** `gap 3.2s`, `attacker's share 51.0%`. English tolerates either
+  order and Korean does not, so one order has to be the rule, and this is the one that survives.
 
 ## 9. Drawing
 
@@ -192,6 +208,18 @@ crates/kq-<topic>/src/
     phrases.rs    every word, English first
     session.rs    the stage scripts, the deeds, the right-hand panel
 ```
+
+A stage's script is a list of steps. Four kinds cover every quest written so far:
+
+```rust
+Say(Msg)        // one sentence
+Ask(Msg)        // something the reader has to do before pressing Enter
+Run(Deed)       // real work, started the moment the step is reached
+Await(Until)    // the conversation waits; the run's own beats are the answer
+```
+
+A `Run` followed by an `Await` is one move: the reader presses Enter once and the waiting begins,
+because a key whose only effect is to skip the answer is not worth offering.
 
 The engine it drives is a separate crate and knows nothing about any of this.
 

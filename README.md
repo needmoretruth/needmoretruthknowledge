@@ -27,18 +27,25 @@ Everything happens locally. nmtk opens no sockets, sends no telemetry, and needs
 
 ## Knowledge Quests
 
-A **Knowledge Quest (KQ)** is one finished piece of learning. Every quest walks the same five
-stages, so once you have done one you know your way around all of them:
+A **Knowledge Quest (KQ)** is one finished piece of learning, and it talks rather than lectures.
 
-| | Stage | What happens |
-|---|---|---|
-| `1` | **Brief** | Why this is worth an hour. One screen, no jargon. |
-| `2` | **Run** | The real thing runs. Numbers move. Nothing is decided in advance. |
-| `3` | **Tune** | You change values and the run answers. |
-| `4` | **Break** | You attack it and find out what holds. |
-| `5` | **Recap** | What just happened, in the order it happened. |
+You are told one thing, in one or two sentences. You press Enter. Something real happens on your
+machine. Then a sentence about what just happened, and Enter again — the way a chat goes, not the
+way a textbook does. Where the answer takes time, the conversation stops and waits: a block arrives,
+a loss falls past a milestone, an attack gives up, and each of those says so as it happens.
 
-Four ship today.
+Every quest has at least three stages and some have seven. Each declares its own difficulty, so a
+quest can open very easy and end hard, and `Tab` walks between them.
+
+| Stage kind | What happens |
+|---|---|
+| **Explain** | Why this is worth the time, one sentence at a time. |
+| **Run** | The real thing runs. Nothing is decided in advance. |
+| **Tune** | You change values — by arrow or by typing a number — and the run answers. |
+| **Break** | You attack it and find out what holds. |
+| **Recap** | What just happened, in your own numbers. |
+
+Four quests ship today.
 
 ### ⛏ Proof of work · *Consensus · 40 min*
 
@@ -52,7 +59,7 @@ succeeds**: a payment reaches the confirmations you set, the merchant hands over
 attacker's private chain erases it. Drop the attacker to 30% and watch the same attack fall behind
 and give up.
 
-### 📒 Ledger models · *Ledgers · 25 min*
+### 📒 Ledger models · *Ledgers · 20 min*
 
 Send one coin under three sets of rules at once — **UTXO** (Bitcoin), **account-based** (Ethereum),
 **object-based** (Sui) — and watch them disagree about everything except the balance. One transfer
@@ -101,32 +108,42 @@ Details, other ways to do it, and what to do when something goes wrong: **[INSTA
 
 ## Keys
 
+The only key you need to start is `Enter`.
+
 | Key | What it does |
 |---|---|
-| `↑` `↓` or `j` `k` | move |
-| `Enter` | open, go, or accept a typed number |
-| `←` `→` | turn the chosen value |
-| `1`–`5` | jump to a stage |
-| `Space` | pause and resume |
-| `r` | reset the run |
+| `Enter` | carry the conversation on, or accept a typed number |
+| `Tab` | the next stage of the quest (`Shift+Tab` for the one before) |
+| `↑` `↓` | choose a value to change |
+| `←` `→` or `0`–`9` | change it, by arrow or by typing the number you want |
+| `PgUp` `PgDn` | scroll back through what has been said |
+| `Space` | pause and resume a run |
+| `r` | start this stage over |
 | `o` `f` `v` | on the shelf: sort, filter, older versions |
-| `l` | English ⇄ 한국어 |
+| `l` | pick a language |
 | `s` | settings |
-| `?` | keys |
+| `?` | every key, grouped by where it works |
 | `q` or `Esc` | back, and quit from the shelf |
 
 A terminal of at least 80×24 is required.
 
 ## Language
 
-English is the default and always complete. Korean is one key away (`l`), and anything not translated
-yet stays in English rather than going blank.
+The first time you run nmtk it says what it is in four lines and asks you three things, the first of
+which is the language. After that it never asks again, and `l` opens the list from anywhere.
+
+English is the default and always complete. Anything not translated yet stays in English rather than
+going blank, and no screen loses text in one language that it keeps in another.
 
 ## Settings
 
 nmtk reads your machine at startup and sizes the work to it, so a four-core laptop is not handed a
-run that takes an hour. You can override the thread count, the language and colour under `s`, and
-your choices are kept in `~/.config/nmtk/settings.toml`.
+run that takes an hour. Every quest states a **minimum** and a **recommended** machine, and the
+shelf says where yours sits against both. A quest under the minimum still opens and sizes itself
+down; it says so rather than refusing.
+
+You can change the thread count, the language and colour under `s`, and your choices are kept in
+`~/.config/nmtk/settings.toml`.
 
 Quests keep their version. A quest is never rewritten out from under you: when a new version ships
 the old one stays in the program, and `v` on the shelf opens exactly the one you learned from.
@@ -141,8 +158,9 @@ the old one stays in the program, and `v` on the shelf opens exactly the one you
 
 Quests are built against one standard so that four of them, written by different hands, feel like
 one program: **[docs/KQ-STANDARD.md](docs/KQ-STANDARD.md)**. It covers the metadata a quest declares,
-the five stages, the screen, the four state colours, the keys, and the rule that shapes all of it — a
-subject is only finished when a reader can change something and watch the result.
+how a conversation is written, stages and difficulties, minimum and recommended machines, the screen,
+the four state colours, the keys, and the rule that shapes all of it — a subject is only finished
+when a reader can change something and watch the result.
 
 Issues and pull requests are welcome.
 
