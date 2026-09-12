@@ -92,9 +92,9 @@ mod tests {
 
     #[test]
     fn it_has_a_name_and_a_summary_before_anything_is_opened() {
-        assert_eq!(ProofOfWork.title(Language::English), "Proof of work");
-        assert!(!ProofOfWork.summary(Language::English).is_empty());
-        assert!(!ProofOfWork.subcategory(Language::English).is_empty());
+        assert_eq!(ProofOfWork.title(Language::ENGLISH), "Proof of work");
+        assert!(!ProofOfWork.summary(Language::ENGLISH).is_empty());
+        assert!(!ProofOfWork.subcategory(Language::ENGLISH).is_empty());
     }
 
     #[test]

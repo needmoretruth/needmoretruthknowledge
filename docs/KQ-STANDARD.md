@@ -26,6 +26,8 @@ is right and this document is a bug.
 | **Not** | a simulation that decides the outcome in advance |
 | **Is** | the real mechanism, running on this machine, with its values in the reader's hands |
 
+The motto this is all built on: **study that isn't fun is labour, and nobody does labour they can avoid.**
+
 The test a quest has to pass: **the reader can change something and the result really changes.**
 If every reader sees the same ending, it is not a quest yet.
 

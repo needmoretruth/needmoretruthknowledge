@@ -9,35 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::language::Language;
 use crate::machine::MachineProfile;
-
-/// The language the screen is written in. English is the source of truth; Korean is a choice the
-/// reader makes, and any string missing from Korean falls back to English rather than to a blank.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum Language {
-    #[default]
-    English,
-    Korean,
-}
-
-impl Language {
-    /// The two-letter tag shown in the title bar.
-    pub fn tag(self) -> &'static str {
-        match self {
-            Language::English => "EN",
-            Language::Korean => "KO",
-        }
-    }
-
-    /// The other language, for the key that toggles between them.
-    pub fn toggled(self) -> Self {
-        match self {
-            Language::English => Language::Korean,
-            Language::Korean => Language::English,
-        }
-    }
-}
 
 /// Everything the reader can change and keep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,21 +118,16 @@ mod tests {
 
     #[test]
     fn settings_survive_a_round_trip() {
-        let settings = Settings { language: Language::Korean, worker_threads: 3, colour: false };
+        let settings = Settings { language: Language::KOREAN, worker_threads: 3, colour: false };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
     }
 
     #[test]
     fn an_unknown_field_does_not_throw_the_rest_away() {
-        let text = "language = \"korean\"\nfuture-option = 7\n";
+        let text = "language = \"ko\"\nfuture-option = 7\n";
         let parsed: Settings = toml::from_str(text).unwrap();
-        assert_eq!(parsed.language, Language::Korean);
+        assert_eq!(parsed.language, Language::KOREAN);
     }
 
-    #[test]
-    fn the_language_tag_is_what_the_title_bar_shows() {
-        assert_eq!(Language::English.tag(), "EN");
-        assert_eq!(Language::English.toggled(), Language::Korean);
-    }
 }

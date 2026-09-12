@@ -78,9 +78,9 @@ mod tests {
 
     #[test]
     fn it_has_a_name_in_both_languages() {
-        assert_eq!(Ledgers.title(Language::English), "Ledger models");
-        assert_eq!(Ledgers.title(Language::Korean), "원장 방식");
-        assert!(!Ledgers.summary(Language::Korean).is_empty());
+        assert_eq!(Ledgers.title(Language::ENGLISH), "Ledger models");
+        assert_eq!(Ledgers.title(Language::KOREAN), "원장 방식");
+        assert!(!Ledgers.summary(Language::KOREAN).is_empty());
     }
 
     #[test]

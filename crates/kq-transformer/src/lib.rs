@@ -98,9 +98,9 @@ mod tests {
 
     #[test]
     fn it_has_a_name_and_a_subtitle() {
-        assert_eq!(Transformer.title(Language::English), "Transformer");
-        assert!(!Transformer.summary(Language::English).is_empty());
-        assert_eq!(Transformer.subcategory(Language::English), "Architectures");
+        assert_eq!(Transformer.title(Language::ENGLISH), "Transformer");
+        assert!(!Transformer.summary(Language::ENGLISH).is_empty());
+        assert_eq!(Transformer.subcategory(Language::ENGLISH), "Architectures");
     }
 
     /// A quest this heavy still has to open on a machine that does not meet its requirements —

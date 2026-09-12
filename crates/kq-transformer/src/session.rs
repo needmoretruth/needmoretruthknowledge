@@ -1422,7 +1422,7 @@ mod tests {
                 // The shell gives a quest the right-hand panel: 62% of the width, minus the
                 // header and footer rows.
                 let area = Rect::new(30, 1, width - 30, height - 2);
-                session.render(frame, area, Theme::new(true), Language::English);
+                session.render(frame, area, Theme::new(true), Language::ENGLISH);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
@@ -1443,7 +1443,7 @@ mod tests {
         for stage in StageKind::ALL {
             assert_eq!(session.on(Action::Stage(stage)), Reaction::Handled);
             assert_eq!(session.stage(), stage);
-            assert!(!session.explain(Language::English).is_empty(), "{stage:?} explains nothing");
+            assert!(!session.explain(Language::ENGLISH).is_empty(), "{stage:?} explains nothing");
         }
     }
 
@@ -1666,7 +1666,7 @@ mod tests {
         let mut session = Session::new(&machine());
         for stage in StageKind::ALL {
             session.go_to(stage);
-            for (key, hint) in session.keys(Language::English) {
+            for (key, hint) in session.keys(Language::ENGLISH) {
                 assert!(!key.is_empty() && cells(key) <= 2, "{stage:?}: {key:?} is not a key");
                 assert!(cells(hint) <= 20, "{stage:?}: {hint:?} is a sentence, not a hint");
                 assert!(!hint.ends_with('.'), "{stage:?}: {hint:?} is a sentence");

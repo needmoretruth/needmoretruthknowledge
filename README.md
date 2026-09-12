@@ -9,7 +9,7 @@
 ╚═╝  ╚═══╝╚═╝     ╚═╝   ╚═╝   ╚═╝  ╚═╝
 ```
 
-### If it isn't fun, it doesn't stick.
+### Study that isn't fun is labour. I hate labour.
 
 **[nmtk.me](https://nmtk.me)** · [한국어](README.ko.md)
 

@@ -59,7 +59,7 @@ fn centred(area: Rect, width: u16) -> Rect {
 /// The value as the reader sees it, brackets included.
 fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> String {
     match item {
-        SettingItem::Language => format!("[ {} ]", language_name(app.settings.language)),
+        SettingItem::Language => format!("[ {} ]", app.settings.language.endonym()),
         SettingItem::Threads => {
             if app.settings.worker_threads == 0 {
                 format!("[ {} ({}) ]", t(Msg::SettingsAuto, language), app.threads())
@@ -71,10 +71,4 @@ fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> Stri
     }
 }
 
-/// A language is named in its own language — that is how a reader finds theirs.
-fn language_name(language: nmtk_core::Language) -> &'static str {
-    match language {
-        nmtk_core::Language::English => "English",
-        nmtk_core::Language::Korean => "한국어",
-    }
-}
+

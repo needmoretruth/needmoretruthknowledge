@@ -116,9 +116,9 @@ mod tests {
 
     #[test]
     fn it_has_a_name_and_a_summary() {
-        assert_eq!(ZeroKnowledge.title(Language::English), "Zero-knowledge proofs");
-        assert!(!ZeroKnowledge.summary(Language::English).is_empty());
-        assert!(!ZeroKnowledge.subcategory(Language::English).is_empty());
+        assert_eq!(ZeroKnowledge.title(Language::ENGLISH), "Zero-knowledge proofs");
+        assert!(!ZeroKnowledge.summary(Language::ENGLISH).is_empty());
+        assert!(!ZeroKnowledge.subcategory(Language::ENGLISH).is_empty());
     }
 
     // ---- The phrase table ------------------------------------------------------
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn english_is_never_missing() {
         for msg in Msg::ALL {
-            assert!(!msg.text(Language::English).trim().is_empty(), "{msg:?} has no English");
+            assert!(!msg.text(Language::ENGLISH).trim().is_empty(), "{msg:?} has no English");
         }
     }
 
@@ -134,22 +134,22 @@ mod tests {
     fn korean_is_never_blank_either() {
         // A line with no Korean falls back to the English, which still reads. A blank does not.
         for msg in Msg::ALL {
-            assert!(!msg.text(Language::Korean).trim().is_empty(), "{msg:?} is blank in Korean");
+            assert!(!msg.text(Language::KOREAN).trim().is_empty(), "{msg:?} is blank in Korean");
         }
     }
 
     #[test]
     fn the_quest_is_named_in_both_languages() {
-        assert_eq!(ZeroKnowledge.title(Language::English), "Zero-knowledge proofs");
-        assert_eq!(ZeroKnowledge.title(Language::Korean), "영지식 증명");
+        assert_eq!(ZeroKnowledge.title(Language::ENGLISH), "Zero-knowledge proofs");
+        assert_eq!(ZeroKnowledge.title(Language::KOREAN), "영지식 증명");
     }
 
     #[test]
     fn every_enum_the_engine_returns_has_a_word_for_it() {
         use nmtk_zk::{Claim, ForgeryKind, Item, SetupKind, Stage};
         for stage in Stage::ALL {
-            assert!(!phrases::stage(stage).text(Language::English).is_empty());
-            assert!(!phrases::stage_brief(stage).text(Language::English).is_empty());
+            assert!(!phrases::stage(stage).text(Language::ENGLISH).is_empty());
+            assert!(!phrases::stage_brief(stage).text(Language::ENGLISH).is_empty());
         }
         let kinds = [
             ForgeryKind::GuessedResponse,
@@ -160,7 +160,7 @@ mod tests {
             ForgeryKind::OverspendOutOfRange,
         ];
         for kind in kinds {
-            assert!(!phrases::forgery(kind).text(Language::English).is_empty());
+            assert!(!phrases::forgery(kind).text(Language::ENGLISH).is_empty());
         }
         let items = [
             Item::SpendingKey,
@@ -177,7 +177,7 @@ mod tests {
             Item::ToxicWaste,
         ];
         for item in items {
-            assert!(!phrases::item(item).text(Language::English).is_empty());
+            assert!(!phrases::item(item).text(Language::ENGLISH).is_empty());
         }
         let claims = [
             Claim::TransactionHappened,
@@ -188,10 +188,10 @@ mod tests {
             Claim::SpenderHoldsKey,
         ];
         for claim in claims {
-            assert!(!phrases::claim(claim).text(Language::English).is_empty());
+            assert!(!phrases::claim(claim).text(Language::ENGLISH).is_empty());
         }
         for setup in [SetupKind::NoneNeeded, SetupKind::Transparent, SetupKind::ToxicWaste] {
-            assert!(!phrases::setup_kind(setup).text(Language::English).is_empty());
+            assert!(!phrases::setup_kind(setup).text(Language::ENGLISH).is_empty());
         }
     }
 
@@ -204,7 +204,7 @@ mod tests {
         for stage in ZeroKnowledge.meta().stages {
             session.on(Action::Stage(*stage));
             assert_eq!(session.stage(), *stage);
-            assert!(!session.explain(Language::English).is_empty());
+            assert!(!session.explain(Language::ENGLISH).is_empty());
         }
         session.close();
     }
@@ -280,7 +280,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = panel(frame.area());
-                session.render(frame, area, Theme::new(true), Language::English);
+                session.render(frame, area, Theme::new(true), Language::ENGLISH);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();

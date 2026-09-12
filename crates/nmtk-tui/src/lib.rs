@@ -7,6 +7,7 @@
 pub mod app;
 mod chrome;
 mod help;
+mod languages;
 mod logo;
 mod quest;
 mod quests;
@@ -79,6 +80,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Screen::Quests => quests::render(frame, body_area, app, theme),
         Screen::Settings => settings_screen::render(frame, body_area, app, theme),
         Screen::Help => help::render(frame, body_area, language, theme),
+        Screen::Languages => languages::render(frame, body_area, app, theme),
         Screen::Quest => match &app.open {
             Some(quest) => quest::render(frame, body_area, quest, theme, language),
             None => quests::render(frame, body_area, app, theme),
@@ -93,6 +95,7 @@ fn screen_title(app: &App, language: nmtk_core::Language) -> String {
         Screen::Quests => t(Msg::Quests, language).to_string(),
         Screen::Settings => t(Msg::MenuSettings, language).to_string(),
         Screen::Help => t(Msg::HelpTitle, language).to_string(),
+        Screen::Languages => t(Msg::SettingsLanguage, language).to_string(),
         Screen::Quest => match &app.open {
             Some(quest) => format!(
                 "{}  ·  {}",
@@ -125,6 +128,9 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
             say("q", Msg::KeyBack),
         ],
         Screen::Help => vec![say("q", Msg::KeyBack)],
+        Screen::Languages => {
+            vec![say("↑↓", Msg::KeyMove), say("Enter", Msg::KeyOpen), say("q", Msg::KeyBack)]
+        }
         Screen::Quest => {
             let mut keys = vec![
                 say("1-5", Msg::KeyMove),
@@ -183,7 +189,7 @@ mod tests {
 
     #[test]
     fn the_shelf_shows_a_quest_at_the_smallest_screen() {
-        let app = app_in(Language::English);
+        let app = app_in(Language::ENGLISH);
         let text = shot(&app, 80, 24);
         println!("\n===== quests (80x24) =====\n{text}");
         assert!(text.contains("Ledger models"), "the quest is missing:\n{text}");
@@ -192,7 +198,7 @@ mod tests {
 
     #[test]
     fn opening_a_quest_shows_its_stages() {
-        let mut app = app_in(Language::English);
+        let mut app = app_in(Language::ENGLISH);
         app.on_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
@@ -205,22 +211,22 @@ mod tests {
 
     #[test]
     fn the_shelf_reads_in_korean_too() {
-        let app = app_in(Language::Korean);
+        let app = app_in(Language::KOREAN);
         let text = shot(&app, 80, 24);
         assert!(text.replace(' ', "").contains("원장방식"), "the quest lost its name:\n{text}");
-        assert!(text.replace(' ', "").contains("재미없으면"), "the motto is missing:\n{text}");
+        assert!(text.replace(' ', "").contains("재미없는공부는"), "the motto is missing:\n{text}");
     }
 
     #[test]
     fn a_small_terminal_says_so_instead_of_drawing_a_broken_screen() {
-        let app = app_in(Language::English);
+        let app = app_in(Language::ENGLISH);
         let text = shot(&app, 60, 20);
         assert!(text.contains("80x24"), "a cramped terminal got no explanation:\n{text}");
     }
 
     #[test]
     fn sorting_and_filtering_do_not_lose_the_quest() {
-        let mut app = app_in(Language::English);
+        let mut app = app_in(Language::ENGLISH);
         for _ in 0..SortKey::ALL.len() {
             app.on_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char('o'),

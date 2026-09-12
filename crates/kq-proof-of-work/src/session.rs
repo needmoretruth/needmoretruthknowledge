@@ -1254,7 +1254,7 @@ mod tests {
                     Constraint::Percentage(100 - EXPLAIN_PERCENT),
                 ])
                 .areas(body);
-                session.render(frame, panel, Theme::new(true), Language::English);
+                session.render(frame, panel, Theme::new(true), Language::ENGLISH);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();

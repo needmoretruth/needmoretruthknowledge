@@ -1,6 +1,6 @@
 # The repository pins the compiler so a build does not depend on the machine it runs on.
 # Raise this in a commit of its own, then run the whole test suite.
 [toolchain]
-channel = "1.96.0"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

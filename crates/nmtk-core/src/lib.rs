@@ -5,8 +5,10 @@
 //! on this crate; nothing here knows that a screen exists.
 
 pub mod format;
+pub mod language;
 pub mod machine;
 pub mod settings;
 
+pub use language::Language;
 pub use machine::{MachineProfile, SizeClass};
-pub use settings::{Language, Settings};
+pub use settings::Settings;

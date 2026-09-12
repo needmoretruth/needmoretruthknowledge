@@ -9,13 +9,21 @@
 
 pub use nmtk_core::Language;
 
-/// Declares a message table. Korean is optional per line.
+/// Declares a message table, one column per language.
 ///
 /// Every KQ calls this for its own phrases, so two quests being written at the same time never
-/// touch the same file.
+/// touch the same file. `en` is required and is what a missing column falls back to; every other
+/// column is keyed by the language's code, and adding a language is adding a column.
+///
+/// ```ignore
+/// nmtk_i18n::messages! {
+///     Title { en: "Proof of work", ko: "작업증명" },
+///     Summary { en: "Mine a real block." },
+/// }
+/// ```
 #[macro_export]
 macro_rules! messages {
-    ($( $(#[$doc:meta])* $key:ident : $en:literal $( => $ko:literal )? ),* $(,)?) => {
+    ($( $(#[$doc:meta])* $key:ident { en: $en:literal $(, $lang:ident : $text:literal )* $(,)? } ),* $(,)?) => {
         /// One line of text on screen, named by what it says rather than where it appears.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum Msg { $( $(#[$doc])* $key, )* }
@@ -23,11 +31,14 @@ macro_rules! messages {
         impl Msg {
             /// The line in the chosen language, falling back to English.
             pub fn text(self, language: $crate::Language) -> &'static str {
-                match (self, language) {
-                    $( (Msg::$key, $crate::Language::English) => $en, )*
-                    $( $( (Msg::$key, $crate::Language::Korean) => $ko, )? )*
-                    #[allow(unreachable_patterns)]
-                    (other, _) => other.text($crate::Language::English),
+                let code = language.code();
+                match self {
+                    $(
+                        Msg::$key => {
+                            $( if code == stringify!($lang) { return $text; } )*
+                            $en
+                        }
+                    )*
                 }
             }
 
@@ -39,97 +50,91 @@ macro_rules! messages {
 
 messages! {
     // ---- Shell ----------------------------------------------------------------
-    AppSubtitle: "Run it, break it, learn it." => "직접 돌리고, 부숴 보고, 배웁니다.",
-    Motto: "If it isn't fun, it doesn't stick." => "재미없으면 배워지지가 않는다.",
-    TerminalTooSmall: "This screen needs 80x24. Make the terminal larger." => "이 화면은 80x24가 필요합니다. 터미널을 키워 주세요.",
-    Loading: "Working..." => "작업 중...",
-
+    AppSubtitle { en: "Run it, break it, learn it.", ko: "직접 돌리고, 부숴 보고, 배웁니다." },
+    Motto { en: "Study that isn't fun is labour. I hate labour.", ko: "재미없는 공부는 노동이다. 나는 노동을 싫어한다." },
+    TerminalTooSmall { en: "This screen needs 80x24. Make the terminal larger.", ko: "이 화면은 80x24가 필요합니다. 터미널을 키워 주세요." },
+    Loading { en: "Working...", ko: "작업 중..." },
     // ---- Home -----------------------------------------------------------------
-    Home: "Home" => "홈",
-    HomeHint: "Pick a subject and press Enter." => "주제를 고르고 Enter를 누르세요.",
-    MenuProofOfWork: "Proof of work" => "작업증명",
-    MenuProofOfWorkAbout: "Mine at Bitcoin's original difficulty, split your cores among miners, and run a 51% attack that actually succeeds." => "비트코인 첫 난이도로 채굴하고, 코어를 채굴자들에게 나눠 주고, 실제로 성공하는 51% 공격을 돌려 봅니다.",
-    MenuLedgers: "Ledger models" => "원장 방식",
-    MenuLedgersAbout: "Send the same coin under UTXO, account and object rules, then try to spend it twice." => "같은 코인을 UTXO·계정·객체 규칙으로 보내 보고, 두 번 쓰기를 시도해 봅니다.",
-    MenuTransformer: "Transformer" => "트랜스포머",
-    MenuTransformerAbout: "Train a real transformer here, by hand, until it answers \"nmtk\" with \"need more truth knowledge\"." => "직접 짠 트랜스포머를 여기서 학습시켜 「nmtk」에 「need more truth knowledge」라고 답하게 만듭니다.",
-    MenuZeroKnowledge: "Zero-knowledge proofs" => "영지식 증명",
-    MenuZeroKnowledgeAbout: "Prove you know a secret without showing it, from sigma protocols to halo2, seen from four sides." => "비밀을 보여 주지 않고 안다는 것만 증명합니다. 시그마 프로토콜부터 halo2까지, 네 사람의 눈으로 봅니다.",
-    MenuSettings: "Settings" => "설정",
-    MenuSettingsAbout: "Language, threads, colour, and the defaults each subject starts from." => "언어, 스레드 수, 색, 그리고 각 주제가 시작하는 기본값.",
-    MenuQuit: "Quit" => "끝내기",
-
+    Home { en: "Home", ko: "홈" },
+    HomeHint { en: "Pick a subject and press Enter.", ko: "주제를 고르고 Enter를 누르세요." },
+    MenuProofOfWork { en: "Proof of work", ko: "작업증명" },
+    MenuProofOfWorkAbout { en: "Mine at Bitcoin's original difficulty, split your cores among miners, and run a 51% attack that actually succeeds.", ko: "비트코인 첫 난이도로 채굴하고, 코어를 채굴자들에게 나눠 주고, 실제로 성공하는 51% 공격을 돌려 봅니다." },
+    MenuLedgers { en: "Ledger models", ko: "원장 방식" },
+    MenuLedgersAbout { en: "Send the same coin under UTXO, account and object rules, then try to spend it twice.", ko: "같은 코인을 UTXO·계정·객체 규칙으로 보내 보고, 두 번 쓰기를 시도해 봅니다." },
+    MenuTransformer { en: "Transformer", ko: "트랜스포머" },
+    MenuTransformerAbout { en: "Train a real transformer here, by hand, until it answers \"nmtk\" with \"need more truth knowledge\".", ko: "직접 짠 트랜스포머를 여기서 학습시켜 「nmtk」에 「need more truth knowledge」라고 답하게 만듭니다." },
+    MenuZeroKnowledge { en: "Zero-knowledge proofs", ko: "영지식 증명" },
+    MenuZeroKnowledgeAbout { en: "Prove you know a secret without showing it, from sigma protocols to halo2, seen from four sides.", ko: "비밀을 보여 주지 않고 안다는 것만 증명합니다. 시그마 프로토콜부터 halo2까지, 네 사람의 눈으로 봅니다." },
+    MenuSettings { en: "Settings", ko: "설정" },
+    MenuSettingsAbout { en: "Language, threads, colour, and the defaults each subject starts from.", ko: "언어, 스레드 수, 색, 그리고 각 주제가 시작하는 기본값." },
+    MenuQuit { en: "Quit", ko: "끝내기" },
     // ---- Quest list -----------------------------------------------------------
-    Quests: "Quests" => "퀘스트",
-    QuestsEmpty: "No quests here yet." => "아직 여기에 퀘스트가 없습니다.",
-    CategoryConsensus: "Consensus" => "합의",
-    CategoryLedgers: "Ledgers" => "원장",
-    CategoryCryptography: "Cryptography" => "암호",
-    CategoryMachineLearning: "Machine learning" => "기계학습",
-    CategoryNetworking: "Networking" => "네트워크",
-    CategorySystems: "Systems" => "시스템",
-    DifficultyGentle: "Gentle" => "입문",
-    DifficultySteady: "Steady" => "중급",
-    DifficultySteep: "Steep" => "심화",
-    SortByCategory: "by category" => "분류 순",
-    SortByTitle: "by name" => "이름 순",
-    SortByDifficulty: "by difficulty" => "난이도 순",
-    SortByNewest: "newest first" => "최신 순",
-    SortByShortest: "shortest first" => "짧은 순",
-    FilterAll: "all" => "전체",
-    LabelSort: "sort" => "정렬",
-    LabelFilter: "filter" => "분류",
-    LabelVersion: "version" => "판",
-    LabelUpdated: "Updated" => "갱신",
-    LabelReleased: "Released" => "처음 나온 날",
-    LabelLength: "About" => "예상 시간",
-    LabelNeeds: "Needs" => "필요",
-    LabelMinutes: "min" => "분",
-    LabelCores: "cores" => "코어",
-    LabelCore: "core" => "코어",
-    NeedsAny: "runs on any machine" => "어떤 컴퓨터에서나 돕니다",
-    NeedsMet: "your machine is fine" => "이 컴퓨터로 충분합니다",
-    NeedsShort: "this will run slowly here" => "이 컴퓨터에서는 느리게 돕니다",
-    OlderVersions: "older versions" => "이전 판",
-    StageBrief: "Brief" => "왜",
-    StageRun: "Run" => "실행",
-    StageTune: "Tune" => "조절",
-    StageBreak: "Break" => "무너뜨리기",
-    StageRecap: "Recap" => "정리",
-
+    Quests { en: "Quests", ko: "퀘스트" },
+    QuestsEmpty { en: "No quests here yet.", ko: "아직 여기에 퀘스트가 없습니다." },
+    CategoryConsensus { en: "Consensus", ko: "합의" },
+    CategoryLedgers { en: "Ledgers", ko: "원장" },
+    CategoryCryptography { en: "Cryptography", ko: "암호" },
+    CategoryMachineLearning { en: "Machine learning", ko: "기계학습" },
+    CategoryNetworking { en: "Networking", ko: "네트워크" },
+    CategorySystems { en: "Systems", ko: "시스템" },
+    DifficultyGentle { en: "Gentle", ko: "입문" },
+    DifficultySteady { en: "Steady", ko: "중급" },
+    DifficultySteep { en: "Steep", ko: "심화" },
+    SortByCategory { en: "by category", ko: "분류 순" },
+    SortByTitle { en: "by name", ko: "이름 순" },
+    SortByDifficulty { en: "by difficulty", ko: "난이도 순" },
+    SortByNewest { en: "newest first", ko: "최신 순" },
+    SortByShortest { en: "shortest first", ko: "짧은 순" },
+    FilterAll { en: "all", ko: "전체" },
+    LabelSort { en: "sort", ko: "정렬" },
+    LabelFilter { en: "filter", ko: "분류" },
+    LabelVersion { en: "version", ko: "판" },
+    LabelUpdated { en: "Updated", ko: "갱신" },
+    LabelReleased { en: "Released", ko: "처음 나온 날" },
+    LabelLength { en: "About", ko: "예상 시간" },
+    LabelNeeds { en: "Needs", ko: "필요" },
+    LabelMinutes { en: "min", ko: "분" },
+    LabelCores { en: "cores", ko: "코어" },
+    LabelCore { en: "core", ko: "코어" },
+    NeedsAny { en: "runs on any machine", ko: "어떤 컴퓨터에서나 돕니다" },
+    NeedsMet { en: "your machine is fine", ko: "이 컴퓨터로 충분합니다" },
+    NeedsShort { en: "this will run slowly here", ko: "이 컴퓨터에서는 느리게 돕니다" },
+    OlderVersions { en: "older versions", ko: "이전 판" },
+    StageBrief { en: "Brief", ko: "왜" },
+    StageRun { en: "Run", ko: "실행" },
+    StageTune { en: "Tune", ko: "조절" },
+    StageBreak { en: "Break", ko: "무너뜨리기" },
+    StageRecap { en: "Recap", ko: "정리" },
     // ---- Keys -----------------------------------------------------------------
-    KeyMove: "move" => "이동",
-    KeyOpen: "open" => "열기",
-    KeyRun: "run" => "실행",
-    KeyPause: "pause" => "일시정지",
-    KeyReset: "reset" => "초기화",
-    KeyPanel: "panel" => "패널",
-    KeyLanguage: "language" => "언어",
-    KeyHelp: "help" => "도움말",
-    KeyBack: "back" => "뒤로",
-    KeyQuit: "quit" => "끝내기",
-    KeySettings: "settings" => "설정",
-
+    KeyMove { en: "move", ko: "이동" },
+    KeyOpen { en: "open", ko: "열기" },
+    KeyRun { en: "run", ko: "실행" },
+    KeyPause { en: "pause", ko: "일시정지" },
+    KeyReset { en: "reset", ko: "초기화" },
+    KeyPanel { en: "panel", ko: "패널" },
+    KeyLanguage { en: "language", ko: "언어" },
+    KeyHelp { en: "help", ko: "도움말" },
+    KeyBack { en: "back", ko: "뒤로" },
+    KeyQuit { en: "quit", ko: "끝내기" },
+    KeySettings { en: "settings", ko: "설정" },
     // ---- Settings screen ------------------------------------------------------
-    SettingsLanguage: "Language" => "언어",
-    SettingsLanguageAbout: "English is the default. Korean is a choice, and anything not translated yet stays English." => "영어가 기본입니다. 한국어는 선택이고, 아직 번역되지 않은 줄은 영어로 남습니다.",
-    SettingsThreads: "Worker threads" => "작업 스레드",
-    SettingsThreadsAbout: "How many cores long jobs may take. One core is left free so the screen keeps moving." => "긴 작업이 쓸 코어 수입니다. 화면이 계속 움직이도록 한 코어는 비워 둡니다.",
-    SettingsColour: "Colour" => "색",
-    SettingsColourAbout: "Turn this off for a screen that reads on a monochrome terminal." => "끄면 흑백 터미널에서도 읽히는 화면이 됩니다.",
-    SettingsAuto: "auto" => "자동",
-    SettingsSaved: "Saved." => "저장했습니다.",
-    SettingsNotSaved: "Could not save settings; this run keeps the change." => "설정을 저장하지 못했습니다. 이번 실행에서는 바뀐 값이 유지됩니다.",
-
+    SettingsLanguage { en: "Language", ko: "언어" },
+    SettingsLanguageAbout { en: "English is the default. Korean is a choice, and anything not translated yet stays English.", ko: "영어가 기본입니다. 한국어는 선택이고, 아직 번역되지 않은 줄은 영어로 남습니다." },
+    SettingsThreads { en: "Worker threads", ko: "작업 스레드" },
+    SettingsThreadsAbout { en: "How many cores long jobs may take. One core is left free so the screen keeps moving.", ko: "긴 작업이 쓸 코어 수입니다. 화면이 계속 움직이도록 한 코어는 비워 둡니다." },
+    SettingsColour { en: "Colour", ko: "색" },
+    SettingsColourAbout { en: "Turn this off for a screen that reads on a monochrome terminal.", ko: "끄면 흑백 터미널에서도 읽히는 화면이 됩니다." },
+    SettingsAuto { en: "auto", ko: "자동" },
+    SettingsSaved { en: "Saved.", ko: "저장했습니다." },
+    SettingsNotSaved { en: "Could not save settings; this run keeps the change.", ko: "설정을 저장하지 못했습니다. 이번 실행에서는 바뀐 값이 유지됩니다." },
     // ---- This machine ---------------------------------------------------------
-    MachineTitle: "This machine" => "이 컴퓨터",
-    MachineCores: "Cores" => "코어",
-    MachineMemory: "Memory" => "메모리",
-    MachineUsing: "Using" => "사용 중",
-
+    MachineTitle { en: "This machine", ko: "이 컴퓨터" },
+    MachineCores { en: "Cores", ko: "코어" },
+    MachineMemory { en: "Memory", ko: "메모리" },
+    MachineUsing { en: "Using", ko: "사용 중" },
     // ---- Help -----------------------------------------------------------------
-    HelpTitle: "Keys" => "키",
-    HelpOffline: "nmtk never touches the network. Everything here runs on this machine." => "nmtk는 네트워크를 전혀 쓰지 않습니다. 여기 있는 것은 전부 이 컴퓨터에서 돕니다.",
+    HelpTitle { en: "Keys", ko: "키" },
+    HelpOffline { en: "nmtk never touches the network. Everything here runs on this machine.", ko: "nmtk는 네트워크를 전혀 쓰지 않습니다. 여기 있는 것은 전부 이 컴퓨터에서 돕니다." },
 }
 
 /// A convenience for screens: `t(Msg::MenuQuit, language)`.
@@ -144,19 +149,22 @@ mod tests {
     #[test]
     fn english_is_never_missing() {
         for msg in Msg::ALL {
-            assert!(!msg.text(Language::English).is_empty(), "{msg:?} has no English");
+            assert!(!msg.text(Language::ENGLISH).is_empty(), "{msg:?} has no English");
         }
     }
 
     #[test]
     fn korean_falls_back_to_english_rather_than_blank() {
         for msg in Msg::ALL {
-            assert!(!msg.text(Language::Korean).is_empty(), "{msg:?} is blank in Korean");
+            assert!(!msg.text(Language::KOREAN).is_empty(), "{msg:?} is blank in Korean");
         }
     }
 
     #[test]
     fn the_motto_is_the_owners_sentence() {
-        assert_eq!(Msg::Motto.text(Language::English), "If it isn't fun, it doesn't stick.");
+        assert_eq!(
+            Msg::Motto.text(Language::ENGLISH),
+            "Study that isn't fun is labour. I hate labour."
+        );
     }
 }

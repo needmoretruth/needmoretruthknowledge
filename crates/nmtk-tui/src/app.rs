@@ -47,6 +47,8 @@ pub enum Screen {
     /// A quest a reader has opened.
     Quest,
     Settings,
+    /// Pick a language from the list. Never a toggle: this list is expected to get long.
+    Languages,
     Help,
 }
 
@@ -74,6 +76,10 @@ pub struct App {
     pub versions_of: Option<KqId>,
     pub open: Option<OpenQuest>,
     pub settings_index: usize,
+    /// Which row the language list is on while it is open.
+    pub language_index: usize,
+    /// Where the language list was opened from, so choosing goes back there.
+    behind_languages: Option<Screen>,
     pub status: Option<Msg>,
     pub quit: bool,
 }
@@ -92,6 +98,8 @@ impl App {
             versions_of: None,
             open: None,
             settings_index: 0,
+            language_index: 0,
+            behind_languages: None,
             status: None,
             quit: false,
         }
@@ -126,6 +134,7 @@ impl App {
         self.status = None;
         match self.screen {
             Screen::Help => self.on_key_help(key.code),
+            Screen::Languages => self.on_key_languages(key.code),
             Screen::Quests => self.on_key_quests(key.code),
             Screen::Quest => self.on_key_quest(key.code),
             Screen::Settings => self.on_key_settings(key.code),
@@ -136,6 +145,36 @@ impl App {
         if matches!(code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
             self.screen = self.behind_help.take().unwrap_or(Screen::Quests);
         }
+    }
+
+    /// The language list: move, choose, or leave it as it was.
+    fn on_key_languages(&mut self, code: KeyCode) {
+        let count = Language::ALL.len();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.language_index = previous(self.language_index, count)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.language_index = next(self.language_index, count)
+            }
+            KeyCode::Enter => {
+                self.settings.language = Language::ALL[self.language_index.min(count - 1)];
+                self.remember();
+                self.close_languages();
+            }
+            KeyCode::Char('q') | KeyCode::Esc => self.close_languages(),
+            _ => {}
+        }
+    }
+
+    fn open_languages(&mut self) {
+        self.behind_languages = Some(self.screen);
+        self.language_index = self.settings.language.index();
+        self.screen = Screen::Languages;
+    }
+
+    fn close_languages(&mut self) {
+        self.screen = self.behind_languages.take().unwrap_or(Screen::Quests);
     }
 
     fn on_key_quests(&mut self, code: KeyCode) {
@@ -281,16 +320,25 @@ impl App {
         self.screen = Screen::Help;
     }
 
-    /// The `l` key: swap language and remember it. A machine that cannot write settings still
-    /// changes language for this run.
+    /// The `l` key opens the list. Choosing is a separate keypress, because a program that will
+    /// one day speak twenty languages cannot cycle through them one at a time.
     pub fn toggle_language(&mut self) {
-        self.settings.language = self.settings.language.toggled();
+        self.open_languages();
+    }
+
+    /// Steps to the next or previous language, for the settings row.
+    fn step_language(&mut self, step: i32) {
+        let count = Language::ALL.len();
+        let at = self.settings.language.index();
+        let next_index =
+            if step > 0 { (at + 1) % count } else { (at + count - 1) % count };
+        self.settings.language = Language::ALL[next_index];
         self.remember();
     }
 
     fn adjust_setting(&mut self, step: i32) {
         match SettingItem::ALL[self.settings_index.min(SettingItem::ALL.len() - 1)] {
-            SettingItem::Language => self.settings.language = self.settings.language.toggled(),
+            SettingItem::Language => self.step_language(step),
             SettingItem::Threads => {
                 let max = self.machine.logical_cores as i32;
                 let current = self.settings.worker_threads as i32;
