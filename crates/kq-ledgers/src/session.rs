@@ -99,6 +99,9 @@ const GROW: &[Step] = &[
     Say(Msg::GrowUtxo),
     Say(Msg::GrowAccount),
     Say(Msg::GrowObject),
+    // The acronym is earned here: the reader has just watched an unspent coin be destroyed and
+    // two new ones made, which is the only thing that makes the words mean anything.
+    Say(Msg::GrowName),
     Say(Msg::GrowLesson),
     Say(Msg::GrowCost),
 ];
@@ -107,6 +110,7 @@ const GROW: &[Step] = &[
 const TUNE: &[Step] = &[
     Say(Msg::TuneOne),
     Say(Msg::TuneThree),
+    Say(Msg::TuneTyping),
     Say(Msg::TuneFresh),
     Ask(Msg::TuneTwo),
     Run(SendChosen),

@@ -47,12 +47,14 @@ nmtk_i18n::messages! {
     GrowUtxo { en: "Bitcoin's way grew. The ten was destroyed and two new coins were made: three for Bob, seven back to Alice. That seven is change.", ko: "비트코인 쪽은 커졌습니다. 10짜리를 없애고 코인 둘을 새로 만들었습니다. 3은 밥에게, 7은 앨리스에게 돌아옵니다. 그 7이 거스름돈입니다." },
     GrowAccount { en: "Ethereum's way grew by one line as well, but only because Bob had none yet. Send him another three and nothing new is made.", ko: "이더리움 쪽도 줄 하나가 늘었습니다. 다만 밥에게 줄이 아직 없었기 때문입니다. 밥에게 3을 또 보내면 새로 생기는 것은 없습니다." },
     GrowObject { en: "Sui's way grew too, for the same reason as Bitcoin: a thing was split, so there is a new thing.", ko: "Sui 쪽도 커졌습니다. 이유는 비트코인과 같습니다. 물건을 쪼갰으니 새 물건이 하나 생긴 것입니다." },
+    GrowName { en: "That unspent coin has a name: an unspent transaction output, UTXO for short. The heading on the right has been saying it all along.", ko: "아직 쓰지 않은 그 코인에는 이름이 있습니다. unspent transaction output, 줄여서 UTXO입니다. 오른쪽 머리글이 처음부터 그 말을 하고 있었습니다." },
     GrowLesson { en: "That is the first real difference. Counting coins makes change every time; keeping a book makes a line once and edits it after that.", ko: "이것이 첫 번째 진짜 차이입니다. 코인을 세는 방식은 보낼 때마다 거스름돈을 만들고, 장부를 쓰는 방식은 줄을 한 번 만든 뒤로는 고치기만 합니다." },
     GrowCost { en: "Every node on the network keeps this state forever. Change is not free.", ko: "이 상태는 네트워크의 모든 노드가 영원히 들고 있어야 합니다. 거스름돈은 공짜가 아닙니다." },
 
     // ---- Stage 4: your turn ----------------------------------------------------
     TuneOne { en: "Your turn. Two values are yours to set: how much, and who to.", ko: "이제 직접 해 보세요. 정할 값은 둘입니다. 얼마를, 누구에게." },
-    TuneThree { en: "Up and down pick a value, left and right change it, or just type a number. Enter sends.", ko: "위아래로 값을 고르고 좌우로 바꿉니다. 숫자를 그냥 입력해도 됩니다. Enter를 누르면 보냅니다." },
+    TuneThree { en: "Up and down pick a value, left and right change it. Enter sends.", ko: "위아래로 값을 고르고 좌우로 바꿉니다. Enter를 누르면 보냅니다." },
+    TuneTyping { en: "Or type a number straight in. Enter sets what you typed, and Enter again sends it.", ko: "숫자를 그냥 쳐 넣어도 됩니다. 친 숫자는 Enter로 확정하고, 다시 Enter를 누르면 보냅니다." },
     TuneFresh { en: "Each send starts again from the same three coins of ten, so two sends are worth comparing.", ko: "보낼 때마다 같은 10짜리 코인 셋에서 다시 시작합니다. 그래야 두 번을 견줄 수 있습니다." },
     GrowFresh { en: "The ledgers go back to the same three coins of ten first, so this send can be held against the last one.", ko: "먼저 원장이 같은 10짜리 코인 셋으로 되돌아갑니다. 그래야 이번에 보내는 것을 앞의 것과 견줄 수 있습니다." },
     TuneTwo { en: "Start with exactly one coin's worth — 10 — and press Enter.", ko: "먼저 코인 하나와 딱 맞는 금액으로 해 보세요. 10으로 두고 Enter를 누릅니다." },
