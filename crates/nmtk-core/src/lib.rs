@@ -1,3 +1,12 @@
-//! Shared vocabulary: machine profile, run events, number formatting, settings.
+//! Shared vocabulary for every nmtk module.
 //!
-//! See the design notes kept with this project for what this crate owes the rest.
+//! Three things live here and nothing else: what this machine can do, how numbers are written on
+//! screen, and the settings a reader changes while the program runs. The learning engines depend
+//! on this crate; nothing here knows that a screen exists.
+
+pub mod format;
+pub mod machine;
+pub mod settings;
+
+pub use machine::{MachineProfile, SizeClass};
+pub use settings::{Language, Settings};
