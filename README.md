@@ -143,7 +143,9 @@ shelf says where yours sits against both. A quest under the minimum still opens 
 down; it says so rather than refusing.
 
 You can change the thread count, the language and colour under `s`, and your choices are kept in
-`~/.config/nmtk/settings.toml`.
+`~/.config/nmtk/settings.toml`. That file also holds the ids of the quests you have finished, so
+the list can mark them. It is the only thing nmtk records about what you did, and it never leaves
+your machine.
 
 Quests keep their version. From 0.1.1 on, a quest is never rewritten out from under you: when a
 new version ships the old one stays in the program, and `v` on the shelf opens exactly the one you
