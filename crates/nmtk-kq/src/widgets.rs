@@ -14,20 +14,63 @@ use crate::theme::Theme;
 
 /// A column of `name    value` rows, names quiet and values plain.
 ///
-/// Padded by how many columns a name takes on screen, not by how many characters it has. A Korean
+/// Measured in how many columns a name takes on screen, not how many characters it has: a Korean
 /// name is half as many characters and exactly as many columns, and `{:<10}` cannot tell.
+///
+/// A value that will not fit beside its name goes under it rather than off the edge. Losing the
+/// end of "4,295,032,833 hashes" costs the reader the number the row existed to show.
+pub fn stat_lines(rows: &[(&str, String)], width: usize, theme: Theme) -> Vec<Line<'static>> {
+    use crate::text::{column, truncate, width as cells, wrap};
+    let label =
+        rows.iter().map(|(name, _)| cells(name)).max().unwrap_or(0).min(width.saturating_sub(2));
+    let room = width.saturating_sub(label + 2);
+    rows.iter()
+        .flat_map(|(name, value)| {
+            if cells(value) <= room {
+                return vec![Line::from(vec![
+                    Span::styled(format!("{}  ", column(name, label)), theme.muted()),
+                    Span::styled(value.clone(), theme.plain()),
+                ])];
+            }
+            let mut lines = vec![Line::from(Span::styled(truncate(name, width), theme.muted()))];
+            for chunk in wrap(value, width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(format!("  {chunk}"), theme.plain())));
+            }
+            lines
+        })
+        .collect()
+}
+
+/// [`stat_lines`], drawn into an area.
 pub fn stats(frame: &mut Frame, area: Rect, theme: Theme, rows: &[(&str, String)]) {
-    let width = rows.iter().map(|(name, _)| crate::text::width(name)).max().unwrap_or(0);
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(name, value)| {
+    let lines = stat_lines(rows, area.width as usize, theme);
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// `text` wrapped to `width`, with every line after the first indented to sit under the first.
+///
+/// The lead is drawn once, in its own style: a label, a mark, or the spaces that stand in for one.
+pub fn wrapped(
+    lead: &str,
+    text: &str,
+    width: usize,
+    lead_style: Style,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let indent = crate::text::width(lead);
+    crate::text::wrap(text, width.saturating_sub(indent))
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
             Line::from(vec![
-                Span::styled(format!("{}  ", crate::text::pad(name, width)), theme.muted()),
-                Span::styled(value.clone(), theme.plain()),
+                Span::styled(
+                    if index == 0 { lead.to_string() } else { " ".repeat(indent) },
+                    lead_style,
+                ),
+                Span::styled(chunk, style),
             ])
         })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+        .collect()
 }
 
 /// A share of something, drawn as a bar that fills from the left.
@@ -80,10 +123,7 @@ pub fn curve(frame: &mut Frame, area: Rect, theme: Theme, values: &[f64], label:
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(label.to_string(), theme.muted()),
-            Span::styled(
-                format!("   {}  \u{2192}  {}", short(first), short(last)),
-                theme.muted(),
-            ),
+            Span::styled(format!("   {}  \u{2192}  {}", short(first), short(last)), theme.muted()),
         ])),
         name_area,
     );

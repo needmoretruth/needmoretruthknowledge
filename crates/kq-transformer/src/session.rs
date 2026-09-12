@@ -8,9 +8,9 @@
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
-use nmtk_kq::text::{char_width, pad, truncate, width as cells};
+use nmtk_kq::text::{char_width, column, truncate, width as cells};
 use nmtk_kq::theme::{State, Theme};
-use nmtk_kq::widgets;
+use nmtk_kq::widgets::{self, stat_lines, wrapped};
 use nmtk_transformer::model::AttentionSnapshot;
 use nmtk_transformer::{
     CORPUS, EXPANSION, Optimizer, PROMPT, StartError, Tokenizer, TrainingConfig, TrainingHandle,
@@ -202,30 +202,18 @@ const BREAK: &[Step] = &[
     Ask(Msg::BreakAskWarmup),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack {
-        kind: ATTACK_NO_WARMUP,
-        multiplier: 10.0,
-        lesson: Msg::BreakAfterWarmup,
-    }),
+    Tell(Topic::Attack { kind: ATTACK_NO_WARMUP, multiplier: 10.0, lesson: Msg::BreakAfterWarmup }),
     Say(Msg::BreakSgdOne),
     Say(Msg::BreakSgdTwo),
     Say(Msg::BreakSgdThree),
     Ask(Msg::BreakAskSgd),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack {
-        kind: ATTACK_PLAIN_SGD,
-        multiplier: 1.0,
-        lesson: Msg::BreakAfterSgd,
-    }),
+    Tell(Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson: Msg::BreakAfterSgd }),
     Ask(Msg::BreakAskSgdAgain),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack {
-        kind: ATTACK_PLAIN_SGD,
-        multiplier: 100.0,
-        lesson: Msg::BreakLesson,
-    }),
+    Tell(Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 100.0, lesson: Msg::BreakLesson }),
 ];
 
 /// What the reader now knows, beside the numbers they made.
@@ -505,30 +493,51 @@ impl Session {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let knobs = self.stage_knobs();
-        let label_width =
-            labels.iter().map(|label| cells(label.text(language))).max().unwrap_or(0).max(12) + 2;
+        let label_width = labels
+            .iter()
+            .map(|label| cells(label.text(language)))
+            .max()
+            .unwrap_or(0)
+            .max(12)
+            .min(panel.saturating_sub(6))
+            + 2;
         let room = panel.saturating_sub(label_width + 2);
         knobs
             .iter()
             .enumerate()
-            .map(|(index, knob)| {
+            .flat_map(|(index, knob)| {
                 let picked = index == self.chosen;
                 let label = labels.get(index).copied().unwrap_or(Msg::LabelWeights);
                 let value = match knob.draft() {
                     Some(_) => knob.display(),
                     None => self.knob_value_text(index, knob, language),
                 };
-                Line::from(vec![
+                let style = if picked { theme.heading() } else { theme.muted() };
+                let mark = Span::styled(
+                    format!("{} ", if picked { State::Chosen.mark() } else { " " }),
+                    theme.state(State::Chosen),
+                );
+                // A knob whose value will not fit beside its name puts the value under it. The
+                // stage has a dozen blank rows below, and "a runaway learning ra…" spent one of
+                // them on an ellipsis instead of on the two words it had cut.
+                if cells(&value) <= room {
+                    return vec![Line::from(vec![
+                        mark,
+                        Span::styled(column(label.text(language), label_width), theme.plain()),
+                        Span::styled(value, style),
+                    ])];
+                }
+                let mut lines = vec![Line::from(vec![
+                    mark,
                     Span::styled(
-                        format!("{} ", if picked { State::Chosen.mark() } else { " " }),
-                        theme.state(State::Chosen),
+                        truncate(label.text(language), panel.saturating_sub(2)),
+                        theme.plain(),
                     ),
-                    Span::styled(pad(label.text(language), label_width), theme.plain()),
-                    Span::styled(
-                        truncate(&value, room),
-                        if picked { theme.heading() } else { theme.muted() },
-                    ),
-                ])
+                ])];
+                for chunk in wrap(&value, panel.saturating_sub(4)) {
+                    lines.push(Line::from(Span::styled(format!("    {chunk}"), style)));
+                }
+                lines
             })
             .collect()
     }
@@ -561,22 +570,45 @@ impl Session {
     }
 
     /// The presets of the chosen knob, so a reader can see what is worth typing.
-    fn presets_line(&self, language: Language, theme: Theme) -> Option<Line<'static>> {
-        let text = match self.stage_knobs().get(self.chosen).map(|k| &k.value) {
+    ///
+    /// A list too long for the panel loses whole values off the end rather than being cut where
+    /// the width runs out: "4,0" is a number the reader cannot type, and worse than no fourth
+    /// suggestion at all.
+    fn presets_line(
+        &self,
+        panel: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Option<Line<'static>> {
+        let values: Vec<String> = match self.stage_knobs().get(self.chosen).map(|k| &k.value) {
             Some(KnobValue::Count { presets, .. }) => {
-                presets.iter().map(|p| format::count(*p)).collect::<Vec<_>>().join("   ")
+                presets.iter().map(|p| format::count(*p)).collect()
             }
             Some(KnobValue::Decimal { presets, .. }) => {
-                presets.iter().map(|p| decimal_text(*p)).collect::<Vec<_>>().join("   ")
+                presets.iter().map(|p| decimal_text(*p)).collect()
             }
-            _ => String::new(),
+            _ => Vec::new(),
         };
-        if text.is_empty() {
+        if values.is_empty() {
+            return None;
+        }
+        let lead = format!("  {}  ", Msg::LabelPresets.text(language));
+        let mut room = panel.saturating_sub(cells(&lead));
+        let mut shown: Vec<String> = Vec::new();
+        for value in values {
+            let wanted = cells(&value) + usize::from(!shown.is_empty()) * 3;
+            if wanted > room {
+                break;
+            }
+            room -= wanted;
+            shown.push(value);
+        }
+        if shown.is_empty() {
             return None;
         }
         Some(Line::from(vec![
-            Span::styled(format!("  {}  ", Msg::LabelPresets.text(language)), theme.muted()),
-            Span::styled(text, theme.plain()),
+            Span::styled(lead, theme.muted()),
+            Span::styled(shown.join("   "), theme.plain()),
         ]))
     }
 
@@ -620,16 +652,25 @@ impl Session {
     /// The model's own answer, with the mark that says whether it is the sentence yet.
     fn answer_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let Some(snapshot) = &self.latest else {
-            return vec![Line::from(Span::styled(
+            return wrapped(
+                "",
                 Msg::StatusPaused.text(language),
+                width,
                 theme.muted(),
-            ))];
+                theme.muted(),
+            );
         };
         if snapshot.completion.is_empty() {
-            return vec![
-                Line::from(Span::styled(Msg::LabelAnswer.text(language), theme.muted())),
-                Line::from(Span::styled(Msg::AnswerWaiting.text(language), theme.muted())),
-            ];
+            let mut lines =
+                wrapped("", Msg::LabelAnswer.text(language), width, theme.muted(), theme.muted());
+            lines.extend(wrapped(
+                "",
+                Msg::AnswerWaiting.text(language),
+                width,
+                theme.muted(),
+                theme.muted(),
+            ));
+            return lines;
         }
         let right = snapshot.completion.trim_start().starts_with(EXPANSION);
         let blank = snapshot.completion.trim().is_empty();
@@ -648,11 +689,27 @@ impl Session {
         } else {
             Msg::AnswerNotYet
         };
-        let mut lines = vec![Line::from(vec![
-            Span::styled(format!("{} ", state.mark()), theme.state(state)),
-            Span::styled(Msg::LabelAnswer.text(language), theme.muted()),
-            Span::styled(format!("  {}", verdict.text(language)), theme.state(state)),
-        ])];
+        let name = Msg::LabelAnswer.text(language);
+        let mut lines = if 2 + cells(name) + 2 + cells(verdict.text(language)) <= width {
+            vec![Line::from(vec![
+                Span::styled(format!("{} ", state.mark()), theme.state(state)),
+                Span::styled(name, theme.muted()),
+                Span::styled(format!("  {}", verdict.text(language)), theme.state(state)),
+            ])]
+        } else {
+            let mut split = vec![Line::from(vec![
+                Span::styled(format!("{} ", state.mark()), theme.state(state)),
+                Span::styled(truncate(name, width.saturating_sub(2)), theme.muted()),
+            ])];
+            split.extend(wrapped(
+                "  ",
+                verdict.text(language),
+                width,
+                theme.state(state),
+                theme.state(state),
+            ));
+            split
+        };
         if blank {
             return lines;
         }
@@ -672,25 +729,35 @@ impl Session {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let Some(attention) = self.attention() else {
-            return vec![Line::from(Span::styled(
+            return wrapped(
+                "",
                 Msg::AttentionWaiting.text(language),
+                width,
                 theme.muted(),
-            ))];
+                theme.muted(),
+            );
         };
         let (layer, head) = self.viewed_head(attention);
-        let mut lines = vec![Line::from(vec![
-            Span::styled(format!("{}  ", Msg::AttentionTitle.text(language)), theme.heading()),
-            Span::styled(
-                format!(
-                    "{} {} · {} {}",
-                    Msg::LabelLayer.text(language),
-                    layer + 1,
-                    Msg::LabelHead.text(language),
-                    head + 1
-                ),
-                theme.muted(),
-            ),
-        ])];
+        let title = Msg::AttentionTitle.text(language);
+        let seen = format!(
+            "{} {} · {} {}",
+            Msg::LabelLayer.text(language),
+            layer + 1,
+            Msg::LabelHead.text(language),
+            head + 1
+        );
+        // Which head is on screen is what the left and right arrow keys move, so it is the half
+        // of this row that cannot be cut: when the two will not share a line, it takes its own.
+        let mut lines = if cells(title) + 2 + cells(&seen) <= width {
+            vec![Line::from(vec![
+                Span::styled(format!("{title}  "), theme.heading()),
+                Span::styled(seen, theme.muted()),
+            ])]
+        } else {
+            let mut split = wrapped("", title, width, theme.heading(), theme.heading());
+            split.extend(wrapped("  ", &seen, width, theme.muted(), theme.muted()));
+            split
+        };
         // Two columns go to the row label, and the newest positions are the interesting ones.
         let columns = width.saturating_sub(2).min(attention.length);
         let rows = height.saturating_sub(3).min(attention.length);
@@ -702,15 +769,18 @@ impl Session {
         // Say when there is more than fits. A grid that silently drops half its rows reads as the
         // whole thing, and a reader who trusts it has been told something false.
         if rows < attention.length || columns < attention.length {
-            lines.push(Line::from(Span::styled(
-                format!(
+            lines.extend(wrapped(
+                "",
+                &format!(
                     "{} {rows} / {}   {}",
                     Msg::AttentionNewest.text(language),
                     attention.length,
                     Msg::AttentionMarks.text(language)
                 ),
+                width,
                 theme.muted(),
-            )));
+                theme.muted(),
+            ));
         }
         let header: String =
             (first_key..attention.length).map(|k| visible(attention.tokens.get(k))).collect();
@@ -733,29 +803,44 @@ impl Session {
         finished: &Finished,
         label: Msg,
         state: State,
+        width: usize,
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        vec![
-            Line::from(vec![
+        let numbers = format!(
+            "{} {}   {} {}",
+            Msg::LabelRate.text(language),
+            decimal_text(f64::from(finished.rate)),
+            Msg::LabelLoss.text(language),
+            loss_text(finished.snapshot.loss, language)
+        );
+        let name = cells(label.text(language)).max(14);
+        let mut lines = if 2 + name + cells(&numbers) <= width {
+            vec![Line::from(vec![
                 Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                Span::styled(pad(label.text(language), 14), theme.heading()),
+                Span::styled(column(label.text(language), name), theme.heading()),
+                Span::styled(numbers, theme.muted()),
+            ])]
+        } else {
+            let mut split = vec![Line::from(vec![
+                Span::styled(format!("{} ", state.mark()), theme.state(state)),
                 Span::styled(
-                    format!(
-                        "{} {}   {} {}",
-                        Msg::LabelRate.text(language),
-                        decimal_text(f64::from(finished.rate)),
-                        Msg::LabelLoss.text(language),
-                        loss_text(finished.snapshot.loss, language)
-                    ),
-                    theme.muted(),
+                    truncate(label.text(language), width.saturating_sub(2)),
+                    theme.heading(),
                 ),
-            ]),
-            Line::from(Span::styled(
-                format!("  {PROMPT}{}", one_line(&finished.snapshot.completion)),
-                theme.plain(),
-            )),
-        ]
+            ])];
+            split.extend(wrapped("    ", &numbers, width, theme.muted(), theme.muted()));
+            split
+        };
+        // The model's own answer, which is the point of the comparison: it wraps rather than
+        // being cut, because a cut with no ellipsis reads as the model having stopped mid-word.
+        for chunk in wrap(
+            &format!("{PROMPT}{}", one_line(&finished.snapshot.completion)),
+            width.saturating_sub(2),
+        ) {
+            lines.push(Line::from(Span::styled(format!("  {chunk}"), theme.plain())));
+        }
+        lines
     }
 
     // ---- drawing -------------------------------------------------------------
@@ -780,18 +865,15 @@ impl Session {
             ))),
             heading,
         );
-        widgets::stats(frame, table, theme, &rows);
-        frame.render_widget(
-            Paragraph::new(Vec::<Line>::new()),
-            footer,
-        );
+        frame.render_widget(Paragraph::new(stat_lines(&rows, area.width as usize, theme)), table);
+        frame.render_widget(Paragraph::new(Vec::<Line>::new()), footer);
     }
 
     fn render_run(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         if self.latest.is_none() {
             let mut lines: Vec<Line> = Vec::new();
             if let Some(error) = self.refused {
-                lines.extend(self.refusal_lines(error, language, theme));
+                lines.extend(self.refusal_lines(error, area.width as usize, language, theme));
             }
             frame.render_widget(Paragraph::new(lines), area);
             return;
@@ -803,7 +885,10 @@ impl Session {
             Constraint::Min(0),
         ])
         .areas(area);
-        widgets::stats(frame, stats, theme, &self.stat_rows(language));
+        frame.render_widget(
+            Paragraph::new(stat_lines(&self.stat_rows(language), stats.width as usize, theme)),
+            stats,
+        );
         self.render_curve(frame, curve, theme, language);
         frame.render_widget(
             Paragraph::new(self.answer_lines(answer.width as usize, language, theme)),
@@ -857,57 +942,77 @@ impl Session {
             Msg::KnobLearningRate,
             Msg::KnobSteps,
         ];
-        let mut lines = self.knob_lines(&labels, area.width as usize, language, theme);
-        lines.extend(self.presets_line(language, theme));
+        let width = area.width as usize;
+        let mut lines = self.knob_lines(&labels, width, language, theme);
+        lines.extend(self.presets_line(width, language, theme));
         lines.push(Line::from(""));
+        let chose = format!(
+            "{}  ({} · {} · {})",
+            format::count(self.machine_default.parameter_count() as u64),
+            format::count(self.machine_default.layers as u64),
+            format::count(self.machine_default.heads as u64),
+            format::count(self.machine_default.d_model as u64)
+        );
         match self.weights_now() {
-            Ok(weights) => lines.push(Line::from(vec![
-                Span::styled(pad(Msg::LabelWeightsNow.text(language), 20), theme.muted()),
-                Span::styled(format::count(weights as u64), theme.heading()),
-            ])),
+            Ok(weights) => lines.extend(stat_lines(
+                &[
+                    (Msg::LabelWeightsNow.text(language), format::count(weights as u64)),
+                    (Msg::LabelMachineChose.text(language), chose),
+                ],
+                width,
+                theme,
+            )),
             Err(message) => {
-                lines.push(Line::from(Span::styled(Msg::ErrorTitle.text(language), theme.bad())));
-                for chunk in wrap(message.text(language), area.width as usize) {
-                    lines.push(Line::from(Span::styled(chunk, theme.plain())));
-                }
+                lines.extend(wrapped(
+                    "",
+                    Msg::ErrorTitle.text(language),
+                    width,
+                    theme.bad(),
+                    theme.bad(),
+                ));
+                lines.extend(wrapped(
+                    "",
+                    message.text(language),
+                    width,
+                    theme.plain(),
+                    theme.plain(),
+                ));
+                lines.extend(stat_lines(
+                    &[(Msg::LabelMachineChose.text(language), chose)],
+                    width,
+                    theme,
+                ));
             }
         }
-        lines.push(Line::from(vec![
-            Span::styled(pad(Msg::LabelMachineChose.text(language), 20), theme.muted()),
-            Span::styled(
-                format!(
-                    "{}  ({} · {} · {})",
-                    format::count(self.machine_default.parameter_count() as u64),
-                    format::count(self.machine_default.layers as u64),
-                    format::count(self.machine_default.heads as u64),
-                    format::count(self.machine_default.d_model as u64)
-                ),
-                theme.plain(),
-            ),
-        ]));
         lines.push(Line::from(""));
 
         if let Some(error) = self.refused {
-            lines.extend(self.refusal_lines(error, language, theme));
+            lines.extend(self.refusal_lines(error, width, language, theme));
         }
         frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn render_break(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
+        let width = area.width as usize;
         let labels = [Msg::LabelAttack, Msg::LabelMultiplier];
-        let mut lines = self.knob_lines(&labels, area.width as usize, language, theme);
-        lines.extend(self.presets_line(language, theme));
+        let mut lines = self.knob_lines(&labels, width, language, theme);
+        lines.extend(self.presets_line(width, language, theme));
         lines.push(Line::from(""));
 
         let sensible = self.tuned();
         let attacked = self.attacked();
+        let rates = cells(Msg::LabelSensibleRate.text(language))
+            .max(cells(Msg::LabelThisRun.text(language)))
+            .max(14)
+            .min(width.saturating_sub(8))
+            + 2;
         lines.push(Line::from(vec![
-            Span::styled(pad(Msg::LabelSensibleRate.text(language), 16), theme.muted()),
+            Span::styled(column(Msg::LabelSensibleRate.text(language), rates), theme.muted()),
             Span::styled(decimal_text(f64::from(sensible.learning_rate)), theme.plain()),
         ]));
         let broken = attacked != sensible;
         lines.push(Line::from(vec![
-            Span::styled(pad(Msg::LabelThisRun.text(language), 16), theme.muted()),
+            Span::styled(column(Msg::LabelThisRun.text(language), rates), theme.muted()),
             Span::styled(
                 decimal_text(f64::from(attacked.learning_rate)),
                 if broken { theme.bad() } else { theme.good() },
@@ -917,7 +1022,7 @@ impl Session {
 
         if let Some(snapshot) = &self.latest {
             lines.push(Line::from(vec![
-                Span::styled(pad(Msg::LabelStep.text(language), 16), theme.muted()),
+                Span::styled(column(Msg::LabelStep.text(language), rates), theme.muted()),
                 Span::styled(
                     format!(
                         "{} / {}",
@@ -929,17 +1034,28 @@ impl Session {
             ]));
             let climbing = self.is_climbing();
             lines.push(Line::from(vec![
-                Span::styled(pad(Msg::LabelLoss.text(language), 16), theme.muted()),
+                Span::styled(column(Msg::LabelLoss.text(language), rates), theme.muted()),
                 Span::styled(
                     loss_text(snapshot.loss, language),
                     if climbing { theme.bad() } else { theme.plain() },
                 ),
             ]));
             if !snapshot.loss.is_finite() && snapshot.step > 0 {
-                lines.push(Line::from(Span::styled(Msg::BreakBlewUp.text(language), theme.bad())));
+                lines.extend(wrapped(
+                    "",
+                    Msg::BreakBlewUp.text(language),
+                    width,
+                    theme.bad(),
+                    theme.bad(),
+                ));
             } else if climbing {
-                lines
-                    .push(Line::from(Span::styled(Msg::BreakClimbing.text(language), theme.bad())));
+                lines.extend(wrapped(
+                    "",
+                    Msg::BreakClimbing.text(language),
+                    width,
+                    theme.bad(),
+                    theme.bad(),
+                ));
             }
             lines.push(Line::from(""));
             // Once both runs have finished there are two answers to compare, and the comparison
@@ -950,6 +1066,7 @@ impl Session {
                         honest,
                         Msg::LabelHonestRun,
                         State::Good,
+                        width,
                         language,
                         theme,
                     ));
@@ -957,15 +1074,16 @@ impl Session {
                         wrecked,
                         Msg::LabelBrokenRun,
                         State::Bad,
+                        width,
                         language,
                         theme,
                     ));
                 }
-                _ => lines.extend(self.answer_lines(area.width as usize, language, theme)),
+                _ => lines.extend(self.answer_lines(width, language, theme)),
             }
         }
         if let Some(error) = self.refused {
-            lines.extend(self.refusal_lines(error, language, theme));
+            lines.extend(self.refusal_lines(error, width, language, theme));
         }
         frame.render_widget(Paragraph::new(lines), area);
     }
@@ -976,10 +1094,13 @@ impl Session {
         let finished = self.honest.as_ref().or(self.broken.as_ref());
         let Some(finished) = finished else {
             frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
+                Paragraph::new(wrapped(
+                    "",
                     Msg::RecapNothing.text(language),
+                    area.width as usize,
                     theme.muted(),
-                ))),
+                    theme.muted(),
+                )),
                 area,
             );
             return;
@@ -1011,30 +1132,46 @@ impl Session {
         ];
         // Wide enough for the longest label in either language, and the same in every row so the
         // recap reads as one column of numbers.
+        let width = area.width as usize;
         let label_width = rows
             .iter()
             .map(|(name, _)| cells(name))
             .chain([cells(Msg::RecapAnswer.text(language))])
             .max()
             .unwrap_or(0)
+            .min(width.saturating_sub(6))
             + 2;
+        let room = width.saturating_sub(label_width + 2);
         let indent = area.width.saturating_sub(4) as usize;
+        // Two cells for the number, then the label column. A value the rest of the row will not
+        // hold goes under its label rather than losing its last digits to the panel edge.
         let mut lines: Vec<Line<'static>> = rows
             .iter()
             .enumerate()
-            .map(|(index, (name, value))| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", index + 1), theme.muted()),
-                    Span::styled(pad(name, label_width), theme.plain()),
-                    Span::styled(value.clone(), theme.heading()),
-                ])
+            .flat_map(|(index, (name, value))| {
+                let number = Span::styled(format!("{} ", index + 1), theme.muted());
+                if cells(value) <= room {
+                    return vec![Line::from(vec![
+                        number,
+                        Span::styled(column(name, label_width), theme.plain()),
+                        Span::styled(value.clone(), theme.heading()),
+                    ])];
+                }
+                let mut lines = vec![Line::from(vec![
+                    number,
+                    Span::styled(truncate(name, width.saturating_sub(2)), theme.plain()),
+                ])];
+                for chunk in wrap(value, indent) {
+                    lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.heading())));
+                }
+                lines
             })
             .collect();
         let right = snapshot.completion.trim_start().starts_with(EXPANSION);
         let state = if right { State::Good } else { State::Bad };
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", rows.len() + 1), theme.muted()),
-            Span::styled(pad(Msg::RecapAnswer.text(language), label_width), theme.plain()),
+            Span::styled(column(Msg::RecapAnswer.text(language), label_width), theme.plain()),
             Span::styled(state.mark().to_string(), theme.state(state)),
         ]));
         for chunk in wrap(&format!("{PROMPT}{}", one_line(&snapshot.completion)), indent) {
@@ -1045,18 +1182,24 @@ impl Session {
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", rows.len() + 2), theme.muted()),
                 Span::styled(format!("{} ", State::Bad.mark()), theme.bad()),
-                Span::styled(Msg::RecapBroken.text(language).to_string(), theme.plain()),
+                Span::styled(
+                    truncate(Msg::RecapBroken.text(language), width.saturating_sub(4)),
+                    theme.plain(),
+                ),
             ]));
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    {} {}   {} {}",
+            lines.extend(wrapped(
+                "    ",
+                &format!(
+                    "{} {}   {} {}",
                     Msg::LabelRate.text(language),
                     decimal_text(f64::from(broken.rate)),
                     Msg::LabelLoss.text(language),
                     loss_text(broken.snapshot.loss, language)
                 ),
+                width,
                 theme.bad(),
-            )));
+                theme.bad(),
+            ));
             for chunk in wrap(&format!("{PROMPT}{}", one_line(&broken.snapshot.completion)), indent)
             {
                 lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.plain())));
@@ -1069,6 +1212,7 @@ impl Session {
     fn refusal_lines(
         &self,
         error: StartError,
+        width: usize,
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
@@ -1081,7 +1225,7 @@ impl Session {
         ]
         .into_iter()
         .chain(
-            wrap(phrases::start_error(error).text(language), 44)
+            wrap(phrases::start_error(error).text(language), width)
                 .into_iter()
                 .map(|chunk| Line::from(Span::styled(chunk, theme.plain()))),
         )
@@ -1250,7 +1394,10 @@ impl Session {
         if self.first_loss.is_none() && loss.is_finite() && step > 0 {
             self.first_loss = Some(loss);
         }
-        while self.milestone < MILESTONES.len() && loss.is_finite() && loss < MILESTONES[self.milestone] {
+        while self.milestone < MILESTONES.len()
+            && loss.is_finite()
+            && loss < MILESTONES[self.milestone]
+        {
             self.milestone += 1;
             self.say(Happening::Loss { loss, step });
         }
@@ -1305,10 +1452,7 @@ impl Session {
                         Msg::NotANumber.text(language).to_string()
                     },
                 );
-                text.push_str(&format!(
-                    "  ·  {} {seconds:.0}s",
-                    Msg::EventSeconds.text(language)
-                ));
+                text.push_str(&format!("  ·  {} {seconds:.0}s", Msg::EventSeconds.text(language)));
                 if !*fell {
                     text.push_str(&format!("  ·  {}", Msg::EventNeverFell.text(language)));
                 }
@@ -1882,6 +2026,166 @@ mod tests {
             .join("\n")
     }
 
+    /// The panel's own columns at `total`, each row right-trimmed, borders and padding removed.
+    fn panel_rows(session: &Session, total: u16, language: Language) -> Vec<String> {
+        use nmtk_kq::theme::{MIN_HEIGHT, split};
+        let mut terminal = Terminal::new(TestBackend::new(total, MIN_HEIGHT)).expect("backend");
+        let (talk, run) = split(total);
+        terminal
+            .draw(|frame| {
+                let [_, body, _] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .areas(frame.area());
+                let [_, panel] =
+                    Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)])
+                        .areas(body);
+                session.render(frame, panel, Theme::new(true), language);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        // One border and one column of padding on each side is what `Theme::panel` takes.
+        let first = talk + 2;
+        let last = talk + run - 2;
+        (2..buffer.area.height - 2)
+            .map(|y| {
+                // A two-cell glyph sits in one cell and blanks the one after it, so the cell
+                // after a wide symbol is skipped rather than read as a space.
+                let mut text = String::new();
+                let mut skip = false;
+                for x in first..last {
+                    let symbol = buffer[(x, y)].symbol();
+                    if skip {
+                        skip = false;
+                        continue;
+                    }
+                    skip = cells(symbol) == 2;
+                    text.push_str(symbol);
+                }
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Cells the panel's own columns come to, at a terminal `total` wide.
+    fn panel_width(total: u16) -> usize {
+        let (_, run) = nmtk_kq::theme::split(total);
+        run as usize - 4
+    }
+
+    /// The panel as one run of words, so a sentence that wrapped onto a second line still reads
+    /// as the sentence it is.
+    fn said(rows: &[String]) -> String {
+        rows.iter().flat_map(|row| row.split_whitespace()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// A terminal wide enough that nothing this panel draws has to be wrapped or cut, which is
+    /// what makes it the answer key: every word the panel means to say appears whole here.
+    const ROOMY: u16 = 140;
+
+    /// A session with a run behind it on every stage, which is when the panels have something to
+    /// draw and something to run off the edge with.
+    fn furnished(stage: usize) -> Session {
+        let mut session = Session::new(&machine());
+        session.go_to(stage);
+        part_way(&mut session);
+        let snapshot = session.latest.clone().expect("a run part way through");
+        session.honest = Some(Finished { snapshot: snapshot.clone(), rate: 0.003 });
+        session.broken = Some(Finished { snapshot, rate: 9.0 });
+        session
+    }
+
+    /// The panel is handed its width, and every line it draws has to fit inside it.
+    ///
+    /// A reader lost the last of the values worth typing ("4,0"), the half of the attention
+    /// heading that says which head the arrow keys are moving, and the end of the model's own
+    /// answer — that last with no ellipsis, so it read as the model having stopped mid-word. A
+    /// row that fills the last column is only allowed to end on a whole word or on the grid it
+    /// is drawing: the words a roomy terminal shows are the ones that have to survive.
+    #[test]
+    fn no_line_of_any_stage_is_cut_at_the_panel_edge_in_either_language() {
+        for total in [nmtk_kq::theme::MIN_WIDTH, 100] {
+            for language in Language::ALL {
+                for stage in 0..SCRIPTS.len() {
+                    let mut session = furnished(stage);
+                    for knob in 0..session.stage_knobs().len() {
+                        session.chosen = knob;
+                        let rows = panel_rows(&session, total, *language);
+                        let whole: Vec<String> = panel_rows(&session, ROOMY, *language)
+                            .iter()
+                            .flat_map(|row| {
+                                row.split_whitespace().map(str::to_string).collect::<Vec<_>>()
+                            })
+                            .collect();
+                        for row in &rows {
+                            assert!(
+                                cells(row) <= panel_width(total),
+                                "stage {stage} at {total}: {row:?} is wider than the panel"
+                            );
+                            if cells(row) < panel_width(total) {
+                                continue;
+                            }
+                            let Some(tail) = row.split_whitespace().last() else { continue };
+                            let drawing =
+                                tail.chars().all(|c| SHADES.contains(&c.to_string().as_str()));
+                            assert!(
+                                drawing || tail.ends_with('…') || whole.iter().any(|w| w == tail),
+                                "stage {stage} at {total}: {row:?} ends in the middle of {tail:?}"
+                            );
+                        }
+                    }
+                    session.close();
+                }
+            }
+        }
+    }
+
+    /// The words the panel edge was eating, checked whole on the narrowest screen nmtk allows.
+    #[test]
+    fn the_words_that_carry_the_meaning_survive_the_narrowest_panel() {
+        let narrow = nmtk_kq::theme::MIN_WIDTH;
+
+        let mut training = furnished(STAGE_TRAIN);
+        let run = said(&panel_rows(&training, narrow, Language::ENGLISH));
+        training.close();
+        assert!(
+            run.contains("layer 1 · head 1"),
+            "the reader cannot see which head the arrow keys are on:\n{run}"
+        );
+        assert!(run.contains("a line break /"), "the legend for the attention grid is cut:\n{run}");
+
+        let mut broken = furnished(STAGE_BREAK);
+        let attack = said(&panel_rows(&broken, narrow, Language::ENGLISH));
+        broken.close();
+        assert!(
+            attack.contains("a runaway learning rate"),
+            "the attack the reader is about to run is cut:\n{attack}"
+        );
+        assert!(
+            attack.contains("need more truth knowledge."),
+            "a run's own answer is cut short:\n{attack}"
+        );
+
+        // Steps are the longest list of suggestions, and the one that lost "4,000" to the edge.
+        // A list that does not fit drops whole values; half a number is worse than no number.
+        let mut steps = furnished(STAGE_TUNE);
+        steps.chosen = TUNE_STEPS;
+        let rows = panel_rows(&steps, narrow, Language::ENGLISH);
+        steps.close();
+        let label = Msg::LabelPresets.text(Language::ENGLISH);
+        let line = rows.iter().find(|row| row.contains(label)).expect("no suggestions are drawn");
+        let shown: Vec<&str> = line.split(label).nth(1).unwrap_or("").split_whitespace().collect();
+        assert!(!shown.is_empty(), "the suggestions vanished altogether:\n{line}");
+        for value in &shown {
+            assert!(
+                STEP_PRESETS.iter().any(|preset| format::count(*preset) == **value),
+                "{value:?} is not one of the values worth trying, it is half of one:\n{line}"
+            );
+        }
+    }
+
     #[test]
     fn it_opens_on_one_sentence_and_walks_to_every_stage() {
         let mut session = Session::new(&machine());
@@ -1904,15 +2208,20 @@ mod tests {
     fn a_lesson_about_an_attack_is_only_said_when_that_attack_is_what_ran() {
         let mut session = Session::new(&machine());
         let lesson = Msg::BreakAfterSgd;
-        let topic =
-            Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson };
+        let topic = Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson };
 
         session.ran = None;
-        assert_eq!(session.tell(topic, Language::ENGLISH), Msg::BreakNotThatRun.text(Language::ENGLISH));
+        assert_eq!(
+            session.tell(topic, Language::ENGLISH),
+            Msg::BreakNotThatRun.text(Language::ENGLISH)
+        );
 
         // The runaway attack at its own multiplier is not plain SGD at one.
         session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
-        assert_eq!(session.tell(topic, Language::ENGLISH), Msg::BreakNotThatRun.text(Language::ENGLISH));
+        assert_eq!(
+            session.tell(topic, Language::ENGLISH),
+            Msg::BreakNotThatRun.text(Language::ENGLISH)
+        );
 
         session.ran = Some((ATTACK_PLAIN_SGD, 1.0));
         assert_eq!(session.tell(topic, Language::ENGLISH), lesson.text(Language::ENGLISH));
@@ -1932,13 +2241,19 @@ mod tests {
         session.previous = Some(run(107_804, 0.803));
         session.honest = Some(run(157_788, 0.494));
         let bigger_better = session.tell(Topic::Settings, english);
-        assert!(bigger_better.starts_with(Msg::SettingsBiggerBetter.text(english)), "{bigger_better}");
+        assert!(
+            bigger_better.starts_with(Msg::SettingsBiggerBetter.text(english)),
+            "{bigger_better}"
+        );
         assert!(bigger_better.contains("107,804"), "the numbers are missing: {bigger_better}");
         assert!(bigger_better.contains("157,788"), "the numbers are missing: {bigger_better}");
 
         session.honest = Some(run(26_000, 1.900));
         let smaller_worse = session.tell(Topic::Settings, english);
-        assert!(smaller_worse.starts_with(Msg::SettingsSmallerWorse.text(english)), "{smaller_worse}");
+        assert!(
+            smaller_worse.starts_with(Msg::SettingsSmallerWorse.text(english)),
+            "{smaller_worse}"
+        );
 
         session.honest = Some(run(107_804, 0.700));
         let same = session.tell(Topic::Settings, english);

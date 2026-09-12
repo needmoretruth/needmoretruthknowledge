@@ -8,8 +8,9 @@ use std::time::Duration;
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
+use nmtk_kq::text::{column, rpad, truncate, width as cells, wrap};
 use nmtk_kq::theme::{State, Theme};
-use nmtk_kq::widgets;
+use nmtk_kq::widgets::{self, stat_lines, wrapped};
 use nmtk_pow::{
     AttackConfig, AttackHandle, AttackOutcome, AttackPhase, AttackSnapshot,
     BITCOIN_TARGET_BLOCK_SECONDS, BlockSummary, Hash256, MinerSpec, MiningConfig, MiningHandle,
@@ -128,13 +129,8 @@ use Deed::{Attack, Mine};
 use Step::{Ask, Await, Run, Say, Tell};
 
 /// Why a network burns electricity to agree on anything.
-const WHY: &[Step] = &[
-    Say(Msg::WhyOne),
-    Say(Msg::WhyTwo),
-    Say(Msg::WhyThree),
-    Say(Msg::WhyFour),
-    Say(Msg::WhyFive),
-];
+const WHY: &[Step] =
+    &[Say(Msg::WhyOne), Say(Msg::WhyTwo), Say(Msg::WhyThree), Say(Msg::WhyFour), Say(Msg::WhyFive)];
 
 /// What the puzzle actually is, with what it costs on the right.
 const PUZZLE: &[Step] = &[
@@ -214,8 +210,7 @@ const RECAP_STAGE: &[Step] = &[
     Say(Msg::RecapSix),
 ];
 
-const SCRIPTS: [&[Step]; 6] =
-    [WHY, PUZZLE, MINE_STAGE, TUNE_STAGE, ATTACK_STAGE, RECAP_STAGE];
+const SCRIPTS: [&[Step]; 6] = [WHY, PUZZLE, MINE_STAGE, TUNE_STAGE, ATTACK_STAGE, RECAP_STAGE];
 
 /// Something that happened, kept as numbers so the conversation can be said again in any language.
 enum Happening {
@@ -651,53 +646,64 @@ impl Session {
         let mark = state.map(|state| state.mark()).unwrap_or(" ");
         Line::from(vec![
             Span::styled(format!("{mark} "), style),
-            Span::styled(pad(message.text(language), 26), style),
+            Span::styled(column(message.text(language), 26), style),
             Span::styled(format::duration(elapsed), theme.muted()),
         ])
     }
 
     fn brief_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
-        let arrow = |text: &'static str| {
-            Line::from(vec![
-                Span::styled("  ↓  ", theme.muted()),
-                Span::styled(text, theme.plain()),
-            ])
-        };
-        let diagram = vec![
-            Line::from(Span::styled(Msg::PuzzleHeader.text(language), theme.plain())),
-            arrow(Msg::PuzzleHash.text(language)),
-            arrow(Msg::PuzzleCompare.text(language)),
-            Line::from(vec![
-                Span::styled("     ", theme.plain()),
-                Span::styled(Msg::PuzzleNo.text(language), theme.muted()),
-            ]),
-            Line::from(vec![
-                Span::styled("     ", theme.plain()),
-                Span::styled(Msg::PuzzleYes.text(language), theme.good()),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(Msg::PuzzleCost.text(language), theme.heading())),
-        ];
-        let [top, rows] = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).areas(area);
+        let width = area.width as usize;
+        let mut diagram =
+            wrapped("", Msg::PuzzleHeader.text(language), width, theme.plain(), theme.plain());
+        for step in [Msg::PuzzleHash, Msg::PuzzleCompare] {
+            diagram.extend(wrapped(
+                "  ↓  ",
+                step.text(language),
+                width,
+                theme.muted(),
+                theme.plain(),
+            ));
+        }
+        for (answer, style) in [(Msg::PuzzleNo, theme.muted()), (Msg::PuzzleYes, theme.good())] {
+            let (mark, rest) = branch(answer.text(language));
+            diagram.extend(wrapped(&format!("     {mark}"), rest, width, theme.plain(), style));
+        }
+        diagram.push(Line::from(""));
+        diagram.extend(wrapped(
+            "",
+            Msg::PuzzleCost.text(language),
+            width,
+            theme.heading(),
+            theme.heading(),
+        ));
+
+        let [top, rows] =
+            Layout::vertical([Constraint::Length(diagram.len() as u16), Constraint::Min(0)])
+                .areas(area);
         frame.render_widget(Paragraph::new(diagram), top);
-        widgets::stats(frame, rows, theme, &self.cost_rows(language));
+        frame.render_widget(
+            Paragraph::new(stat_lines(&self.cost_rows(language), width, theme)),
+            rows,
+        );
     }
 
     fn run_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
+        let width = area.width as usize;
         let Some(snapshot) = &self.mining_snapshot else {
-            let mut lines = vec![Line::from(Span::styled(
-                Msg::StatusIdle.text(language),
-                theme.muted(),
-            ))];
+            let mut lines =
+                vec![Line::from(Span::styled(Msg::StatusIdle.text(language), theme.muted()))];
             if let Some(message) = self.refused {
-                lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
+                lines.extend(wrapped("", message.text(language), width, theme.bad(), theme.bad()));
                 lines.push(Line::from(""));
             }
             let [top, rows] =
                 Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
                     .areas(area);
             frame.render_widget(Paragraph::new(lines), top);
-            widgets::stats(frame, rows, theme, &self.cost_rows(language));
+            frame.render_widget(
+                Paragraph::new(stat_lines(&self.cost_rows(language), width, theme)),
+                rows,
+            );
             return;
         };
 
@@ -718,49 +724,40 @@ impl Session {
         }
         let comparison = self.comparison_rows(snapshot.total_hashrate, language);
 
-        let [status, gap, stats, gap2, heading, compare, note, gap3, blocks_head, blocks] =
-            Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(6),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(4),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .areas(area);
-        let _ = (gap, gap2, gap3);
+        // Built as one run of lines rather than a fixed grid of rows: a value that has to go
+        // under its label, or a sentence that has to become two, takes a row from the block list
+        // at the bottom instead of running off the right-hand edge.
+        let mut head = vec![self.status_line(snapshot.elapsed, language, theme), Line::from("")];
+        head.extend(stat_lines(&rows, width, theme));
+        head.push(Line::from(""));
+        head.extend(wrapped(
+            "",
+            Msg::HeadingComparison.text(language),
+            width,
+            theme.heading(),
+            theme.heading(),
+        ));
+        head.extend(stat_lines(&comparison, width, theme));
+        head.extend(wrapped(
+            "",
+            Msg::ComparisonDerived.text(language),
+            width,
+            theme.muted(),
+            theme.muted(),
+        ));
+        head.push(Line::from(""));
+        head.extend(wrapped(
+            "",
+            Msg::HeadingRecentBlocks.text(language),
+            width,
+            theme.heading(),
+            theme.heading(),
+        ));
 
-        frame.render_widget(
-            Paragraph::new(self.status_line(snapshot.elapsed, language, theme)),
-            status,
-        );
-        widgets::stats(frame, stats, theme, &rows);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                Msg::HeadingComparison.text(language),
-                theme.heading(),
-            ))),
-            heading,
-        );
-        widgets::stats(frame, compare, theme, &comparison);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                Msg::ComparisonDerived.text(language),
-                theme.muted(),
-            ))),
-            note,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                Msg::HeadingRecentBlocks.text(language),
-                theme.heading(),
-            ))),
-            blocks_head,
-        );
+        let [top, blocks] =
+            Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Min(0)])
+                .areas(area);
+        frame.render_widget(Paragraph::new(head), top);
         self.block_rows(frame, blocks, theme, &snapshot.recent_blocks);
     }
 
@@ -777,8 +774,8 @@ impl Session {
                 let state = if block.in_best_chain { State::Good } else { State::Bad };
                 Line::from(vec![
                     Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                    Span::styled(pad(&format::count(block.height), 5), theme.plain()),
-                    Span::styled(pad(&format::duration(block.since_previous), 8), theme.muted()),
+                    Span::styled(column(&format::count(block.height), 5), theme.plain()),
+                    Span::styled(column(&format::duration(block.since_previous), 8), theme.muted()),
                     Span::styled(short_hash(block.hash), theme.muted()),
                 ])
             })
@@ -787,7 +784,8 @@ impl Session {
     }
 
     fn tune_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
-        let knob_lines = self.tune_knob_lines(language, theme);
+        let width = area.width as usize;
+        let knob_lines = self.tune_knob_lines(width, language, theme);
         let knob_rows = knob_lines.len() as u16;
         let [knobs, gap, heading, table, footer] = Layout::vertical([
             Constraint::Length(knob_rows),
@@ -809,84 +807,133 @@ impl Session {
 
         match self.split_rows() {
             Ok(rows) => {
+                // Three number columns of eight cells and whatever is left for the name. The
+                // name column narrows rather than shoving the numbers off the edge, which is what
+                // a Korean miner name did when the padding counted characters.
+                let numbers = 8;
+                let name = width.saturating_sub(numbers * 3).max(4);
                 let mut lines = vec![Line::from(vec![
-                    Span::styled(pad(Msg::ColumnMiner.text(language), 10), theme.muted()),
-                    Span::styled(right(Msg::ColumnThreads.text(language), 8), theme.muted()),
-                    Span::styled(right(Msg::ColumnAsked.text(language), 8), theme.muted()),
-                    Span::styled(right(Msg::ColumnGot.text(language), 8), theme.muted()),
+                    Span::styled(column(Msg::ColumnMiner.text(language), name), theme.muted()),
+                    Span::styled(right(Msg::ColumnThreads.text(language), numbers), theme.muted()),
+                    Span::styled(right(Msg::ColumnAsked.text(language), numbers), theme.muted()),
+                    Span::styled(right(Msg::ColumnGot.text(language), numbers), theme.muted()),
                 ])];
                 let mut differs = false;
                 for row in &rows {
                     differs |= (row.requested - row.effective).abs() > 0.005;
                     lines.push(Line::from(vec![
                         Span::styled(
-                            pad(phrases::miner_name(row.index).text(language), 10),
+                            column(phrases::miner_name(row.index).text(language), name),
                             theme.plain(),
                         ),
-                        Span::styled(right(&row.threads.to_string(), 8), theme.plain()),
-                        Span::styled(right(&format::percent(row.requested), 8), theme.muted()),
-                        Span::styled(right(&format::percent(row.effective), 8), theme.heading()),
+                        Span::styled(right(&row.threads.to_string(), numbers), theme.plain()),
+                        Span::styled(
+                            right(&format::percent(row.requested), numbers),
+                            theme.muted(),
+                        ),
+                        Span::styled(
+                            right(&format::percent(row.effective), numbers),
+                            theme.heading(),
+                        ),
                     ]));
                 }
                 if differs {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
+                    lines.extend(wrapped(
+                        "",
                         Msg::TuneMismatch.text(language),
+                        width,
                         theme.muted(),
-                    )));
+                        theme.muted(),
+                    ));
                 }
                 frame.render_widget(Paragraph::new(lines), table);
             }
             Err(message) => frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(message.text(language), theme.bad()))),
+                Paragraph::new(wrapped(
+                    "",
+                    message.text(language),
+                    width,
+                    theme.bad(),
+                    theme.bad(),
+                )),
                 table,
             ),
         }
 
         let mut lines = Vec::new();
         if let Some(message) = self.refused {
-            lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
+            lines.extend(wrapped("", message.text(language), width, theme.bad(), theme.bad()));
         }
         frame.render_widget(Paragraph::new(lines), footer);
     }
 
-    fn tune_knob_lines(&self, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    fn tune_knob_lines(
+        &self,
+        width: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let labels: Vec<Msg> = (0..self.tune_knobs.len())
+            .map(|index| match index {
+                KNOB_DIFFICULTY => Msg::KnobDifficulty,
+                KNOB_MINERS => Msg::KnobMiners,
+                KNOB_THREADS => Msg::KnobThreads,
+                other => phrases::share_label(other - KNOB_SHARES_FROM),
+            })
+            .collect();
+        let column_width = label_column(&labels, width, language);
         self.tune_knobs
             .iter()
             .enumerate()
-            .map(|(index, knob)| {
-                let label = match index {
-                    KNOB_DIFFICULTY => Msg::KnobDifficulty,
-                    KNOB_MINERS => Msg::KnobMiners,
-                    KNOB_THREADS => Msg::KnobThreads,
-                    other => phrases::share_label(other - KNOB_SHARES_FROM),
-                };
+            .flat_map(|(index, knob)| {
                 let unit = if index == KNOB_DIFFICULTY {
                     Some(Msg::UnitZeroBits.text(language))
                 } else {
                     None
                 };
-                knob_line(knob, label.text(language), unit, index == self.chosen, theme)
+                knob_line(
+                    knob,
+                    labels[index].text(language),
+                    unit,
+                    index == self.chosen,
+                    column_width,
+                    width,
+                    theme,
+                )
             })
             .collect()
     }
 
-    fn break_knob_lines(&self, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    fn break_knob_lines(
+        &self,
+        width: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let labels = [Msg::KnobAttackerShare, Msg::KnobConfirmations];
+        let column_width = label_column(&labels, width, language);
         self.break_knobs
             .iter()
             .enumerate()
-            .map(|(index, knob)| {
-                let label = match index {
-                    KNOB_ATTACKER => Msg::KnobAttackerShare,
-                    _ => Msg::KnobConfirmations,
-                };
-                knob_line(knob, label.text(language), None, index == self.chosen, theme)
+            .flat_map(|(index, knob)| {
+                let label = labels.get(index).copied().unwrap_or(Msg::KnobConfirmations);
+                knob_line(
+                    knob,
+                    label.text(language),
+                    None,
+                    index == self.chosen,
+                    column_width,
+                    width,
+                    theme,
+                )
             })
             .collect()
     }
 
     fn break_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
-        let knob_lines = self.break_knob_lines(language, theme);
+        let width = area.width as usize;
+        let knob_lines = self.break_knob_lines(width, language, theme);
         let [knobs, gap, body] = Layout::vertical([
             Constraint::Length(knob_lines.len() as u16),
             Constraint::Length(1),
@@ -898,12 +945,10 @@ impl Session {
 
         let Some(snapshot) = &self.attack_snapshot else {
             let (attacker, honest) = self.attack_threads();
-            let mut lines = vec![Line::from(Span::styled(
-                Msg::StatusIdle.text(language),
-                theme.muted(),
-            ))];
+            let mut lines =
+                vec![Line::from(Span::styled(Msg::StatusIdle.text(language), theme.muted()))];
             if let Some(message) = self.refused {
-                lines.push(Line::from(Span::styled(message.text(language), theme.bad())));
+                lines.extend(wrapped("", message.text(language), width, theme.bad(), theme.bad()));
                 lines.push(Line::from(""));
             }
             let rows = vec![
@@ -912,13 +957,10 @@ impl Session {
                     format!("{} {}", self.zero_bits(), Msg::UnitZeroBits.text(language)),
                 ),
                 (Msg::LabelThreadSplit.text(language), format!("{attacker} / {honest}")),
-                ("", Msg::ThreadsAttackerHonest.text(language).to_string()),
             ];
-            let [top, table] =
-                Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
-                    .areas(body);
-            frame.render_widget(Paragraph::new(lines), top);
-            widgets::stats(frame, table, theme, &rows);
+            lines.extend(stat_lines(&rows, width, theme));
+            lines.extend(self.split_caption(width, language, theme));
+            frame.render_widget(Paragraph::new(lines), body);
             return;
         };
 
@@ -930,23 +972,28 @@ impl Session {
                 theme.muted(),
             )),
         };
-        let head = vec![self.status_line(snapshot.elapsed, language, theme), phase, Line::from("")];
-        let ending = self.ending_lines(snapshot, language, theme);
-        let [top, table, tail] = Layout::vertical([
-            Constraint::Length(head.len() as u16),
-            Constraint::Min(0),
-            Constraint::Length(ending.len() as u16),
-        ])
-        .areas(body);
-        frame.render_widget(Paragraph::new(head), top);
-        widgets::stats(frame, table, theme, &self.attack_rows(snapshot, language));
-        frame.render_widget(Paragraph::new(ending), tail);
+        let mut lines =
+            vec![self.status_line(snapshot.elapsed, language, theme), phase, Line::from("")];
+        lines.extend(stat_lines(&self.attack_rows(snapshot, language), width, theme));
+        lines.extend(self.split_caption(width, language, theme));
+        lines.extend(self.ending_lines(snapshot, width, language, theme));
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+
+    /// What the two numbers in the thread split mean.
+    ///
+    /// This is a caption, not a value, and it was drawn as a nameless row of the table: indented
+    /// by whatever the widest label happened to be, so it lost a different number of letters
+    /// depending on whether the attacker was ahead or behind. It is a sentence, so it wraps.
+    fn split_caption(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
+        wrapped("", Msg::ThreadsAttackerHonest.text(language), width, theme.muted(), theme.muted())
     }
 
     /// How it ended: green when the chain held, red when an attacker rewrote it.
     fn ending_lines(
         &self,
         snapshot: &AttackSnapshot,
+        width: usize,
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
@@ -955,13 +1002,15 @@ impl Session {
             AttackOutcome::Succeeded => State::Bad,
             AttackOutcome::GaveUp => State::Good,
         };
-        vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                Span::styled(phrases::outcome(outcome).text(language), theme.state(state)),
-            ]),
-        ]
+        let mut lines = vec![Line::from("")];
+        lines.extend(wrapped(
+            &format!("{} ", state.mark()),
+            phrases::outcome(outcome).text(language),
+            width,
+            theme.state(state),
+            theme.state(state),
+        ));
+        lines
     }
 
     /// What the attack has done so far, or what it did.
@@ -1020,7 +1069,6 @@ impl Session {
                 format::percent(snapshot.attacker_share)
             ),
         ));
-        rows.push(("", Msg::ThreadsAttackerHonest.text(language).to_string()));
         rows
     }
 
@@ -1082,15 +1130,37 @@ impl Session {
             ),
         ];
 
+        // Two cells for the number, then a label column wide enough for the longest label in
+        // whichever language is on screen. A value the rest will not hold goes under its label.
+        let width = area.width as usize;
+        let label = rows
+            .iter()
+            .map(|(name, _)| cells(name))
+            .max()
+            .unwrap_or(0)
+            .min(width.saturating_sub(4))
+            + 1;
+        let room = width.saturating_sub(label + 2);
         let lines: Vec<Line<'static>> = rows
             .iter()
             .enumerate()
-            .map(|(index, (name, value))| {
-                Line::from(vec![
-                    Span::styled(format!("{} ", index + 1), theme.muted()),
-                    Span::styled(pad(name, 21), theme.plain()),
-                    Span::styled(value.clone(), theme.heading()),
-                ])
+            .flat_map(|(index, (name, value))| {
+                let number = Span::styled(format!("{} ", index + 1), theme.muted());
+                if cells(value) <= room {
+                    return vec![Line::from(vec![
+                        number,
+                        Span::styled(column(name, label), theme.plain()),
+                        Span::styled(value.clone(), theme.heading()),
+                    ])];
+                }
+                let mut lines = vec![Line::from(vec![
+                    number,
+                    Span::styled(truncate(name, width.saturating_sub(2)), theme.plain()),
+                ])];
+                for chunk in wrap(value, width.saturating_sub(4)) {
+                    lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.heading())));
+                }
+                lines
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), area);
@@ -1165,9 +1235,7 @@ impl Session {
             Until::Blocks(wanted) => {
                 self.mining_snapshot.as_ref().is_some_and(|s| s.blocks_in_chain >= wanted)
             }
-            Until::AttackOver => {
-                self.attack_snapshot.as_ref().is_some_and(|s| s.outcome.is_some())
-            }
+            Until::AttackOver => self.attack_snapshot.as_ref().is_some_and(|s| s.outcome.is_some()),
         }
     }
 
@@ -1519,7 +1587,13 @@ impl KqSession for Session {
                     let [top, curve] =
                         Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(inner);
                     self.run_panel(frame, top, theme, language);
-                    widgets::curve(frame, curve, theme, &self.rates, Msg::LabelHashRate.text(language));
+                    widgets::curve(
+                        frame,
+                        curve,
+                        theme,
+                        &self.rates,
+                        Msg::LabelHashRate.text(language),
+                    );
                 } else {
                     self.run_panel(frame, inner, theme, language);
                 }
@@ -1551,24 +1625,53 @@ impl KqSession for Session {
     }
 }
 
+/// How many cells the labels of a column of knobs need, never more than half the panel.
+fn label_column(labels: &[Msg], width: usize, language: Language) -> usize {
+    labels
+        .iter()
+        .map(|label| cells(label.text(language)))
+        .max()
+        .unwrap_or(0)
+        .min(width.saturating_sub(4))
+        + 1
+}
+
 /// A knob's row: the mark, the label, and the value or what is being typed into it.
+///
+/// A value too long for the room left goes on the next line under the label rather than being cut
+/// at the panel edge — these stages have blank rows to spare, and half a number says less than a
+/// number on its own line.
 fn knob_line(
     knob: &Knob,
     label: &str,
     unit: Option<&str>,
     chosen: bool,
+    label_width: usize,
+    width: usize,
     theme: Theme,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let marker = if chosen { State::Chosen.mark() } else { " " };
     let value = match unit {
         Some(unit) if knob.draft().is_none() => format!("{} {unit}", knob.display()),
         _ => knob.display(),
     };
-    Line::from(vec![
+    let style = if chosen { theme.heading() } else { theme.muted() };
+    let room = width.saturating_sub(label_width + 2);
+    if cells(&value) <= room {
+        return vec![Line::from(vec![
+            Span::styled(format!("{marker} "), theme.state(State::Chosen)),
+            Span::styled(column(label, label_width), theme.plain()),
+            Span::styled(value, style),
+        ])];
+    }
+    let mut lines = vec![Line::from(vec![
         Span::styled(format!("{marker} "), theme.state(State::Chosen)),
-        Span::styled(pad(label, 20), theme.plain()),
-        Span::styled(value, if chosen { theme.heading() } else { theme.muted() }),
-    ])
+        Span::styled(truncate(label, width.saturating_sub(2)), theme.plain()),
+    ])];
+    for chunk in wrap(&value, width.saturating_sub(4)) {
+        lines.push(Line::from(Span::styled(format!("    {chunk}"), style)));
+    }
+    lines
 }
 
 fn count_of(knob: Option<&Knob>) -> u64 {
@@ -1609,25 +1712,23 @@ fn requested_of(share: Share) -> f64 {
     }
 }
 
-/// `text` padded to `width` columns, counting characters rather than bytes.
-fn pad(text: &str, width: usize) -> String {
-    let used = text.chars().count();
-    let mut out = text.to_string();
-    for _ in used..width {
-        out.push(' ');
-    }
-    out
+/// `text` pushed to the right of `columns` cells, so a column of numbers lines up.
+///
+/// Cells, not characters: a Korean heading is half as many characters and exactly as many
+/// columns, and counting characters pushed every number in the Tune table out of its column.
+fn right(text: &str, columns: usize) -> String {
+    rpad(&truncate(text, columns), columns)
 }
 
-/// `text` pushed to the right of `width` columns, so a column of numbers lines up.
-fn right(text: &str, width: usize) -> String {
-    let used = text.chars().count();
-    let mut out = String::new();
-    for _ in used..width {
-        out.push(' ');
-    }
-    out.push_str(text);
-    out
+/// A branch of the puzzle diagram, split into the word that names it and the sentence after it.
+///
+/// The phrase carries a run of spaces between the two so that "no" and "yes" start their
+/// sentences in the same column; [`wrap`] collapses runs of spaces, so the run is taken out of
+/// the text and kept as part of the lead rather than left in the text to be wrapped.
+fn branch(text: &str) -> (&str, &str) {
+    let Some(gap) = text.find("  ") else { return (text, "") };
+    let after = text[gap..].find(|c: char| c != ' ').map(|at| gap + at).unwrap_or(text.len());
+    text.split_at(after)
 }
 
 /// A count of blocks, written so that one of them is not "1 blocks".
@@ -1687,11 +1788,8 @@ mod tests {
     fn blank_attack() -> AttackSnapshot {
         let mut session = session();
         session.start_the_attack();
-        let snapshot = session
-            .attack
-            .as_ref()
-            .map(|handle| handle.snapshot())
-            .expect("the attack started");
+        let snapshot =
+            session.attack.as_ref().map(|handle| handle.snapshot()).expect("the attack started");
         session.stop_attack();
         snapshot
     }
@@ -1723,6 +1821,156 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The panel's own columns at `total`, each row right-trimmed, borders and padding removed.
+    fn panel_rows(session: &Session, total: u16, language: Language) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(total, MIN_HEIGHT)).expect("backend");
+        let (talk, run) = split(total);
+        terminal
+            .draw(|frame| {
+                let [_, body, _] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .areas(frame.area());
+                let [_, panel] =
+                    Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)])
+                        .areas(body);
+                session.render(frame, panel, Theme::new(true), language);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        // One border and one column of padding on each side is what `Theme::panel` takes.
+        let first = talk + 2;
+        let last = talk + run - 2;
+        (2..buffer.area.height - 2)
+            .map(|y| {
+                // A two-cell glyph sits in one cell and blanks the one after it, so the cell
+                // after a wide symbol is skipped rather than read as a space.
+                let mut text = String::new();
+                let mut skip = false;
+                for x in first..last {
+                    let symbol = buffer[(x, y)].symbol();
+                    if skip {
+                        skip = false;
+                        continue;
+                    }
+                    skip = nmtk_kq::text::width(symbol) == 2;
+                    text.push_str(symbol);
+                }
+                text.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    /// Cells the panel's own columns come to, at a terminal `total` wide.
+    fn panel_width(total: u16) -> usize {
+        let (_, run) = split(total);
+        run as usize - 4
+    }
+
+    /// A terminal wide enough that nothing this panel draws has to be wrapped or cut, which is
+    /// what makes it the answer key: every word the panel means to say appears whole here.
+    const ROOMY: u16 = 140;
+
+    /// The panel is handed its width, and every line it draws has to fit inside it.
+    ///
+    /// A reader lost the end of the sentence saying a number was worked out rather than measured,
+    /// and the caption saying which of the two thread counts is the attacker's — both cut at the
+    /// edge with nothing to say a word had gone. A row that fills the last column is only allowed
+    /// to end on a whole word: the words a roomy terminal shows are the ones that have to survive.
+    #[test]
+    fn no_line_of_any_stage_is_cut_at_the_panel_edge_in_either_language() {
+        for total in [MIN_WIDTH, 100] {
+            for language in Language::ALL {
+                for stage in 0..SCRIPTS.len() {
+                    let mut session = session();
+                    session.go_to(stage);
+                    if stage == STAGE_MINE || stage == STAGE_TUNE {
+                        session.start_run();
+                        session.tick();
+                    }
+                    if stage == STAGE_ATTACK {
+                        let mut ended = blank_attack();
+                        ended.outcome = Some(AttackOutcome::GaveUp);
+                        session.attack_snapshot = Some(ended);
+                    }
+                    let rows = panel_rows(&session, total, *language);
+                    let whole: Vec<String> = panel_rows(&session, ROOMY, *language)
+                        .iter()
+                        .flat_map(|row| {
+                            row.split_whitespace().map(str::to_string).collect::<Vec<_>>()
+                        })
+                        .collect();
+                    session.close();
+                    for row in &rows {
+                        assert!(
+                            nmtk_kq::text::width(row) <= panel_width(total),
+                            "stage {stage} at {total}: {row:?} is wider than the panel"
+                        );
+                        if nmtk_kq::text::width(row) < panel_width(total) {
+                            continue;
+                        }
+                        let Some(tail) = row.split_whitespace().last() else { continue };
+                        assert!(
+                            tail.ends_with('…') || whole.iter().any(|word| word == tail),
+                            "stage {stage} at {total}: {row:?} ends in the middle of {tail:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The panel as one run of words, so a sentence that wrapped onto a second line still reads
+    /// as the sentence it is.
+    fn said(rows: &[String]) -> String {
+        rows.iter().flat_map(|row| row.split_whitespace()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// The words the panel edge was eating, checked whole on the narrowest screen nmtk allows.
+    #[test]
+    fn the_words_that_carry_the_meaning_survive_the_narrowest_panel() {
+        let mut running = session();
+        running.go_to(STAGE_MINE);
+        running.start_run();
+        running.tick();
+        let mining = said(&panel_rows(&running, MIN_WIDTH, Language::ENGLISH));
+        running.close();
+        assert!(
+            mining.contains("worked out from the protocol, not measured"),
+            "the sentence saying the number was not measured is cut:\n{mining}"
+        );
+        assert!(
+            mining.contains("x that network"),
+            "the reader cannot see what this machine is a multiple of:\n{mining}"
+        );
+
+        let mut broken = session();
+        broken.go_to(STAGE_ATTACK);
+        broken.attack_snapshot = Some(blank_attack());
+        let attack = said(&panel_rows(&broken, MIN_WIDTH, Language::ENGLISH));
+        broken.close();
+        assert!(
+            attack.contains("attacker / everyone else"),
+            "the caption does not say who the second thread count belongs to:\n{attack}"
+        );
+
+        let puzzle = said(&panel_rows(&session(), MIN_WIDTH, Language::ENGLISH));
+        assert!(
+            puzzle.contains("with a nonce in it"),
+            "the header line of the diagram is cut:\n{puzzle}"
+        );
+        assert!(
+            puzzle.contains("change the nonce and hash again"),
+            "the loop the miner goes round is cut:\n{puzzle}"
+        );
+        assert!(
+            puzzle.contains("4,295,032,833 hashes"),
+            "what a block at difficulty 1 costs is cut short:\n{puzzle}"
+        );
     }
 
     #[test]
@@ -2046,8 +2294,9 @@ mod tests {
         // line is the whole defect.
         assert!(!text.contains("not run yet"), "the recap forgot the reader's own run:\n{text}");
         assert!(text.contains("16 zero bits"), "the difficulty the reader set is gone:\n{text}");
+        let counted = Msg::RecapBlocks.text(Language::ENGLISH);
         assert!(
-            text.contains(&format!("{}{mined}", pad(Msg::RecapBlocks.text(Language::ENGLISH), 21))),
+            text.lines().any(|line| line.contains(counted) && line.contains(&mined)),
             "the recap counts blocks the reader did not mine:\n{text}"
         );
     }
