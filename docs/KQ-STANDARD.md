@@ -177,6 +177,10 @@ impl Handle {
 
 Work that finishes instantly is a plain function instead.
 
+**One heavy run at a time.** A session that starts a second run stops the first one first. Two runs
+sharing the cores halve each other, and a reader comparing them is reading noise — this was a real
+bug: mining left running behind a 51% attack made the attack look impossible.
+
 ## 11. Versions
 
 A quest's `id` never changes. Its `version` rises, and **every version stays in the program**: a

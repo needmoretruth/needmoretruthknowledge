@@ -1038,6 +1038,7 @@ dependencies = [
  "crossterm",
  "kq-ledgers",
  "kq-proof-of-work",
+ "kq-transformer",
  "kq-zero-knowledge",
  "nmtk-core",
  "nmtk-i18n",

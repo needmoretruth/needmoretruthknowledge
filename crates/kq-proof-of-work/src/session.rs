@@ -267,6 +267,8 @@ impl Session {
             }
         };
         let config = MiningConfig::new(bits, self.specs(), self.thread_budget());
+        // Only one heavy run at a time: mining beside an attack halves both and teaches nothing.
+        self.stop_attack();
         match start_mining(config) {
             Ok(handle) => {
                 self.mining_snapshot = Some(handle.snapshot());
@@ -296,6 +298,7 @@ impl Session {
         let (attacker, honest) = self.attack_threads();
         let config =
             AttackConfig::new(bits, attacker, honest).with_confirmations(self.confirmations());
+        self.stop_mining();
         match start_attack(config) {
             Ok(handle) => {
                 self.attack_snapshot = Some(handle.snapshot());
