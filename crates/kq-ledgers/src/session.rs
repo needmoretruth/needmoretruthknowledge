@@ -419,8 +419,12 @@ impl KqSession for Session {
         beats
     }
 
+    fn at_end(&self) -> bool {
+        self.revealed + 1 >= self.script().len()
+    }
+
     fn can_advance(&self) -> bool {
-        self.revealed + 1 < self.script().len() || self.stage + 1 < SCRIPTS.len()
+        self.revealed + 1 < self.script().len()
     }
 
     fn knobs(&self) -> &[Knob] {
@@ -439,19 +443,17 @@ impl KqSession for Session {
             }
             Action::Go => {
                 let script = self.script();
-                if self.revealed + 1 < script.len() {
-                    self.revealed += 1;
-                    if let Run(deed) = script[self.revealed] {
-                        let at = self.revealed;
-                        self.perform(at, deed);
-                    }
-                    Reaction::Handled
-                } else if self.stage + 1 < SCRIPTS.len() {
-                    self.go_to(self.stage + 1);
-                    Reaction::Handled
-                } else {
-                    Reaction::Ignored
+                // The end of a stage is not the end of the quest, but walking on from here is the
+                // shell's business: it is what knows there is another stage to walk to.
+                if self.revealed + 1 >= script.len() {
+                    return Reaction::Ignored;
                 }
+                self.revealed += 1;
+                if let Run(deed) = script[self.revealed] {
+                    let at = self.revealed;
+                    self.perform(at, deed);
+                }
+                Reaction::Handled
             }
             Action::Reset => {
                 self.restart();
@@ -669,14 +671,17 @@ mod tests {
         }
     }
 
+    /// The quest stops at the end of its own stage and says so. Walking into the next one is the
+    /// shell's move, because only the shell knows there is another stage to walk to.
     #[test]
-    fn enter_at_the_end_of_a_stage_walks_into_the_next_one() {
+    fn a_stage_says_when_it_has_nothing_more_to_say() {
         let mut session = Session::new();
+        assert!(!session.at_end());
         walk(&mut session);
+        assert!(session.at_end());
+        assert!(!session.can_advance());
+        assert_eq!(session.on(Action::Go), Reaction::Ignored);
         assert_eq!(session.stage(), 0);
-        session.on(Action::Go);
-        assert_eq!(session.stage(), 1, "the quest dead-ended instead of carrying on");
-        assert_eq!(session.transcript(Language::ENGLISH).len(), 1, "the next stage opened mid-way");
     }
 
     #[test]
@@ -684,7 +689,7 @@ mod tests {
         let mut session = Session::new();
         session.go_to(SCRIPTS.len() - 1);
         walk(&mut session);
-        assert!(!session.can_advance());
+        assert!(session.at_end());
         assert_eq!(session.on(Action::Go), Reaction::Ignored);
     }
 

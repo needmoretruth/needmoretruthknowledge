@@ -256,11 +256,21 @@ impl App {
         }
         let tunable = self.open.as_ref().is_some_and(|quest| !quest.session.knobs().is_empty());
         let Some(action) = action_for(code, typing, tunable, self.stages()) else { return };
-        if let Some(quest) = &mut self.open
-            && quest.session.on(action) == Reaction::Handled
-        {
+        let taken = match &mut self.open {
+            Some(quest) => quest.session.on(action),
+            None => return,
+        };
+        if taken == Reaction::Handled {
             // A beat the reader caused is a beat they want to see.
             self.transcript_follows = true;
+            return;
+        }
+        // Enter at the end of a stage carries the reader into the next one. A quest knows where
+        // its own conversation ends; only the shell knows there is another stage after it. In the
+        // middle of a run the same key does nothing, which is what the reader is being told.
+        let at_end = self.open.as_ref().is_some_and(|quest| quest.session.at_end());
+        if action == Action::Go && at_end {
+            self.step_stage(1);
         }
     }
 

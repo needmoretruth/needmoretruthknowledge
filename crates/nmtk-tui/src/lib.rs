@@ -31,6 +31,7 @@ fn catalogue() -> Catalogue {
         Box::new(kq_proof_of_work::ProofOfWork),
         Box::new(kq_ledgers::Ledgers),
         Box::new(kq_transformer::Transformer),
+        Box::new(kq_zero_knowledge::ZeroKnowledge),
     ])
 }
 

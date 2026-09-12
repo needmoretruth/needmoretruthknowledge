@@ -156,6 +156,13 @@ pub trait KqSession {
     /// finish — and the last beat should be the one saying so.
     fn can_advance(&self) -> bool;
 
+    /// Whether this stage has said everything it has to say.
+    ///
+    /// Told apart from [`KqSession::can_advance`] on purpose: both are false while a run is being
+    /// waited on, and the shell has to know which of the two it is looking at. Enter walks into
+    /// the next stage at the end of a conversation, and does nothing at all in the middle of one.
+    fn at_end(&self) -> bool;
+
     /// The knobs of the current stage, in the order they are drawn.
     fn knobs(&self) -> &[Knob];
 

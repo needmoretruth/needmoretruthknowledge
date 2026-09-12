@@ -38,7 +38,9 @@ pub fn render(
     frame.render_widget(block, talk_area);
 
     let mut beats = quest.session.transcript(language);
-    if quest.session.can_advance() {
+    // The shell walks on at the end of a stage, so Enter still carries the reader forward there.
+    let walk_on = quest.session.at_end() && quest.session.stage() + 1 < quest.stages.len();
+    if quest.session.can_advance() || walk_on {
         beats.push(nmtk_kq::Beat::ask(t(Msg::ConversationWaiting, language).to_string()));
     } else if quest.session.run_state() == RunState::Running {
         // A conversation that has stopped and says nothing reads as a program that has hung.

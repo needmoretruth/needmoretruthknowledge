@@ -1256,10 +1256,14 @@ impl KqSession for Session {
         beats
     }
 
+    fn at_end(&self) -> bool {
+        self.revealed + 1 >= self.script().len()
+    }
+
     fn can_advance(&self) -> bool {
         match self.script().get(self.revealed) {
             Some(Await(until)) => self.satisfied(*until),
-            _ => self.revealed + 1 < self.script().len() || self.stage + 1 < SCRIPTS.len(),
+            _ => self.revealed + 1 < self.script().len(),
         }
     }
 
@@ -1283,14 +1287,9 @@ impl KqSession for Session {
                 {
                     return Reaction::Ignored;
                 }
-                if self.advance() {
-                    Reaction::Handled
-                } else if self.stage + 1 < SCRIPTS.len() {
-                    self.go_to(self.stage + 1);
-                    Reaction::Handled
-                } else {
-                    Reaction::Ignored
-                }
+                // The end of a stage is not the end of the quest, but walking on from here is
+                // the shell's business: it is what knows there is another stage to walk to.
+                if self.advance() { Reaction::Handled } else { Reaction::Ignored }
             }
             Action::PauseOrResume => match &self.handle {
                 Some(handle) => {

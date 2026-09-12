@@ -44,6 +44,17 @@ pub fn pad(text: &str, columns: usize) -> String {
     out
 }
 
+/// `text` pushed to the right of `columns` cells, so numbers line up under their heading.
+pub fn rpad(text: &str, columns: usize) -> String {
+    let used = width(text);
+    let mut out = String::new();
+    for _ in used..columns {
+        out.push(' ');
+    }
+    out.push_str(text);
+    out
+}
+
 /// `text` cut to at most `columns` cells, ending in `…` when something was removed.
 pub fn truncate(text: &str, columns: usize) -> String {
     if width(text) <= columns {
@@ -133,6 +144,15 @@ pub fn wrap(text: &str, columns: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_korean_column_is_padded_by_cells_rather_than_characters() {
+        // Five characters, ten cells. Padding by characters leaves it five columns short and
+        // every value after it in the row lands in the wrong place.
+        assert_eq!(width(&pad("영지식증명", 14)), 14);
+        assert_eq!(width(&rpad("영지식증명", 14)), 14);
+        assert!(rpad("96 B", 8).starts_with("    "));
+    }
 
     #[test]
     fn korean_glyphs_count_as_two_cells() {

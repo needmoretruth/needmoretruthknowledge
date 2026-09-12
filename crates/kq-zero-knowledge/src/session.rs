@@ -11,8 +11,8 @@ use std::thread::JoinHandle;
 
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
-use nmtk_kq::meta::StageKind;
-use nmtk_kq::session::{Action, KqSession, Reaction, RunState};
+use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
+use nmtk_kq::text::{pad, rpad, wrap};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::widgets;
 use nmtk_zk::{
@@ -193,8 +193,169 @@ fn run_halo2(seed: u64, bits: u32) -> Result<StageOutcome, ZkError> {
     })
 }
 
+/// Where each stage sits. The order here is the order `lib.rs` declares them in.
+const STAGE_RUN: usize = 2;
+const STAGE_MESSAGES: usize = 3;
+const STAGE_TUNE: usize = 4;
+const STAGE_BREAK: usize = 5;
+const STAGE_SIDES: usize = 6;
+
+/// The most events one stage reports.
+const EVENT_CAP: usize = 24;
+
+/// One move in a stage's conversation.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Say(Msg),
+    Ask(Msg),
+    Run(Deed),
+    Await(Until),
+}
+
+/// Work a step starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deed {
+    /// Run every system the reader asked for.
+    Systems,
+    /// Run the interactive protocol alone, which finishes in microseconds.
+    Sigma,
+    /// Show one message of that protocol.
+    Message(usize),
+}
+
+/// What a waiting step is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    Finished,
+}
+
+use Deed::{Message, Sigma, Systems};
+use Step::{Ask, Await, Run, Say};
+
+/// What a proof that shows nothing actually means.
+const WHAT: &[Step] = &[
+    Say(Msg::WhatOne),
+    Say(Msg::WhatTwo),
+    Say(Msg::WhatThree),
+    Say(Msg::WhatFour),
+    Say(Msg::WhatFive),
+    Say(Msg::WhatSix),
+    Say(Msg::WhatSeven),
+];
+
+/// The four systems, and what each one fixed.
+const FOUR: &[Step] = &[
+    Say(Msg::FourOne),
+    Say(Msg::FourTwo),
+    Say(Msg::FourSigma),
+    Say(Msg::FourFiatShamir),
+    Say(Msg::FourTrustedSetup),
+    Say(Msg::FourHalo2),
+    Say(Msg::FourNumbers),
+];
+
+/// All four, measured on this machine.
+const RUN: &[Step] = &[
+    Say(Msg::RunOne),
+    Ask(Msg::RunAsk),
+    Run(Systems),
+    Await(Until::Finished),
+    Say(Msg::RunMeasured),
+    Say(Msg::RunCheck),
+    Say(Msg::RunWhy),
+];
+
+/// The interactive protocol, one message at a time.
+const MESSAGES: &[Step] = &[
+    Say(Msg::SigmaIntro),
+    Run(Sigma),
+    Await(Until::Finished),
+    Run(Message(0)),
+    Say(Msg::WhyStatement),
+    Run(Message(1)),
+    Say(Msg::WhyCommitment),
+    Run(Message(2)),
+    Say(Msg::WhyChallenge),
+    Run(Message(3)),
+    Say(Msg::WhyResponse),
+    Run(Message(4)),
+    Say(Msg::WhyVerdict),
+    Say(Msg::SigmaLesson),
+];
+
+/// The reader's own circuit size and seed.
+const TUNE: &[Step] = &[
+    Say(Msg::TuneOne),
+    Say(Msg::TuneBits),
+    Say(Msg::TuneWider),
+    Say(Msg::TuneSeed),
+    Say(Msg::TuneSeedTwo),
+    Ask(Msg::TuneAsk),
+    Run(Systems),
+    Await(Until::Finished),
+    Say(Msg::TuneAfter),
+    Say(Msg::TuneNoise),
+    Say(Msg::TuneShapeOne),
+    Say(Msg::TuneShapeTwo),
+    Say(Msg::TuneShapeThree),
+];
+
+/// Every attack, against the verifiers that just accepted the honest proofs.
+const BREAK: &[Step] = &[
+    Say(Msg::BreakOne),
+    Say(Msg::BreakTwo),
+    Ask(Msg::BreakAsk),
+    Run(Systems),
+    Await(Until::Finished),
+    Say(Msg::BreakTwoGetThrough),
+    Say(Msg::BreakWeakHash),
+    Say(Msg::BreakWeakHashTwo),
+    Say(Msg::BreakWaste),
+    Say(Msg::BreakUnchanged),
+    Say(Msg::BreakCeremony),
+    Say(Msg::BreakCeremonyIs),
+    Say(Msg::BreakPromise),
+];
+
+/// The same payment, seen by four people at once.
+const SIDES: &[Step] = &[
+    Say(Msg::SidesOne),
+    Run(Systems),
+    Await(Until::Finished),
+    Say(Msg::SidesTwo),
+    Say(Msg::SidesThree),
+    Say(Msg::SidesFour),
+    Say(Msg::SidesNullifier),
+    Say(Msg::SidesFive),
+    Say(Msg::SidesSix),
+    Say(Msg::SidesSeven),
+];
+
+const SCRIPTS: [&[Step]; 7] = [WHAT, FOUR, RUN, MESSAGES, TUNE, BREAK, SIDES];
+
+/// Something that happened, kept as numbers so it can be said again in any language.
+enum Happening {
+    Measured { stage: Stage, prove: u64, verify: u64, bytes: usize, accepted: bool },
+    Attack { stage: Stage, kind: ForgeryKind, accepted: bool },
+    Message { index: usize, total: usize, step: sigma::Step, bytes: usize },
+    Refused(Msg),
+}
+
+/// One happening, filed against the step the reader was on when it happened.
+struct Logged {
+    step: usize,
+    what: Happening,
+}
+
 pub struct Session {
-    stage: StageKind,
+    stage: usize,
+    /// How many steps of this stage have been revealed.
+    revealed: usize,
+    /// Everything that happened in this stage, oldest first.
+    log: Vec<Logged>,
+    /// How many finished systems the log has already reported.
+    reported: usize,
+    said_done: bool,
     machine: MachineProfile,
     knobs: Vec<Knob>,
     chosen: usize,
@@ -212,7 +373,11 @@ impl Session {
     pub fn new(machine: &MachineProfile) -> Self {
         let bits = halo2::Config::for_machine(machine).value_bits as u64;
         Self {
-            stage: StageKind::Brief,
+            stage: 0,
+            revealed: 0,
+            log: Vec::new(),
+            reported: 0,
+            said_done: false,
             machine: *machine,
             knobs: vec![
                 Knob::new("system", KnobValue::Choice { current: 0, count: 5 }),
@@ -309,17 +474,17 @@ impl Session {
     }
 
     fn knob_count(&self) -> usize {
-        if self.stage == StageKind::Tune { self.knobs.len() } else { 0 }
+        if self.stage == STAGE_TUNE { self.knobs.len() } else { 0 }
     }
 
     fn move_choice(&mut self, step: i32) {
         match self.stage {
-            StageKind::Tune => {
+            STAGE_TUNE => {
                 let last = self.knobs.len() - 1;
-                self.chosen = wrap(self.chosen, last, step);
+                self.chosen = step_round(self.chosen, last, step);
             }
-            StageKind::Recap => {
-                let index = wrap(self.focus.index(), Stage::ALL.len() - 1, step);
+            STAGE_SIDES => {
+                let index = step_round(self.focus.index(), Stage::ALL.len() - 1, step);
                 self.focus = Stage::ALL[index];
             }
             _ => {}
@@ -329,6 +494,11 @@ impl Session {
     // ---- Drawing -------------------------------------------------------------------
 
     /// The heading and one row per system: what it cost to prove, to check, and to keep.
+    ///
+    /// Four columns do not fit beside a conversation on an eighty-column terminal, so below a
+    /// width where a name and three numbers can both be read, the name takes a line of its own and
+    /// the numbers sit under it. Truncating "Trusted setup" to "Trusted se…" to save one row is a
+    /// bad trade: the name is how a reader knows which row they are reading.
     fn table(
         &self,
         stages: &[Stage],
@@ -336,51 +506,81 @@ impl Session {
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let name_width = width.saturating_sub(2 + NUMBER_WIDTH * 3).max(13);
-        let mut lines = vec![Line::from(vec![
-            Span::styled("  ".to_string(), theme.muted()),
-            Span::styled(pad(Msg::ColumnStage.text(language), name_width), theme.muted()),
-            Span::styled(rpad(Msg::ColumnProve.text(language), NUMBER_WIDTH), theme.muted()),
-            Span::styled(rpad(Msg::ColumnVerify.text(language), NUMBER_WIDTH), theme.muted()),
-            Span::styled(rpad(Msg::ColumnSize.text(language), NUMBER_WIDTH), theme.muted()),
-        ])];
+        const SHORTEST_NAME: usize = 13;
+        let one_line = width >= 2 + SHORTEST_NAME + NUMBER_WIDTH * 3;
+        let name_width = if one_line { width - 2 - NUMBER_WIDTH * 3 } else { 0 };
+        let numbers = |values: [String; 3], style| {
+            vec![
+                Span::styled(rpad(&values[0], NUMBER_WIDTH), style),
+                Span::styled(rpad(&values[1], NUMBER_WIDTH), style),
+                Span::styled(rpad(&values[2], NUMBER_WIDTH), style),
+            ]
+        };
+
+        let headings = [
+            Msg::ColumnProve.text(language).to_string(),
+            Msg::ColumnVerify.text(language).to_string(),
+            Msg::ColumnSize.text(language).to_string(),
+        ];
+        let mut lines = Vec::new();
+        if one_line {
+            let mut row = vec![
+                Span::styled("  ".to_string(), theme.muted()),
+                Span::styled(pad(Msg::ColumnStage.text(language), name_width), theme.muted()),
+            ];
+            row.extend(numbers(headings, theme.muted()));
+            lines.push(Line::from(row));
+        } else {
+            let mut row = vec![Span::styled("    ".to_string(), theme.muted())];
+            row.extend(numbers(headings, theme.muted()));
+            lines.push(Line::from(row));
+        }
 
         for stage in stages {
-            let name = pad(phrases::stage(*stage).text(language), name_width);
-            match self.outcome(*stage) {
+            let name = phrases::stage(*stage).text(language);
+            let (state, style, values) = match self.outcome(*stage) {
                 Some(outcome) => {
-                    let state = if outcome.honest_accepted { State::Good } else { State::Bad };
+                    let state =
+                        if outcome.honest_accepted { State::Good } else { State::Bad };
                     let measure = &outcome.measurement;
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                        Span::styled(name, theme.heading()),
-                        Span::styled(
-                            rpad(&short_time(measure.prove_nanos), NUMBER_WIDTH),
-                            theme.plain(),
-                        ),
-                        Span::styled(
-                            rpad(&short_time(measure.verify_nanos), NUMBER_WIDTH),
-                            theme.plain(),
-                        ),
-                        Span::styled(
-                            rpad(&format::bytes(measure.proof_bytes as u64), NUMBER_WIDTH),
-                            theme.plain(),
-                        ),
-                    ]));
+                    (
+                        Some(state),
+                        theme.plain(),
+                        [
+                            short_time(measure.prove_nanos),
+                            short_time(measure.verify_nanos),
+                            format::bytes(measure.proof_bytes as u64),
+                        ],
+                    )
                 }
                 None => {
                     let working = self.state == RunState::Running;
-                    let mark = if working { State::Working.mark() } else { " " };
-                    let style = if working { theme.state(State::Working) } else { theme.muted() };
-                    let blank = Msg::NotRunYet.text(language);
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{mark} "), style),
-                        Span::styled(name, theme.muted()),
-                        Span::styled(rpad(blank, NUMBER_WIDTH), theme.muted()),
-                        Span::styled(rpad(blank, NUMBER_WIDTH), theme.muted()),
-                        Span::styled(rpad(blank, NUMBER_WIDTH), theme.muted()),
-                    ]));
+                    let blank = Msg::NotRunYet.text(language).to_string();
+                    (
+                        working.then_some(State::Working),
+                        theme.muted(),
+                        [blank.clone(), blank.clone(), blank],
+                    )
                 }
+            };
+            let mark = state.map(State::mark).unwrap_or(" ");
+            let mark_style = state.map(|s| theme.state(s)).unwrap_or_else(|| theme.muted());
+            let name_style = if state.is_some() { theme.heading() } else { theme.muted() };
+            if one_line {
+                let mut row = vec![
+                    Span::styled(format!("{mark} "), mark_style),
+                    Span::styled(pad(name, name_width), name_style),
+                ];
+                row.extend(numbers(values, style));
+                lines.push(Line::from(row));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{mark} "), mark_style),
+                    Span::styled(name.to_string(), name_style),
+                ]));
+                let mut row = vec![Span::styled("    ".to_string(), style)];
+                row.extend(numbers(values, style));
+                lines.push(Line::from(row));
             }
         }
         lines
@@ -389,7 +589,7 @@ impl Session {
     /// One message of the interactive protocol, laid out as a step the reader walks through.
     fn message_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let Some(transcript) = self.transcript() else {
-            let text = if self.state == RunState::Running { Msg::RunWorking } else { Msg::RunIdle };
+            let text = Msg::RunWorking;
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         };
         let total = transcript.lines.len();
@@ -432,7 +632,7 @@ impl Session {
             lines.push(Line::from(Span::styled(preview(&line.bytes), theme.plain())));
         }
         lines.push(Line::from(""));
-        for text in wrap_text(phrases::step_why(line.step).text(language), width) {
+        for text in wrap(phrases::step_why(line.step).text(language), width) {
             lines.push(Line::from(Span::styled(text, theme.plain())));
         }
         lines
@@ -441,8 +641,7 @@ impl Session {
     /// Every attack that was made, with the verifier's answer to each.
     fn attack_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         if self.outcomes.is_empty() {
-            let text =
-                if self.state == RunState::Running { Msg::RunWorking } else { Msg::BreakIdle };
+            let text = Msg::RunWorking;
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         }
         let label_width = width.saturating_sub(2 + 10).max(20);
@@ -519,7 +718,7 @@ impl Session {
             ]),
             Line::from(""),
         ];
-        for text in wrap_text(Msg::WasteNote.text(language), width) {
+        for text in wrap(Msg::WasteNote.text(language), width) {
             lines.push(Line::from(Span::styled(text, theme.plain())));
         }
         lines.push(Line::from(""));
@@ -574,7 +773,7 @@ impl Session {
             [only] => match self.outcome(*only) {
                 Some(outcome) => {
                     let text = phrases::setup_kind(outcome.trust.setup).text(language);
-                    wrap_text(text, width.saturating_sub(label))
+                    wrap(text, width.saturating_sub(label))
                         .into_iter()
                         .enumerate()
                         .map(|(index, part)| {
@@ -592,7 +791,7 @@ impl Session {
                 }
                 None => vec![Line::from("")],
             },
-            _ => wrap_text(Msg::TuneOnlyHalo2.text(language), width)
+            _ => wrap(Msg::TuneOnlyHalo2.text(language), width)
                 .into_iter()
                 .map(|part| Line::from(Span::styled(part, theme.muted())))
                 .collect(),
@@ -624,7 +823,7 @@ impl Session {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let Some(outcome) = self.focused() else {
-            let text = if self.state == RunState::Running { Msg::RunWorking } else { Msg::RunIdle };
+            let text = Msg::RunWorking;
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         };
         let views = &outcome.views;
@@ -728,7 +927,7 @@ fn party_block(
         Span::styled(fact, theme.muted()),
     ])];
     for (label, text) in rows {
-        for (index, part) in wrap_text(text, width).into_iter().enumerate() {
+        for (index, part) in wrap(text, width).into_iter().enumerate() {
             lines.push(Line::from(vec![
                 Span::styled(
                     if index == 0 { pad(label.text(language), 7) } else { " ".repeat(7) },
@@ -758,18 +957,201 @@ fn fit(blocks: &mut [Vec<Line<'static>>], height: usize) {
     }
 }
 
+impl Session {
+    fn script(&self) -> &'static [Step] {
+        SCRIPTS[self.stage.min(SCRIPTS.len() - 1)]
+    }
+
+    /// Back to the first sentence of this stage, with nothing running and nothing said.
+    fn restart(&mut self) {
+        self.reset();
+        self.revealed = 0;
+        self.log.clear();
+        self.reported = 0;
+        self.said_done = false;
+    }
+
+    fn satisfied(&self, until: Until) -> bool {
+        match until {
+            // A failure ends the wait too, or a refused run stops the conversation for good
+            // behind a message nobody can press past.
+            Until::Finished => self.failure.is_some() || self.state == RunState::Done,
+        }
+    }
+
+    fn advance(&mut self) -> bool {
+        let script = self.script();
+        if self.revealed + 1 >= script.len() {
+            return false;
+        }
+        self.revealed += 1;
+        if let Run(deed) = script[self.revealed] {
+            match deed {
+                Systems => {
+                    self.reported = 0;
+                    self.said_done = false;
+                    let wanted = self.wanted();
+                    self.start(wanted);
+                }
+                Sigma => {
+                    self.reported = 0;
+                    self.said_done = false;
+                    self.start(vec![Stage::Sigma]);
+                }
+                Message(index) => {
+                    self.message = index;
+                    let said = match self.transcript() {
+                        Some(transcript) => transcript.lines.get(index).map(|line| {
+                            (transcript.lines.len(), line.step, line.bytes.len())
+                        }),
+                        None => None,
+                    };
+                    if let Some((total, step, bytes)) = said {
+                        self.say(Happening::Message { index, total, step, bytes });
+                    }
+                }
+            }
+            if matches!(script.get(self.revealed + 1), Some(Await(_))) {
+                self.revealed += 1;
+            }
+        }
+        true
+    }
+
+    fn say(&mut self, what: Happening) {
+        if self.log.len() < EVENT_CAP {
+            self.log.push(Logged { step: self.revealed, what });
+        }
+    }
+
+    /// Turns anything the worker has finished into beats.
+    fn notice(&mut self) {
+        let fresh: Vec<Happening> = self
+            .outcomes
+            .iter()
+            .skip(self.reported)
+            .flat_map(|outcome| {
+                let measure = &outcome.measurement;
+                let mut out = vec![Happening::Measured {
+                    stage: outcome.stage,
+                    prove: measure.prove_nanos,
+                    verify: measure.verify_nanos,
+                    bytes: measure.proof_bytes,
+                    accepted: outcome.honest_accepted,
+                }];
+                // Only the forgeries that got through are worth a line of their own; the ones the
+                // verifier caught are the table's job.
+                out.extend(outcome.forgery.attempts.iter().filter(|f| f.accepted).map(|forgery| {
+                    Happening::Attack {
+                        stage: outcome.stage,
+                        kind: forgery.kind,
+                        accepted: forgery.accepted,
+                    }
+                }));
+                out
+            })
+            .collect();
+        if !fresh.is_empty() {
+            self.reported = self.outcomes.len();
+            for what in fresh {
+                self.say(what);
+            }
+        }
+        if let Some(failure) = self.failure
+            && !self.said_done
+        {
+            self.said_done = true;
+            let message = match failure {
+                Failure::Zk(error) => phrases::why_stopped(error),
+                Failure::NoThread => Msg::ErrNoThread,
+            };
+            self.say(Happening::Refused(message));
+        }
+    }
+
+    /// One happening, said in the reader's language.
+    fn beat_for(&self, what: &Happening, language: Language) -> Beat {
+        match what {
+            Happening::Measured { stage, prove, verify, bytes, accepted } => Beat::outcome(
+                if *accepted { State::Good } else { State::Bad },
+                format!(
+                    "{}  ·  {} {}  ·  {} {}  ·  {} {}",
+                    phrases::stage(*stage).text(language),
+                    Msg::EventProved.text(language),
+                    short_time(*prove),
+                    Msg::EventVerified.text(language),
+                    short_time(*verify),
+                    Msg::EventSize.text(language),
+                    format::bytes(*bytes as u64),
+                ),
+            ),
+            Happening::Attack { stage, kind, accepted } => Beat::outcome(
+                if *accepted { State::Bad } else { State::Good },
+                format!(
+                    "{}  ·  {} {}  ·  {}",
+                    phrases::stage(*stage).text(language),
+                    Msg::EventAttack.text(language),
+                    phrases::forgery(*kind).text(language),
+                    if *accepted { Msg::VerdictAccepted } else { Msg::VerdictRejected }
+                        .text(language),
+                ),
+            ),
+            Happening::Message { index, total, step, bytes } => Beat::event(format!(
+                "{} {}/{}  ·  {}  ·  {}",
+                Msg::EventMessage.text(language),
+                index + 1,
+                total,
+                phrases::step(*step).text(language),
+                format::bytes(*bytes as u64),
+            )),
+            Happening::Refused(message) => Beat::outcome(State::Bad, message.text(language)),
+        }
+    }
+}
+
 impl KqSession for Session {
-    fn stage(&self) -> StageKind {
+    fn stage(&self) -> usize {
         self.stage
     }
 
-    fn go_to(&mut self, stage: StageKind) {
+    fn go_to(&mut self, stage: usize) {
+        if stage >= SCRIPTS.len() || stage == self.stage {
+            return;
+        }
         self.stage = stage;
         self.chosen = 0;
+        self.restart();
+    }
+
+    fn transcript(&self, language: Language) -> Vec<Beat> {
+        let script = self.script();
+        let mut beats = Vec::new();
+        for (index, step) in script.iter().enumerate().take(self.revealed + 1) {
+            match step {
+                Say(message) => beats.push(Beat::say(message.text(language))),
+                Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Run(_) | Await(_) => {}
+            }
+            for logged in self.log.iter().filter(|logged| logged.step == index) {
+                beats.push(self.beat_for(&logged.what, language));
+            }
+        }
+        beats
+    }
+
+    fn at_end(&self) -> bool {
+        self.revealed + 1 >= self.script().len()
+    }
+
+    fn can_advance(&self) -> bool {
+        match self.script().get(self.revealed) {
+            Some(Await(until)) => self.satisfied(*until),
+            _ => self.revealed + 1 < self.script().len(),
+        }
     }
 
     fn knobs(&self) -> &[Knob] {
-        if self.stage == StageKind::Tune { &self.knobs } else { &[] }
+        if self.stage == STAGE_TUNE { &self.knobs } else { &[] }
     }
 
     fn chosen_knob(&self) -> Option<usize> {
@@ -782,28 +1164,18 @@ impl KqSession for Session {
                 self.go_to(stage);
                 Reaction::Handled
             }
-            Action::Go => match self.stage {
-                StageKind::Run => {
-                    if self.state == RunState::Done && self.transcript().is_some() {
-                        self.message += 1;
-                    } else if self.state == RunState::Idle {
-                        self.start(Stage::ALL.to_vec());
-                    }
-                    Reaction::Handled
+            Action::Go => {
+                if let Some(Await(until)) = self.script().get(self.revealed)
+                    && !self.satisfied(*until)
+                {
+                    return Reaction::Ignored;
                 }
-                StageKind::Tune => {
-                    let wanted = self.wanted();
-                    self.start(wanted);
-                    Reaction::Handled
-                }
-                StageKind::Break | StageKind::Recap => {
-                    self.start(Stage::ALL.to_vec());
-                    Reaction::Handled
-                }
-                StageKind::Brief => Reaction::Ignored,
-            },
+                // The end of a stage is not the end of the quest, but walking on from here is
+                // the shell's business: it is what knows there is another stage to walk to.
+                if self.advance() { Reaction::Handled } else { Reaction::Ignored }
+            }
             Action::Reset => {
-                self.reset();
+                self.restart();
                 Reaction::Handled
             }
             Action::Next => {
@@ -860,14 +1232,21 @@ impl KqSession for Session {
     }
 
     fn tick(&mut self) {
-        let Some(runner) = &self.runner else { return };
-        let (finished, failure) = runner.drain(&mut self.outcomes);
-        if let Some(failure) = failure {
-            self.failure = Some(failure);
+        if let Some(runner) = &self.runner {
+            let (finished, failure) = runner.drain(&mut self.outcomes);
+            if let Some(failure) = failure {
+                self.failure = Some(failure);
+            }
+            if finished {
+                self.state = RunState::Done;
+                self.stop();
+            }
         }
-        if finished {
-            self.state = RunState::Done;
-            self.stop();
+        self.notice();
+        if let Some(Await(until)) = self.script().get(self.revealed)
+            && self.satisfied(*until)
+        {
+            self.advance();
         }
     }
 
@@ -875,51 +1254,16 @@ impl KqSession for Session {
         self.state
     }
 
-    fn explain(&self, language: Language) -> Vec<Line<'static>> {
-        let paragraphs: &[Msg] = match self.stage {
-            StageKind::Brief => &[
-                Msg::BriefOpening,
-                Msg::BriefEveryday,
-                Msg::BriefChain,
-                Msg::BriefWhy,
-                Msg::BriefLineage,
-                Msg::BriefPromise,
-            ],
-            StageKind::Run => &[Msg::RunExplainOne, Msg::RunExplainTwo, Msg::RunExplainThree],
-            StageKind::Tune => &[Msg::TuneExplainOne, Msg::TuneExplainTwo, Msg::TuneExplainThree],
-            StageKind::Break => &[
-                Msg::BreakExplainOne,
-                Msg::BreakExplainTwo,
-                Msg::BreakExplainThree,
-                Msg::BreakExplainFour,
-            ],
-            StageKind::Recap => &[
-                Msg::RecapExplainOne,
-                Msg::RecapExplainTwo,
-                Msg::RecapExplainThree,
-                Msg::RecapExplainFour,
-            ],
-        };
-        let mut lines = Vec::new();
-        for (index, message) in paragraphs.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(message.text(language)));
-        }
-        lines
-    }
-
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let title = match self.stage {
-            StageKind::Brief => Msg::BriefPanelTitle,
-            StageKind::Run => Msg::RunTitle,
-            StageKind::Tune => Msg::TuneTitle,
-            StageKind::Break => Msg::BreakTitle,
-            StageKind::Recap => Msg::RecapTitle,
+            STAGE_RUN | STAGE_MESSAGES => Msg::RunTitle,
+            STAGE_TUNE => Msg::TuneTitle,
+            STAGE_BREAK => Msg::BreakTitle,
+            STAGE_SIDES => Msg::RecapTitle,
+            _ => Msg::BriefPanelTitle,
         };
         let heading = match self.stage {
-            StageKind::Recap => match self.focused() {
+            STAGE_SIDES => match self.focused() {
                 Some(outcome) => format!(
                     "{}  ·  {}",
                     title.text(language),
@@ -944,7 +1288,7 @@ impl KqSession for Session {
                 Msg::ErrorTitle.text(language).to_string(),
                 theme.state(State::Bad),
             ))];
-            for text in wrap_text(message.text(language), width) {
+            for text in wrap(message.text(language), width) {
                 lines.push(Line::from(Span::styled(text, theme.plain())));
             }
             frame.render_widget(Paragraph::new(lines), inner);
@@ -952,46 +1296,19 @@ impl KqSession for Session {
         }
 
         match self.stage {
-            StageKind::Brief => {
-                let mut lines = Vec::new();
-                for stage in Stage::ALL {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{}  ", stage.index() + 1),
-                            theme.state(State::Chosen),
-                        ),
-                        Span::styled(
-                            phrases::stage(stage).text(language).to_string(),
-                            theme.heading(),
-                        ),
-                    ]));
-                    for text in wrap_text(
-                        phrases::stage_brief(stage).text(language),
-                        width.saturating_sub(3),
-                    ) {
-                        lines.push(Line::from(Span::styled(format!("   {text}"), theme.plain())));
-                    }
-                    lines.push(Line::from(""));
-                }
-                lines.push(Line::from(Span::styled(
-                    Msg::BriefStart.text(language).to_string(),
-                    theme.muted(),
-                )));
-                frame.render_widget(Paragraph::new(lines), inner);
-            }
-            StageKind::Run => {
-                let table = self.table(&Stage::ALL, width, language, theme);
-                let rows = table.len() as u16;
-                let [top, bottom] =
-                    Layout::vertical([Constraint::Length(rows + 1), Constraint::Min(1)])
-                        .areas(inner);
-                frame.render_widget(Paragraph::new(table), top);
+            STAGE_RUN => {
                 frame.render_widget(
-                    Paragraph::new(self.message_lines(width, language, theme)),
-                    bottom,
+                    Paragraph::new(self.table(&Stage::ALL, width, language, theme)),
+                    inner,
                 );
             }
-            StageKind::Tune => {
+            STAGE_MESSAGES => {
+                frame.render_widget(
+                    Paragraph::new(self.message_lines(width, language, theme)),
+                    inner,
+                );
+            }
+            STAGE_TUNE => {
                 let mut knobs = self.knob_lines(language, theme);
                 let stages = self.wanted();
                 knobs.push(Line::from(""));
@@ -1021,34 +1338,57 @@ impl KqSession for Session {
                     widgets::stats(frame, stats_area, theme, &rows);
                 }
             }
-            StageKind::Break => {
+            STAGE_BREAK => {
                 frame.render_widget(
                     Paragraph::new(self.attack_lines(width, language, theme)),
                     inner,
                 );
             }
-            StageKind::Recap => {
+            STAGE_SIDES => {
                 frame.render_widget(
                     Paragraph::new(self.recap_lines(width, height, language, theme)),
                     inner,
                 );
+            }
+            _ => {
+                let mut lines = Vec::new();
+                for stage in Stage::ALL {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{}  ", stage.index() + 1),
+                            theme.state(State::Chosen),
+                        ),
+                        Span::styled(
+                            phrases::stage(stage).text(language).to_string(),
+                            theme.heading(),
+                        ),
+                    ]));
+                    for text in wrap(
+                        phrases::stage_brief(stage).text(language),
+                        width.saturating_sub(3),
+                    ) {
+                        lines.push(Line::from(Span::styled(format!("   {text}"), theme.plain())));
+                    }
+                    lines.push(Line::from(""));
+                }
+                frame.render_widget(Paragraph::new(lines), inner);
             }
         }
     }
 
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)> {
         match self.stage {
-            StageKind::Run if self.transcript().is_some() => {
-                vec![("Enter", Msg::KeyNextMessage.text(language))]
-            }
-            StageKind::Tune => vec![
-                ("←→", Msg::KnobStage.text(language)),
-                ("Enter", Msg::KeyRunAgain.text(language)),
+            STAGE_TUNE => vec![
+                ("↑↓ ←→", Msg::KnobStage.text(language)),
+                ("0-9", Msg::KeyTypeNumber.text(language)),
             ],
-            StageKind::Break => vec![("Enter", Msg::KeyRunAttacks.text(language))],
-            StageKind::Recap => vec![("↑↓", Msg::KeySystem.text(language))],
+            STAGE_SIDES => vec![("↑↓", Msg::KeySystem.text(language))],
             _ => Vec::new(),
         }
+    }
+
+    fn typing(&self) -> bool {
+        self.knob_count() > 0 && self.knobs[self.chosen].draft().is_some()
     }
 
     fn close(&mut self) {
@@ -1073,7 +1413,7 @@ fn claims(claims: &[nmtk_zk::Claim], language: Language) -> String {
 }
 
 /// Moves a cursor one step, wrapping at both ends.
-fn wrap(current: usize, last: usize, step: i32) -> usize {
+fn step_round(current: usize, last: usize, step: i32) -> usize {
     if step > 0 {
         if current >= last { 0 } else { current + 1 }
     } else if current == 0 {
@@ -1081,27 +1421,6 @@ fn wrap(current: usize, last: usize, step: i32) -> usize {
     } else {
         current - 1
     }
-}
-
-/// `text` padded to `width` columns, counting characters rather than bytes.
-fn pad(text: &str, width: usize) -> String {
-    let used = text.chars().count();
-    let mut out = text.to_string();
-    for _ in used..width {
-        out.push(' ');
-    }
-    out
-}
-
-/// `text` pushed to the right of `width` columns, so numbers line up under their heading.
-fn rpad(text: &str, width: usize) -> String {
-    let used = text.chars().count();
-    let mut out = String::new();
-    for _ in used..width {
-        out.push(' ');
-    }
-    out.push_str(text);
-    out
 }
 
 /// A span of time in the unit that leaves a digit in front of the point.
@@ -1126,28 +1445,3 @@ fn preview(bytes: &[u8]) -> String {
     if bytes.len() > 8 { format!("{} ...", head.join(" ")) } else { head.join(" ") }
 }
 
-/// Breaks text into lines of at most `width` columns, on spaces.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        let extra = usize::from(!current.is_empty());
-        if !current.is_empty() && current.chars().count() + extra + word.chars().count() > width {
-            lines.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push(' ');
-        }
-        current.push_str(word);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}

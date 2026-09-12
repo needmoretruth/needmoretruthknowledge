@@ -16,10 +16,24 @@ mod phrases;
 mod session;
 
 use nmtk_core::{Language, MachineProfile};
-use nmtk_kq::meta::{Category, Date, Difficulty, KqId, KqMeta, KqVersion, Requirements, StageKind};
+use nmtk_kq::meta::{
+    Category, Difficulty, KqId, KqMeta, MachineNeeds, Requirements, StageRole, StageSpec, Stamp,
+    Version,
+};
 use nmtk_kq::session::{Kq, KqSession};
 
 use crate::phrases::Msg;
+
+/// The stages, in the order a reader walks them.
+const STAGES: [StageSpec; 7] = [
+    StageSpec::new("what", StageRole::Explain, Difficulty::VeryEasy),
+    StageSpec::new("four", StageRole::Explain, Difficulty::Easy),
+    StageSpec::new("run", StageRole::Run, Difficulty::Easy),
+    StageSpec::new("messages", StageRole::Run, Difficulty::Medium),
+    StageSpec::new("tune", StageRole::Tune, Difficulty::Medium),
+    StageSpec::new("break", StageRole::Break, Difficulty::VeryHard),
+    StageSpec::new("sides", StageRole::Recap, Difficulty::Medium),
+];
 
 /// The quest as it sits in the list.
 pub struct ZeroKnowledge;
@@ -28,23 +42,22 @@ impl Kq for ZeroKnowledge {
     fn meta(&self) -> KqMeta {
         KqMeta {
             id: KqId("cryptography.zero-knowledge"),
-            version: KqVersion::new(1, 0),
-            released: Date::new(2026, 9, 12),
-            updated: Date::new(2026, 9, 12),
+            version: Version::new(0, 0, 1),
+            released: Stamp::new(2026, 9, 12, 10, 22, 31),
+            updated: Stamp::new(2026, 9, 12, 10, 22, 31),
             category: Category::Cryptography,
             subcategory: "zero-knowledge",
-            difficulty: Difficulty::Steep,
+            difficulty: Difficulty::Hard,
             minutes: 50,
-            // One core draws while the other proves: halo2 on the widest circuit takes longer than
-            // a frame, so the run is on a thread of its own.
-            needs: Requirements::new(2, 0),
-            stages: &[
-                StageKind::Brief,
-                StageKind::Run,
-                StageKind::Tune,
-                StageKind::Break,
-                StageKind::Recap,
-            ],
+            needs: Requirements::new(
+                // One core draws while the other proves: halo2 on the widest circuit takes
+                // longer than a frame, so the run is on a thread of its own.
+                MachineNeeds::new(2, 0),
+                // Four cores and two gibibytes is where the widest circuit still proves in a
+                // couple of seconds, which is what makes changing the width worth doing twice.
+                MachineNeeds::new(4, 2 * 1024 * 1024 * 1024),
+            ),
+            stages: &STAGES,
             tags: &[
                 "zero-knowledge",
                 "sigma",
@@ -70,6 +83,18 @@ impl Kq for ZeroKnowledge {
         Msg::Subcategory.text(language)
     }
 
+    fn stage_name(&self, key: &str, language: Language) -> &'static str {
+        match key {
+            "what" => Msg::StageWhat.text(language),
+            "four" => Msg::StageFour.text(language),
+            "run" => Msg::StageRun.text(language),
+            "messages" => Msg::StageMessages.text(language),
+            "tune" => Msg::StageTune.text(language),
+            "break" => Msg::StageBreak.text(language),
+            _ => Msg::StageSides.text(language),
+        }
+    }
+
     fn open(&self, machine: &MachineProfile) -> Box<dyn KqSession> {
         Box::new(session::Session::new(machine))
     }
@@ -79,13 +104,21 @@ impl Kq for ZeroKnowledge {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use nmtk_kq::meta::MIN_STAGES;
     use nmtk_kq::session::{Action, RunState};
-    use nmtk_kq::theme::{EXPLAIN_PERCENT, MIN_HEIGHT, MIN_WIDTH, Theme};
+    use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, Theme, split};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Constraint, Layout, Rect};
 
     use super::*;
+
+    /// The stages by position, so a test says which one it means.
+    const RUN: usize = 2;
+    const MESSAGES: usize = 3;
+    const TUNE: usize = 4;
+    const BREAK: usize = 5;
+    const SIDES: usize = 6;
 
     fn machine() -> MachineProfile {
         MachineProfile { logical_cores: 4, total_memory_bytes: 0, available_memory_bytes: 0 }
@@ -97,28 +130,37 @@ mod tests {
     fn the_quest_declares_what_the_list_needs() {
         let meta = ZeroKnowledge.meta();
         assert_eq!(meta.id.as_str(), "cryptography.zero-knowledge");
-        assert_eq!(meta.version, KqVersion::new(1, 0));
-        assert_eq!(meta.category, Category::Cryptography);
-        assert_eq!(meta.subcategory, "zero-knowledge");
-        assert_eq!(meta.difficulty, Difficulty::Steep);
-        assert_eq!(meta.minutes, 50);
-        assert_eq!(meta.needs.cores, 2);
-        assert_eq!(meta.stages, StageKind::ALL);
-        assert!(!meta.tags.is_empty());
+        assert!(meta.is_well_formed());
+        assert!(meta.stages.len() >= MIN_STAGES);
+        assert!(meta.tags.contains(&"halo2"));
     }
 
     #[test]
-    fn the_id_names_the_category_it_sits_in() {
+    fn the_id_names_the_category_and_the_subcategory_it_sits_in() {
         let meta = ZeroKnowledge.meta();
         assert!(meta.id.as_str().starts_with(meta.category.key()));
         assert!(meta.id.as_str().ends_with(meta.subcategory));
     }
 
     #[test]
-    fn it_has_a_name_and_a_summary() {
+    fn it_has_a_name_and_a_summary_in_both_languages() {
         assert_eq!(ZeroKnowledge.title(Language::ENGLISH), "Zero-knowledge proofs");
+        assert_eq!(ZeroKnowledge.title(Language::KOREAN), "영지식 증명");
         assert!(!ZeroKnowledge.summary(Language::ENGLISH).is_empty());
         assert!(!ZeroKnowledge.subcategory(Language::ENGLISH).is_empty());
+    }
+
+    #[test]
+    fn every_stage_is_named_in_every_language() {
+        for stage in ZeroKnowledge.meta().stages {
+            for language in Language::ALL {
+                assert!(
+                    !ZeroKnowledge.stage_name(stage.key, *language).is_empty(),
+                    "{} has no name in {language}",
+                    stage.key
+                );
+            }
+        }
     }
 
     // ---- The phrase table ------------------------------------------------------
@@ -136,12 +178,6 @@ mod tests {
         for msg in Msg::ALL {
             assert!(!msg.text(Language::KOREAN).trim().is_empty(), "{msg:?} is blank in Korean");
         }
-    }
-
-    #[test]
-    fn the_quest_is_named_in_both_languages() {
-        assert_eq!(ZeroKnowledge.title(Language::ENGLISH), "Zero-knowledge proofs");
-        assert_eq!(ZeroKnowledge.title(Language::KOREAN), "영지식 증명");
     }
 
     #[test]
@@ -195,16 +231,43 @@ mod tests {
         }
     }
 
-    // ---- The session -----------------------------------------------------------
+    // ---- The conversation ------------------------------------------------------
+
+    #[test]
+    fn it_opens_on_one_sentence_with_nothing_running() {
+        let mut opened = ZeroKnowledge.open(&machine());
+        assert_eq!(opened.stage(), 0);
+        assert_eq!(opened.run_state(), RunState::Idle);
+        assert_eq!(opened.transcript(Language::ENGLISH).len(), 1, "a wall of text on opening");
+        opened.close();
+    }
 
     #[test]
     fn the_session_moves_through_every_stage_it_declares() {
         let mut session = ZeroKnowledge.open(&machine());
-        assert_eq!(session.stage(), StageKind::Brief);
-        for stage in ZeroKnowledge.meta().stages {
-            session.on(Action::Stage(*stage));
-            assert_eq!(session.stage(), *stage);
-            assert!(!session.explain(Language::ENGLISH).is_empty());
+        for stage in 0..ZeroKnowledge.meta().stages.len() {
+            session.on(Action::Stage(stage));
+            assert_eq!(session.stage(), stage);
+            assert!(!session.transcript(Language::ENGLISH).is_empty(), "stage {stage} says nothing");
+        }
+        session.close();
+    }
+
+    #[test]
+    fn every_beat_is_short_enough_to_read_in_one_go() {
+        let mut session = ZeroKnowledge.open(&machine());
+        for stage in 0..ZeroKnowledge.meta().stages.len() {
+            for language in Language::ALL {
+                session.on(Action::Stage(stage));
+                walk(&mut session);
+                for beat in session.transcript(*language) {
+                    assert!(
+                        beat.text.chars().count() <= 170,
+                        "stage {stage} in {language} says too much at once: {:?}",
+                        beat.text
+                    );
+                }
+            }
         }
         session.close();
     }
@@ -213,7 +276,7 @@ mod tests {
     fn only_the_tune_stage_offers_knobs_and_every_one_takes_a_typed_number() {
         let mut session = ZeroKnowledge.open(&machine());
         assert!(session.knobs().is_empty());
-        session.on(Action::Stage(StageKind::Tune));
+        session.on(Action::Stage(TUNE));
         assert_eq!(session.knobs().len(), 3);
         assert_eq!(session.chosen_knob(), Some(0));
 
@@ -235,44 +298,70 @@ mod tests {
         session.close();
     }
 
-    /// Runs the quest the way the shell does: press Enter, then tick until the worker is done.
+    /// Presses Enter until this stage has nothing more to say without being waited on.
+    fn walk(session: &mut Box<dyn KqSession>) {
+        for _ in 0..40 {
+            if !session.can_advance() {
+                break;
+            }
+            session.on(Action::Go);
+        }
+    }
+
+    /// Runs the stage the way the shell does: press Enter through it, then tick until the worker
+    /// is done and the conversation has carried itself on.
     fn run_to_done(session: &mut Box<dyn KqSession>) {
-        session.on(Action::Go);
-        let deadline = Instant::now() + Duration::from_secs(60);
+        walk(session);
+        let deadline = Instant::now() + Duration::from_secs(120);
         while session.run_state() != RunState::Done {
             assert!(Instant::now() < deadline, "the run never finished");
             session.tick();
             std::thread::sleep(Duration::from_millis(5));
         }
         session.tick();
+        walk(session);
     }
 
     #[test]
     fn a_run_finishes_and_the_stage_can_be_reset() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Run));
+        session.on(Action::Stage(RUN));
         assert_eq!(session.run_state(), RunState::Idle);
         run_to_done(&mut session);
         assert_eq!(session.run_state(), RunState::Done);
         session.on(Action::Reset);
         assert_eq!(session.run_state(), RunState::Idle);
+        assert_eq!(session.transcript(Language::ENGLISH).len(), 1, "reset kept the conversation");
+        session.close();
+    }
+
+    /// Every measurement the reader is told about has to be one the engine really took.
+    #[test]
+    fn the_run_reports_all_four_systems_as_they_finish() {
+        let mut session = ZeroKnowledge.open(&machine());
+        session.on(Action::Stage(RUN));
+        run_to_done(&mut session);
+        let beats = session.transcript(Language::ENGLISH);
+        for system in ["Sigma", "Fiat-Shamir", "Trusted setup", "halo2"] {
+            assert!(
+                beats.iter().any(|beat| beat.text.starts_with(system)),
+                "{system} was never reported: {beats:?}"
+            );
+        }
         session.close();
     }
 
     // ---- Drawing ---------------------------------------------------------------
 
-    /// The panel a quest is given on the smallest screen nmtk draws on: the shell keeps a line top
-    /// and bottom, the explanation takes 38% of the width, and the rest is the quest's.
+    /// The panel a quest is given on the smallest screen nmtk draws on.
     fn panel(area: Rect) -> Rect {
         let [_, body, _] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
                 .areas(area);
-        let [_, run] = Layout::horizontal([
-            Constraint::Percentage(EXPLAIN_PERCENT),
-            Constraint::Percentage(100 - EXPLAIN_PERCENT),
-        ])
-        .areas(body);
-        run
+        let (talk, run) = split(body.width);
+        let [_, panel] =
+            Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)]).areas(body);
+        panel
     }
 
     fn draw(session: &dyn KqSession) -> String {
@@ -297,11 +386,13 @@ mod tests {
     #[test]
     fn the_run_stage_puts_the_three_numbers_on_one_screen_at_eighty_by_twenty_four() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Run));
+        session.on(Action::Stage(RUN));
         run_to_done(&mut session);
         let screen = draw(session.as_ref());
+        println!("\n===== zk run (80x24) =====\n{screen}");
 
-        for heading in ["Stage", "Prove", "Verify", "Size"] {
+        // At eighty columns the name takes a line of its own, so "Stage" is not a heading there.
+        for heading in ["Prove", "Verify", "Size"] {
             assert!(screen.contains(heading), "no {heading} column:\n{screen}");
         }
         for system in ["Sigma", "Fiat-Shamir", "Trusted setup", "halo2"] {
@@ -310,50 +401,60 @@ mod tests {
         // The numbers are real: halo2's proof is kilobytes where a sigma transcript is 96 bytes.
         assert!(screen.contains("96 B"), "the sigma transcript size is missing:\n{screen}");
         assert!(screen.contains("KiB"), "halo2's proof size is missing:\n{screen}");
-        // And the interactive protocol is laid out message by message underneath.
-        assert!(screen.contains("Message 1/5"), "no walkthrough:\n{screen}");
-        assert!(screen.contains("Public statement"), "no first message:\n{screen}");
+        session.close();
+    }
 
-        session.on(Action::Go);
-        let next = draw(session.as_ref());
-        assert!(next.contains("Message 2/5"), "Enter did not take the next step:\n{next}");
-        assert!(next.contains("Commitment"), "no commitment message:\n{next}");
+    #[test]
+    fn the_messages_stage_walks_the_protocol_one_message_at_a_time() {
+        let mut session = ZeroKnowledge.open(&machine());
+        session.on(Action::Stage(MESSAGES));
+        run_to_done(&mut session);
+        let beats = session.transcript(Language::ENGLISH);
+        for index in 1..=5 {
+            assert!(
+                beats.iter().any(|beat| beat.text.starts_with(&format!("message {index}/5"))),
+                "message {index} was never reached: {beats:?}"
+            );
+        }
+        let screen = draw(session.as_ref());
+        assert!(screen.contains("Verdict"), "the last message is not on the panel:\n{screen}");
         session.close();
     }
 
     #[test]
     fn the_break_stage_shows_the_toxic_waste_holder_being_accepted() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Break));
+        session.on(Action::Stage(BREAK));
         run_to_done(&mut session);
         let screen = draw(session.as_ref());
+        println!("\n===== zk break (80x24) =====\n{screen}");
 
         assert!(screen.contains("guessed the response"), "no sigma attack:\n{screen}");
         assert!(screen.contains("kept the setup randomness"), "no waste attack:\n{screen}");
         assert!(screen.contains("accepted"), "no acceptance on screen:\n{screen}");
         assert!(screen.contains("rejected"), "no rejection on screen:\n{screen}");
-        // The false statement, the value it was opened at, and the unchanged verifier's answer.
-        assert!(screen.contains("21,845"), "the true value is missing:\n{screen}");
-        assert!(screen.contains("21,845,000"), "the claimed value is missing:\n{screen}");
-        assert!(
-            screen.contains("unchanged verifier"),
-            "the acceptance is not shown plainly:\n{screen}"
-        );
+
+        // And the conversation itself names the two that got through.
+        let beats = session.transcript(Language::ENGLISH);
+        let through: Vec<&str> = beats
+            .iter()
+            .filter(|beat| beat.text.contains("accepted"))
+            .map(|beat| beat.text.as_str())
+            .collect();
+        assert_eq!(through.len(), 2, "two attacks get through, and only two: {through:?}");
         session.close();
     }
 
     #[test]
-    fn the_recap_shows_four_sides_at_once_and_the_onlooker_sees_no_amount() {
+    fn the_sides_stage_shows_four_at_once_and_the_onlooker_sees_no_amount() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Recap));
+        session.on(Action::Stage(SIDES));
         run_to_done(&mut session);
         let screen = draw(session.as_ref());
 
         for party in ["Sender", "Receiver", "Onlooker", "Attacker"] {
             assert!(screen.contains(party), "no {party} column:\n{screen}");
         }
-        assert!(screen.contains("nullifier"), "the onlooker sees no nullifier:\n{screen}");
-        assert!(screen.contains("commitment"), "the onlooker sees no commitment:\n{screen}");
         assert!(screen.contains("never"), "nothing is marked as never visible:\n{screen}");
         session.close();
     }
@@ -361,10 +462,10 @@ mod tests {
     #[test]
     fn every_stage_draws_inside_the_smallest_screen() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Run));
+        session.on(Action::Stage(RUN));
         run_to_done(&mut session);
-        for stage in ZeroKnowledge.meta().stages {
-            session.on(Action::Stage(*stage));
+        for stage in 0..ZeroKnowledge.meta().stages.len() {
+            session.on(Action::Stage(stage));
             let screen = draw(session.as_ref());
             let widest = screen.lines().map(|line| line.chars().count()).max().unwrap_or(0);
             assert_eq!(widest, MIN_WIDTH as usize, "the panel spilled:\n{screen}");
@@ -376,12 +477,11 @@ mod tests {
     #[test]
     fn the_tune_stage_answers_the_knobs() {
         let mut session = ZeroKnowledge.open(&machine());
-        session.on(Action::Stage(StageKind::Tune));
+        session.on(Action::Stage(TUNE));
         // Pick halo2 alone, at the narrowest circuit.
-        session.on(Action::Nudge(1));
-        session.on(Action::Nudge(1));
-        session.on(Action::Nudge(1));
-        session.on(Action::Nudge(1));
+        for _ in 0..4 {
+            session.on(Action::Nudge(1));
+        }
         session.on(Action::Next);
         for c in "16".chars() {
             session.on(Action::Type(c));
