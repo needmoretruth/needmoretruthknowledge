@@ -109,7 +109,7 @@ git clone https://github.com/needmoretruth/needmoretruthknowledge.git && cd need
 
 | 키 | 하는 일 |
 |---|---|
-| `Enter` | 대화를 이어 가기, 또는 입력한 숫자 확정 |
+| `Enter` | 대화를 이어 가기 — 값을 정하는 단계에서는 화면의 값으로 실행하기 |
 | `Tab` | 퀘스트의 다음 단계 (`Shift+Tab`은 앞 단계) |
 | `↑` `↓` | 바꿀 값 고르기 |
 | `←` `→` 또는 `0`–`9` | 그 값 바꾸기. 화살표로도, 원하는 숫자를 직접 쳐서도 |

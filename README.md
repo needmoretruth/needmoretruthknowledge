@@ -112,7 +112,7 @@ The only key you need to start is `Enter`.
 
 | Key | What it does |
 |---|---|
-| `Enter` | carry the conversation on, or accept a typed number |
+| `Enter` | carry the conversation on — and, where the stage has values to set, run it with the ones on screen |
 | `Tab` | the next stage of the quest (`Shift+Tab` for the one before) |
 | `↑` `↓` | choose a value to change |
 | `←` `→` or `0`–`9` | change it, by arrow or by typing the number you want |

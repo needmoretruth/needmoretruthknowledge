@@ -243,6 +243,28 @@ the run was not the one the conversation asked for.
 A `Run` followed by an `Await` is one move: the reader presses Enter once and the waiting begins,
 because a key whose only effect is to skip the answer is not worth offering.
 
+**Enter runs the bench.** On a stage with knobs, once the conversation has said everything it has
+to say, Enter runs the work again with the values now on screen — and it does the same when the
+reader turns a knob while the work is running. Walking to another stage is Tab's job, and only
+Tab's. A reader who follows "set it to 51% and press Enter" and is carried into the next stage
+instead has been told a lie by the key bar; a quest names what Enter does with `go_name`.
+
+**A recap is composed from the whole quest, never from the last snapshot lying around.** Keep a
+record that every run writes into — blocks mined, fastest rate, each attack and how it ended — and
+build the closing stage out of `Tell`s that read it. The last run is not the quest: a reader who
+mined thirty-seven blocks and then ran a four-block experiment was told they had mined four.
+
+**A typed number that falls outside a knob's range lands on the nearest end, and the screen says
+where it landed.** Putting the old value back without a word reads as a broken key.
+
+**A number shown as a percentage is a part of a whole.** Anything else — a weight, a multiple — is
+shown as a plain number. Three miners whose weights read 60%, 40% and 50% look like a screen that
+cannot add.
+
+**Every word on screen is explained at or before its first appearance**, in the same stage, in one
+sentence: hash, bit, byte, nonce, node, gradient. A reader who meets an unexplained word stops
+reading the screen and starts guessing.
+
 The engine it drives is a separate crate and knows nothing about any of this.
 
 ## 12. Checklist before a quest ships
@@ -251,7 +273,11 @@ The engine it drives is a separate crate and knows nothing about any of this.
 - [ ] Every beat is one or two sentences and passes the length test.
 - [ ] The first beat of the first stage is understandable by someone who has never heard of the
       subject.
-- [ ] Every value a reader can turn accepts typed numbers as well as arrows.
+- [ ] Every value a reader can turn accepts typed numbers as well as arrows, and says where a
+      number outside its range landed.
+- [ ] On every stage with knobs, Enter runs it with the values on screen.
+- [ ] Every word the screens use is explained at or before its first appearance.
+- [ ] The closing stage is composed from the record of the whole quest.
 - [ ] Every claim the prose makes about the engine is covered by a test.
 - [ ] The quest reads at 80×24, and in every language it declares.
 - [ ] `Requirements` are honest on a small machine.
