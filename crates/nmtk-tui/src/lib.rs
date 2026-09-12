@@ -231,7 +231,10 @@ mod tests {
         let text = shot(&mut app, 80, 24);
         println!("\n===== quests (80x24) =====\n{text}");
         assert!(text.contains("Ledger models"), "the quest is missing:\n{text}");
-        assert!(text.contains("v0.0.1"), "the version is missing:\n{text}");
+        // Read from the quest rather than written out here, so a release moves one number and
+        // not two. What this checks is that the shelf prints it at all.
+        let version = format!("v{}", app.visible()[app.list_index].meta().version);
+        assert!(text.contains(&version), "{version} is missing:\n{text}");
     }
 
     #[test]

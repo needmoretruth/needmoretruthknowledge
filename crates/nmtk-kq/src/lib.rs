@@ -36,9 +36,9 @@
 //!
 //! # Versions
 //!
-//! There is one version number for the whole program, starting at `0.0.1`, and a quest's version
-//! is the nmtk version it was last shipped in. It rises when something is pushed, never while work
-//! is in progress. Old versions stay in the program and stay openable, because a reader who
+//! There is one version number for the whole program, and a quest's version is the nmtk version it
+//! was last shipped in. It rises when something is pushed, never while work is in progress, and
+//! `1.0.0` waits for a deliberate decision rather than arriving by accident. Old versions stay in the program and stay openable, because a reader who
 //! learned from one should be able to go back to exactly what they saw.
 
 pub mod catalogue;

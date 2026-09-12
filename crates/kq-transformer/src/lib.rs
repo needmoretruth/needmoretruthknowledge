@@ -39,9 +39,9 @@ impl Kq for Transformer {
     fn meta(&self) -> KqMeta {
         KqMeta {
             id: KqId("machine-learning.transformer"),
-            version: Version::new(0, 0, 1),
+            version: Version::new(0, 1, 1),
             released: Stamp::new(2026, 9, 12, 10, 20, 48),
-            updated: Stamp::new(2026, 9, 12, 12, 16, 38),
+            updated: Stamp::new(2026, 9, 12, 12, 28, 17),
             category: Category::MachineLearning,
             subcategory: "architectures",
             difficulty: Difficulty::Hard,

@@ -144,7 +144,7 @@ three.
 
 ## 6. Versions
 
-- nmtk and every quest start at **0.0.1**.
+- nmtk and every quest carry **one number**, and it starts well below `1.0.0`.
 - **A push is a version bump.** Not a date, not a day's work — the push.
 - A quest's version is **the nmtk version it shipped in**. They move together.
 - Minor or patch is a judgement call; `1.0.0` only on an explicit instruction.
