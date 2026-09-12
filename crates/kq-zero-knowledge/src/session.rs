@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
-use nmtk_kq::text::{pad, rpad, wrap};
+use nmtk_kq::text::{self, column, pad, rpad, wrap};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::widgets;
 use nmtk_zk::{
@@ -44,6 +44,12 @@ const KNOB_SEED: usize = 2;
 
 /// Columns the three numbers take, so the four rows line up under their headings.
 const NUMBER_WIDTH: usize = 9;
+
+/// Cells the numbers in the toxic-waste block are right-aligned in.
+const WASTE_VALUE_WIDTH: usize = 14;
+
+/// Cells a value needs beside a label before the pair stops being worth drawing as two columns.
+const VALUE_MIN: usize = 12;
 
 /// What the worker has finished so far.
 #[derive(Default)]
@@ -448,12 +454,23 @@ impl Session {
         self.runner = None;
     }
 
-    fn reset(&mut self) {
+    /// Stops whatever is running and forgets what is being said about it, keeping what finished
+    /// runs measured.
+    ///
+    /// Moving between stages goes through here. The last stage draws its four viewpoints out of
+    /// `outcomes`, so clearing them on the way in left the reader looking at an empty panel after
+    /// running everything.
+    fn stop_and_forget_the_telling(&mut self) {
         self.stop();
-        self.outcomes.clear();
         self.failure = None;
         self.message = 0;
         self.state = RunState::Idle;
+    }
+
+    /// Throws away what the runs measured. Pressing `r` is the one thing that does this.
+    fn forget_results(&mut self) {
+        self.stop_and_forget_the_telling();
+        self.outcomes.clear();
     }
 
     fn outcome(&self, stage: Stage) -> Option<&StageOutcome> {
@@ -517,6 +534,19 @@ impl Session {
             ]
         };
 
+        // One unit for the proving column and one for the verifying column, taken from the
+        // slowest row in each. Per-value units made the slowest system look like the fastest.
+        let measured = |pick: fn(&Measurement) -> u64| {
+            stages
+                .iter()
+                .filter_map(|stage| self.outcome(*stage))
+                .map(|outcome| pick(&outcome.measurement))
+                .max()
+                .unwrap_or(0)
+        };
+        let prove_unit = unit_for(measured(|m| m.prove_nanos));
+        let verify_unit = unit_for(measured(|m| m.verify_nanos));
+
         let headings = [
             Msg::ColumnProve.text(language).to_string(),
             Msg::ColumnVerify.text(language).to_string(),
@@ -526,7 +556,7 @@ impl Session {
         if one_line {
             let mut row = vec![
                 Span::styled("  ".to_string(), theme.muted()),
-                Span::styled(pad(Msg::ColumnStage.text(language), name_width), theme.muted()),
+                Span::styled(column(Msg::ColumnStage.text(language), name_width), theme.muted()),
             ];
             row.extend(numbers(headings, theme.muted()));
             lines.push(Line::from(row));
@@ -540,15 +570,14 @@ impl Session {
             let name = phrases::stage(*stage).text(language);
             let (state, style, values) = match self.outcome(*stage) {
                 Some(outcome) => {
-                    let state =
-                        if outcome.honest_accepted { State::Good } else { State::Bad };
+                    let state = if outcome.honest_accepted { State::Good } else { State::Bad };
                     let measure = &outcome.measurement;
                     (
                         Some(state),
                         theme.plain(),
                         [
-                            short_time(measure.prove_nanos),
-                            short_time(measure.verify_nanos),
+                            time_in(measure.prove_nanos, prove_unit),
+                            time_in(measure.verify_nanos, verify_unit),
                             format::bytes(measure.proof_bytes as u64),
                         ],
                     )
@@ -569,7 +598,7 @@ impl Session {
             if one_line {
                 let mut row = vec![
                     Span::styled(format!("{mark} "), mark_style),
-                    Span::styled(pad(name, name_width), name_style),
+                    Span::styled(column(name, name_width), name_style),
                 ];
                 row.extend(numbers(values, style));
                 lines.push(Line::from(row));
@@ -644,7 +673,16 @@ impl Session {
             let text = Msg::RunWorking;
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         }
-        let label_width = width.saturating_sub(2 + 10).max(20);
+        // Two cells in front of every attack carry the mark, and the verdict closes the row.
+        let verdict_column = text::width(Msg::VerdictAccepted.text(language))
+            .max(text::width(Msg::VerdictRejected.text(language)));
+        let attacks: Vec<Msg> = self
+            .outcomes
+            .iter()
+            .flat_map(|outcome| outcome.forgery.attempts.iter())
+            .map(|attempt| phrases::forgery(attempt.kind))
+            .collect();
+        let label_column = label_width(&attacks, language, width.saturating_sub(2), verdict_column);
         let mut lines = Vec::new();
         let mut attempts = 0usize;
         let mut accepted = 0usize;
@@ -666,7 +704,7 @@ impl Session {
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", state.mark()), theme.state(state)),
                     Span::styled(
-                        pad(phrases::forgery(attempt.kind).text(language), label_width),
+                        label_cell(phrases::forgery(attempt.kind).text(language), label_column),
                         theme.plain(),
                     ),
                     Span::styled(verdict.text(language).to_string(), theme.state(state)),
@@ -696,23 +734,46 @@ impl Session {
         else {
             return Vec::new();
         };
-        let label = width.saturating_sub(16).max(18);
+        let label_column = label_width(
+            &[Msg::WasteHolds, Msg::WasteOpened, Msg::WasteVerifier],
+            language,
+            width,
+            WASTE_VALUE_WIDTH,
+        );
         let state = if run.with_waste.accepted { State::Bad } else { State::Good };
         let verdict =
             if run.with_waste.accepted { Msg::VerdictAccepted } else { Msg::VerdictRejected };
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(pad(Msg::WasteHolds.text(language), label), theme.muted()),
-                Span::styled(rpad(&format::count(run.true_value), 14), theme.plain()),
-            ]),
-            Line::from(vec![
-                Span::styled(pad(Msg::WasteOpened.text(language), label), theme.muted()),
-                Span::styled(rpad(&format::count(run.with_waste.claimed_value), 14), theme.plain()),
-            ]),
-            Line::from(vec![
-                Span::styled(pad(Msg::WasteVerifier.text(language), label), theme.muted()),
                 Span::styled(
-                    rpad(&format!("{} {}", state.mark(), verdict.text(language)), 14),
+                    label_cell(Msg::WasteHolds.text(language), label_column),
+                    theme.muted(),
+                ),
+                Span::styled(
+                    rpad(&format::count(run.true_value), WASTE_VALUE_WIDTH),
+                    theme.plain(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    label_cell(Msg::WasteOpened.text(language), label_column),
+                    theme.muted(),
+                ),
+                Span::styled(
+                    rpad(&format::count(run.with_waste.claimed_value), WASTE_VALUE_WIDTH),
+                    theme.plain(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    label_cell(Msg::WasteVerifier.text(language), label_column),
+                    theme.muted(),
+                ),
+                Span::styled(
+                    rpad(
+                        &format!("{} {}", state.mark(), verdict.text(language)),
+                        WASTE_VALUE_WIDTH,
+                    ),
                     theme.state(state),
                 ),
             ]),
@@ -827,7 +888,7 @@ impl Session {
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         };
         let views = &outcome.views;
-        let text_width = width.saturating_sub(7).max(12);
+        let columns = Columns::measure(language, width);
 
         let sender = &views.sender;
         let receiver = &views.receiver;
@@ -850,7 +911,7 @@ impl Session {
                     (Msg::LabelLearns, items(&sender.learns, language)),
                     (Msg::LabelChecks, claims(&sender.can_verify, language)),
                 ],
-                text_width,
+                columns,
                 language,
                 theme,
             ),
@@ -869,7 +930,7 @@ impl Session {
                     (Msg::LabelNever, items(&receiver.never_learns, language)),
                     (Msg::LabelChecks, claims(&receiver.can_verify, language)),
                 ],
-                text_width,
+                columns,
                 language,
                 theme,
             ),
@@ -885,7 +946,7 @@ impl Session {
                     (Msg::LabelNever, items(&onlooker.cannot_see, language)),
                     (Msg::LabelChecks, claims(&onlooker.can_verify, language)),
                 ],
-                text_width,
+                columns,
                 language,
                 theme,
             ),
@@ -902,35 +963,106 @@ impl Session {
                     (Msg::LabelHolds, items(&attacker.holds, language)),
                     (Msg::LabelNeeds, items(&attacker.would_need, language)),
                 ],
-                text_width,
+                columns,
                 language,
                 theme,
             ),
         ];
 
-        fit(&mut blocks, height);
-        blocks.into_iter().flatten().collect()
+        let dropped = fit(&mut blocks, height);
+        let mut lines: Vec<Line<'static>> = blocks.into_iter().flatten().collect();
+        if dropped {
+            lines.push(Line::from(Span::styled(
+                text::truncate(Msg::PanelTrimmed.text(language), width),
+                theme.muted(),
+            )));
+        }
+        lines
     }
 }
 
+/// The four parties, in the order the recap draws them. Their names share one column.
+const PARTY_NAMES: [Msg; 4] =
+    [Msg::PartySender, Msg::PartyReceiver, Msg::PartyOnlooker, Msg::PartyAttacker];
+
+/// Every row label the recap draws. All six are on screen whenever all four parties are, so the
+/// column is measured from all six and every party indents to the same place.
+const PARTY_LABELS: [Msg; 6] = [
+    Msg::LabelHolds,
+    Msg::LabelLearns,
+    Msg::LabelSees,
+    Msg::LabelNever,
+    Msg::LabelChecks,
+    Msg::LabelNeeds,
+];
+
+/// The widths the recap draws a party in, measured once so that all four indent to the same place.
+#[derive(Clone, Copy)]
+struct Columns {
+    /// Cells the party's name takes, the gap after it included.
+    name: usize,
+    /// Cells a row label takes, the gap after it included.
+    label: usize,
+    /// Cells the panel has in all.
+    width: usize,
+}
+
+impl Columns {
+    /// Measured from the words this language actually puts on the panel.
+    fn measure(language: Language, width: usize) -> Self {
+        Self {
+            name: label_width(&PARTY_NAMES, language, width, VALUE_MIN),
+            label: label_width(&PARTY_LABELS, language, width, VALUE_MIN),
+            width,
+        }
+    }
+}
+
+/// Cells to give a column of labels: the widest label that will really be drawn, and one cell of
+/// gap after it, never so many that the value beside it has nowhere left to sit.
+///
+/// Measured rather than fixed, because a label that is six cells in English is twelve in Korean,
+/// and a constant that fits one language runs into the value in the other.
+fn label_width(labels: &[Msg], language: Language, width: usize, value: usize) -> usize {
+    let widest = labels.iter().map(|label| text::width(label.text(language))).max().unwrap_or(0);
+    (widest + 1).min(width.saturating_sub(value)).max(1)
+}
+
+/// A label drawn in exactly `width` cells, the last of which is always the gap.
+///
+/// The gap is kept outside the column rather than inside it because [`column`] fills every cell it
+/// is given: a label too long for its column ends in an ellipsis, and that would touch the value.
+fn label_cell(label: &str, width: usize) -> String {
+    format!("{} ", column(label, width.saturating_sub(1)))
+}
+
 /// One party: a heading carrying its one fact, then its rows.
+///
+/// The columns are measured from the words this language actually uses, so a Korean label moves
+/// the value over instead of running into it.
 fn party_block(
     name: Msg,
     fact: String,
     rows: &[(Msg, String)],
-    width: usize,
+    columns: Columns,
     language: Language,
     theme: Theme,
 ) -> Vec<Line<'static>> {
+    let text_width = columns.width.saturating_sub(columns.label).max(1);
     let mut lines = vec![Line::from(vec![
-        Span::styled(pad(name.text(language), 10), theme.heading()),
-        Span::styled(fact, theme.muted()),
+        Span::styled(label_cell(name.text(language), columns.name), theme.heading()),
+        Span::styled(column(&fact, columns.width.saturating_sub(columns.name)), theme.muted()),
     ])];
     for (label, text) in rows {
-        for (index, part) in wrap(text, width).into_iter().enumerate() {
+        for (index, part) in wrap(text, text_width).into_iter().enumerate() {
             lines.push(Line::from(vec![
                 Span::styled(
-                    if index == 0 { pad(label.text(language), 7) } else { " ".repeat(7) },
+                    if index == 0 {
+                        label_cell(label.text(language), columns.label)
+                    } else {
+                        // A continuation sits under the value it continues, not under the label.
+                        " ".repeat(columns.label)
+                    },
                     theme.muted(),
                 ),
                 Span::styled(part, theme.plain()),
@@ -942,19 +1074,27 @@ fn party_block(
 
 /// Trims the tallest block until every party still fits on one screen. At 80x24 in English nothing
 /// is trimmed; a narrower panel loses the tail of a list rather than a whole party.
-fn fit(blocks: &mut [Vec<Line<'static>>], height: usize) {
-    if height == 0 {
-        return;
-    }
+///
+/// Says whether it dropped anything, so the panel can end with a line admitting it. Rows that
+/// vanish with nothing on screen to say so read as a panel that has nothing more to show.
+fn fit(blocks: &mut [Vec<Line<'static>>], height: usize) -> bool {
     let mut total: usize = blocks.iter().map(Vec::len).sum();
-    while total > height {
+    if height == 0 || total <= height {
+        return false;
+    }
+    // One row is held back for the line that says rows were dropped.
+    let room = height.saturating_sub(1);
+    let mut dropped = false;
+    while total > room {
         let Some(tallest) = blocks.iter_mut().max_by_key(|block| block.len()) else { break };
         if tallest.len() <= 2 {
             break;
         }
         tallest.pop();
         total -= 1;
+        dropped = true;
     }
+    dropped
 }
 
 impl Session {
@@ -964,7 +1104,7 @@ impl Session {
 
     /// Back to the first sentence of this stage, with nothing running and nothing said.
     fn restart(&mut self) {
-        self.reset();
+        self.stop_and_forget_the_telling();
         self.revealed = 0;
         self.log.clear();
         self.reported = 0;
@@ -1001,9 +1141,10 @@ impl Session {
                 Message(index) => {
                     self.message = index;
                     let said = match self.transcript() {
-                        Some(transcript) => transcript.lines.get(index).map(|line| {
-                            (transcript.lines.len(), line.step, line.bytes.len())
-                        }),
+                        Some(transcript) => transcript
+                            .lines
+                            .get(index)
+                            .map(|line| (transcript.lines.len(), line.step, line.bytes.len())),
                         None => None,
                     };
                     if let Some((total, step, bytes)) = said {
@@ -1175,6 +1316,7 @@ impl KqSession for Session {
                 if self.advance() { Reaction::Handled } else { Reaction::Ignored }
             }
             Action::Reset => {
+                self.forget_results();
                 self.restart();
                 Reaction::Handled
             }
@@ -1363,10 +1505,9 @@ impl KqSession for Session {
                             theme.heading(),
                         ),
                     ]));
-                    for text in wrap(
-                        phrases::stage_brief(stage).text(language),
-                        width.saturating_sub(3),
-                    ) {
+                    for text in
+                        wrap(phrases::stage_brief(stage).text(language), width.saturating_sub(3))
+                    {
                         lines.push(Line::from(Span::styled(format!("   {text}"), theme.plain())));
                     }
                     lines.push(Line::from(""));
@@ -1428,15 +1569,45 @@ fn step_round(current: usize, last: usize, step: i32) -> usize {
 /// `nmtk_core::format::duration` starts at hundredths of a second, and everything here but halo2
 /// finishes in microseconds.
 fn short_time(nanos: u64) -> String {
+    time_in(nanos, unit_for(nanos))
+}
+
+/// A unit of time, and how a column of nanoseconds is written in it.
+///
+/// One unit per column, never one per value. A column reading 166 µs, 21 µs and 27.5 ms invites
+/// the reader to compare 166 with 27.5 and conclude the slowest row is the fastest — which is
+/// what a reviewer concluded about halo2, off this very table.
+#[derive(Clone, Copy)]
+struct TimeUnit {
+    divisor: f64,
+    decimals: usize,
+    suffix: &'static str,
+}
+
+const NANOSECONDS: TimeUnit = TimeUnit { divisor: 1.0, decimals: 0, suffix: "ns" };
+const MICROSECONDS: TimeUnit = TimeUnit { divisor: 1_000.0, decimals: 0, suffix: "µs" };
+const MILLISECONDS: TimeUnit = TimeUnit { divisor: 1_000_000.0, decimals: 1, suffix: "ms" };
+const SECONDS: TimeUnit = TimeUnit { divisor: 1_000_000_000.0, decimals: 2, suffix: "s" };
+
+/// The unit the largest value in a column wants, which is the unit the whole column gets.
+fn unit_for(nanos: u64) -> TimeUnit {
     if nanos < 1_000 {
-        format!("{nanos} ns")
+        NANOSECONDS
     } else if nanos < 1_000_000 {
-        format!("{:.0} µs", nanos as f64 / 1_000.0)
+        MICROSECONDS
     } else if nanos < 1_000_000_000 {
-        format!("{:.1} ms", nanos as f64 / 1_000_000.0)
+        MILLISECONDS
     } else {
-        format!("{:.2} s", nanos as f64 / 1_000_000_000.0)
+        SECONDS
     }
+}
+
+fn time_in(nanos: u64, unit: TimeUnit) -> String {
+    // A value far below its column's unit still has to be readable, so it keeps a digit or two
+    // rather than rounding to a bare zero.
+    let value = nanos as f64 / unit.divisor;
+    let decimals = if value < 1.0 && nanos > 0 { unit.decimals.max(2) } else { unit.decimals };
+    format!("{value:.decimals$} {}", unit.suffix)
 }
 
 /// The first bytes of a message, so a reader can see that it is bytes.
@@ -1445,3 +1616,124 @@ fn preview(bytes: &[u8]) -> String {
     if bytes.len() > 8 { format!("{} ...", head.join(" ")) } else { head.join(" ") }
 }
 
+#[cfg(test)]
+mod tests {
+    use nmtk_kq::text;
+    use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, split};
+
+    use super::*;
+
+    fn machine() -> MachineProfile {
+        MachineProfile { logical_cores: 4, total_memory_bytes: 0, available_memory_bytes: 0 }
+    }
+
+    /// The cells this quest's own panel has inside its border on a terminal that wide, which is
+    /// what every line drawn on it has to fit into.
+    fn panel_width(total: u16, theme: Theme) -> usize {
+        let (talk, run) = split(total);
+        theme.titled_panel("t").inner(Rect::new(talk, 0, run, MIN_HEIGHT)).width as usize
+    }
+
+    /// A session with the three fast systems finished. halo2 is left out: it really compiles a
+    /// circuit, and this is a test about columns.
+    fn finished() -> Session {
+        let mut session = Session::new(&machine());
+        session.start(vec![Stage::Sigma, Stage::FiatShamir, Stage::TrustedSetup]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while session.state != RunState::Done {
+            assert!(std::time::Instant::now() < deadline, "the run never finished");
+            session.tick();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        session
+    }
+
+    /// One line the way the terminal paints it: every span, end to end.
+    fn drawn(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    /// The collision the reader saw: a label with its value hard against it and no cell between.
+    fn columns_keep_their_gap(line: &Line<'_>) -> bool {
+        line.spans.windows(2).all(|pair| {
+            let (left, right) = (pair[0].content.as_ref(), pair[1].content.as_ref());
+            left.is_empty() || right.is_empty() || left.ends_with(' ') || right.starts_with(' ')
+        })
+    }
+
+    #[test]
+    fn the_four_sides_panel_stays_inside_its_column_in_both_languages() {
+        let session = finished();
+        let theme = Theme::new(true);
+        for total in [MIN_WIDTH, 100] {
+            let width = panel_width(total, theme);
+            for language in [Language::ENGLISH, Language::KOREAN] {
+                for line in session.recap_lines(width, 20, language, theme) {
+                    let line_text = drawn(&line);
+                    assert!(
+                        text::width(&line_text) <= width,
+                        "{total} columns in {language}: {line_text:?} is wider than {width}"
+                    );
+                    assert!(
+                        columns_keep_their_gap(&line),
+                        "{total} columns in {language}: {line_text:?} has no gap after its label"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_attack_table_stays_inside_its_column_in_both_languages() {
+        let session = finished();
+        let theme = Theme::new(true);
+        for total in [MIN_WIDTH, 100] {
+            let width = panel_width(total, theme);
+            for language in [Language::ENGLISH, Language::KOREAN] {
+                for line in session.attack_lines(width, language, theme) {
+                    let line_text = drawn(&line);
+                    assert!(
+                        text::width(&line_text) <= width,
+                        "{total} columns in {language}: {line_text:?} is wider than {width}"
+                    );
+                    assert!(
+                        columns_keep_their_gap(&line),
+                        "{total} columns in {language}: {line_text:?} has no gap before its verdict"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Walking to another stage stopped the runs and threw their measurements away with them,
+    /// so the last stage — which draws its four viewpoints out of exactly those measurements —
+    /// was empty however much work the reader had done.
+    #[test]
+    fn walking_to_another_stage_keeps_what_the_runs_measured() {
+        let mut session = finished();
+        let measured = session.outcomes.len();
+        assert!(measured > 0, "the run measured nothing to begin with");
+
+        let last = SCRIPTS.len() - 1;
+        KqSession::go_to(&mut session, last);
+        assert_eq!(session.outcomes.len(), measured, "the stage change lost the measurements");
+
+        // `r` is the one key that forgets them.
+        KqSession::on(&mut session, Action::Reset);
+        assert!(session.outcomes.is_empty(), "r left the old measurements behind");
+    }
+
+    #[test]
+    fn a_panel_too_short_for_every_party_says_so_rather_than_losing_rows_in_silence() {
+        let session = finished();
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        let whole = session.recap_lines(width, 200, Language::KOREAN, theme);
+        let cut = session.recap_lines(width, 12, Language::KOREAN, theme);
+        assert!(cut.len() < whole.len(), "nothing was dropped at twelve rows");
+        assert!(cut.len() <= 12, "the panel kept {} rows in twelve", cut.len());
+        let said = drawn(cut.last().expect("a line"));
+        let head: String = Msg::PanelTrimmed.text(Language::KOREAN).chars().take(10).collect();
+        assert!(said.starts_with(&head), "the panel said nothing about the rows it dropped: {said:?}");
+    }
+}

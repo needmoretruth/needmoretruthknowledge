@@ -114,6 +114,7 @@ nmtk_i18n::messages! {
     ColumnVerify { en: "Verify", ko: "검증" },
     ColumnSize { en: "Size", ko: "크기" },
     NotRunYet { en: "—" },
+    PanelTrimmed { en: "More rows than this screen holds. A taller terminal shows the rest.", ko: "화면 높이에 다 들어가지 않아 남은 줄이 있습니다. 터미널을 세로로 키우면 보입니다." },
     // ---- The three messages ----------------------------------------------------
     MessageLabel { en: "Message", ko: "메시지" },
     StepStatement { en: "Public statement", ko: "공개된 주장" },
