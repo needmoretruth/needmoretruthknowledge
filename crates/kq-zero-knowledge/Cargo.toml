@@ -1,0 +1,15 @@
+[package]
+name = "kq-zero-knowledge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Knowledge Quest: proofs that show nothing."
+
+[dependencies]
+nmtk-core = { workspace = true }
+nmtk-i18n = { workspace = true }
+nmtk-kq = { workspace = true }
+nmtk-zk = { workspace = true }
+ratatui = { workspace = true }

@@ -41,6 +41,7 @@ pub mod knob;
 pub mod meta;
 pub mod session;
 pub mod theme;
+pub mod widgets;
 
 pub use catalogue::{Catalogue, Filter, SortKey};
 pub use knob::{Knob, KnobValue};

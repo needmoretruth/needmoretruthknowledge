@@ -787,6 +787,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "kq-ledgers"
+version = "0.1.0"
+dependencies = [
+ "nmtk-core",
+ "nmtk-i18n",
+ "nmtk-kq",
+ "nmtk-ledger",
+ "ratatui",
+]
+
+[[package]]
+name = "kq-proof-of-work"
+version = "0.1.0"
+dependencies = [
+ "nmtk-core",
+ "nmtk-i18n",
+ "nmtk-kq",
+ "nmtk-pow",
+ "ratatui",
+]
+
+[[package]]
+name = "kq-transformer"
+version = "0.1.0"
+dependencies = [
+ "nmtk-core",
+ "nmtk-i18n",
+ "nmtk-kq",
+ "nmtk-transformer",
+ "ratatui",
+]
+
+[[package]]
+name = "kq-zero-knowledge"
+version = "0.1.0"
+dependencies = [
+ "nmtk-core",
+ "nmtk-i18n",
+ "nmtk-kq",
+ "nmtk-zk",
+ "ratatui",
+]
+
+[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

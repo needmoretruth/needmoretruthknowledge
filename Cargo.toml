@@ -19,6 +19,10 @@ nmtk-ledger = { path = "crates/nmtk-ledger" }
 nmtk-transformer = { path = "crates/nmtk-transformer" }
 nmtk-zk = { path = "crates/nmtk-zk" }
 nmtk-tui = { path = "crates/nmtk-tui" }
+kq-ledgers = { path = "crates/kq-ledgers" }
+kq-proof-of-work = { path = "crates/kq-proof-of-work" }
+kq-transformer = { path = "crates/kq-transformer" }
+kq-zero-knowledge = { path = "crates/kq-zero-knowledge" }
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 sha2 = "0.11.0"

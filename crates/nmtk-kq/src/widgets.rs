@@ -10,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Sparkline};
 
-use nmtk_kq::Theme;
+use crate::theme::Theme;
 
 /// A column of `name    value` rows, names quiet and values plain.
 pub fn stats(frame: &mut Frame, area: Rect, theme: Theme, rows: &[(&str, String)]) {
