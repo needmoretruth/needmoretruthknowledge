@@ -28,7 +28,9 @@ use crate::block::{Block, BlockTemplate, CoinId, Tx, Txid};
 use crate::chain::{Acceptance, Chain};
 use crate::engine::{Engine, Found, MinerSlot, PreparedJob, sample_rates, spawn_workers};
 use crate::hash::Hash256;
-use crate::miners::{ConfigError, MinerId, MinerSpec, NOBODY, Share, effective_shares, split_threads};
+use crate::miners::{
+    ConfigError, MinerId, MinerSpec, NOBODY, Share, effective_shares, split_threads,
+};
 use crate::mining::{BlockSummary, MinerSnapshot};
 use crate::target::Target;
 
@@ -526,8 +528,7 @@ impl AttackCoordinator {
             None => false,
         };
         let double_spend_in = self.double_spend_confirmed();
-        self.attack_duration =
-            self.broadcast_at.map(|started| elapsed.saturating_sub(started));
+        self.attack_duration = self.broadcast_at.map(|started| elapsed.saturating_sub(started));
         let outcome = if payment_gone && double_spend_in {
             AttackOutcome::Succeeded
         } else {
@@ -620,13 +621,7 @@ impl AttackCoordinator {
         }
     }
 
-    fn record(
-        &mut self,
-        block: &Block,
-        elapsed: Duration,
-        since_previous: Duration,
-        public: bool,
-    ) {
+    fn record(&mut self, block: &Block, elapsed: Duration, since_previous: Duration, public: bool) {
         self.last_block_at = elapsed;
         if !public {
             return;
@@ -834,8 +829,8 @@ mod tests {
 
     #[test]
     fn the_merchant_waits_for_the_confirmations_it_was_told_to() {
-        let mut config = AttackConfig::new(practice_bits(14).expect("expressible"), 9, 1)
-            .with_confirmations(3);
+        let mut config =
+            AttackConfig::new(practice_bits(14).expect("expressible"), 9, 1).with_confirmations(3);
         config.warmup_blocks = 1;
         config.give_up_after = Some(Duration::from_secs(90));
         let snapshot = start_attack(config).expect("valid config").join();

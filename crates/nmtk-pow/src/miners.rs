@@ -191,7 +191,11 @@ pub fn split_threads(specs: &[MinerSpec], budget: usize) -> Result<Vec<usize>, C
         leftovers.push((exact - exact.floor(), index));
     }
     leftovers.sort_by(|left, right| {
-        right.0.partial_cmp(&left.0).unwrap_or(core::cmp::Ordering::Equal).then(left.1.cmp(&right.1))
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then(left.1.cmp(&right.1))
     });
     let mut spare = remaining.saturating_sub(handed_out);
     for (_, index) in &leftovers {
@@ -251,11 +255,8 @@ mod tests {
 
     #[test]
     fn the_parts_always_add_up_to_the_budget() {
-        let specs = [
-            MinerSpec::percent(0, 33.3),
-            MinerSpec::percent(1, 33.3),
-            MinerSpec::percent(2, 33.4),
-        ];
+        let specs =
+            [MinerSpec::percent(0, 33.3), MinerSpec::percent(1, 33.3), MinerSpec::percent(2, 33.4)];
         for budget in 3..64 {
             let threads = split_threads(&specs, budget).expect("valid");
             assert_eq!(threads.iter().sum::<usize>(), budget, "budget {budget} did not add up");
@@ -265,18 +266,16 @@ mod tests {
 
     #[test]
     fn raw_thread_counts_are_taken_off_the_top_and_the_rest_is_divided() {
-        let specs = [
-            MinerSpec::threads(0, 3),
-            MinerSpec::percent(1, 75.0),
-            MinerSpec::percent(2, 25.0),
-        ];
+        let specs =
+            [MinerSpec::threads(0, 3), MinerSpec::percent(1, 75.0), MinerSpec::percent(2, 25.0)];
         let threads = split_threads(&specs, 11).expect("valid");
         assert_eq!(threads, vec![3, 6, 2]);
     }
 
     #[test]
     fn shares_do_not_have_to_add_up_to_a_hundred() {
-        let specs = [MinerSpec::percent(0, 1.0), MinerSpec::percent(1, 1.0), MinerSpec::percent(2, 2.0)];
+        let specs =
+            [MinerSpec::percent(0, 1.0), MinerSpec::percent(1, 1.0), MinerSpec::percent(2, 2.0)];
         assert_eq!(split_threads(&specs, 8).expect("valid"), vec![2, 2, 4]);
     }
 
@@ -290,7 +289,8 @@ mod tests {
 
     #[test]
     fn the_same_request_always_splits_the_same_way() {
-        let specs = [MinerSpec::percent(0, 1.0), MinerSpec::percent(1, 1.0), MinerSpec::percent(2, 1.0)];
+        let specs =
+            [MinerSpec::percent(0, 1.0), MinerSpec::percent(1, 1.0), MinerSpec::percent(2, 1.0)];
         let first = split_threads(&specs, 10).expect("valid");
         for _ in 0..8 {
             assert_eq!(split_threads(&specs, 10).expect("valid"), first);

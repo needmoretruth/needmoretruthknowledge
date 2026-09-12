@@ -45,7 +45,7 @@ pub use attack::{
     ATTACKER, AttackConfig, AttackHandle, AttackOutcome, AttackPhase, AttackSnapshot, HONEST,
     start_attack,
 };
-pub use block::{Block, BlockHeader, BlockTemplate, Coinbase, CoinId, Tx, Txid};
+pub use block::{Block, BlockHeader, BlockTemplate, CoinId, Coinbase, Tx, Txid};
 pub use chain::{Acceptance, Branch, Chain, ChainError, Reorg};
 pub use engine::mine_serial;
 pub use estimate::{
@@ -53,9 +53,7 @@ pub use estimate::{
     implied_network_hashrate, probability_of_block_within,
 };
 pub use hash::{Hash256, double_sha256, merkle_root};
-pub use miners::{
-    ConfigError, MinerId, MinerSpec, NOBODY, Share, effective_shares, split_threads,
-};
+pub use miners::{ConfigError, MinerId, MinerSpec, NOBODY, Share, effective_shares, split_threads};
 pub use mining::{
     BlockSummary, ForkSummary, MinerSnapshot, MiningConfig, MiningHandle, MiningSnapshot,
     ReorgSummary, start_mining,

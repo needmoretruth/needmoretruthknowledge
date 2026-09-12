@@ -54,7 +54,9 @@ impl fmt::Display for ChainError {
             ChainError::HeightMismatch { expected, found } => {
                 write!(f, "block claims height {found}, chain expected {expected}")
             }
-            ChainError::PrevHashMismatch => f.write_str("block does not build on the block offered"),
+            ChainError::PrevHashMismatch => {
+                f.write_str("block does not build on the block offered")
+            }
             ChainError::BitsMismatch { expected, found } => {
                 write!(f, "block carries bits {found:#010x}, chain runs at {expected:#010x}")
             }
@@ -302,9 +304,11 @@ impl Chain {
             return Ok(Acceptance::Extended { height: self.height() });
         }
 
-        if let Some(index) = self.branches.iter().position(|branch| {
-            branch.blocks.last().map(|last| last.hash()) == Some(prev)
-        }) {
+        if let Some(index) = self
+            .branches
+            .iter()
+            .position(|branch| branch.blocks.last().map(|last| last.hash()) == Some(prev))
+        {
             let prev_height = self.branches[index].tip_height();
             self.check(&block, prev, prev_height, Some(index))?;
             self.branches[index].blocks.push(block);
@@ -418,10 +422,7 @@ impl Chain {
             });
         }
         if block.header.bits != self.bits {
-            return Err(ChainError::BitsMismatch {
-                expected: self.bits,
-                found: block.header.bits,
-            });
+            return Err(ChainError::BitsMismatch { expected: self.bits, found: block.header.bits });
         }
         if block.header.merkle_root != block.computed_merkle_root() {
             return Err(ChainError::MerkleRootMismatch);
@@ -638,10 +639,7 @@ mod tests {
         // A rival block at height 2 on the same parent: valid, but only a branch.
         let rival = mine_on_branch(&chain, &fork_point, 2, vec![], 500);
         let accepted = chain.accept(rival.clone()).expect("valid");
-        assert_eq!(
-            accepted,
-            Acceptance::Fork { fork_height: 1, branch_length: 1, behind: 0 }
-        );
+        assert_eq!(accepted, Acceptance::Fork { fork_height: 1, branch_length: 1, behind: 0 });
         assert_eq!(chain.tip_hash(), honest_tip);
 
         // One more on the rival branch and it carries more work than the chain.

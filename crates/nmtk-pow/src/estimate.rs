@@ -33,8 +33,11 @@ pub struct BlockTimeEstimate {
 /// times the average is unremarkable; so is one that takes a twentieth.
 pub fn expected_time_to_block(hashes_per_second: f64, target: Target) -> BlockTimeEstimate {
     let expected_hashes = target.expected_hashes();
-    let usable_rate =
-        if hashes_per_second.is_finite() && hashes_per_second > 0.0 { hashes_per_second } else { 0.0 };
+    let usable_rate = if hashes_per_second.is_finite() && hashes_per_second > 0.0 {
+        hashes_per_second
+    } else {
+        0.0
+    };
     let expected_seconds =
         if usable_rate > 0.0 { expected_hashes / usable_rate } else { f64::INFINITY };
     BlockTimeEstimate {
@@ -97,7 +100,8 @@ mod tests {
         let estimate = expected_time_to_block(5_000_000.0, target);
         let chance = probability_of_block_within(5_000_000.0, target, estimate.expected_seconds);
         assert!((chance - 0.6321).abs() < 0.001, "chance was {chance}");
-        let long_shot = probability_of_block_within(5_000_000.0, target, estimate.expected_seconds * 10.0);
+        let long_shot =
+            probability_of_block_within(5_000_000.0, target, estimate.expected_seconds * 10.0);
         assert!(long_shot > 0.9999);
     }
 
@@ -113,14 +117,19 @@ mod tests {
     fn a_practice_difficulty_is_seconds_rather_than_centuries() {
         let target = Target::from_leading_zero_bits(22).expect("expressible");
         let estimate = expected_time_to_block(2_000_000.0, target);
-        assert!(estimate.expected_seconds < 5.0, "practice block took {}s", estimate.expected_seconds);
+        assert!(
+            estimate.expected_seconds < 5.0,
+            "practice block took {}s",
+            estimate.expected_seconds
+        );
         let real = expected_time_to_block(2_000_000.0, Target::difficulty_one());
         assert!(real.expected_seconds > 1_000.0);
     }
 
     #[test]
     fn nothing_hashing_means_no_block_ever_rather_than_a_panic() {
-        let target = Target::from_compact(practice_bits(20).expect("expressible")).expect("canonical");
+        let target =
+            Target::from_compact(practice_bits(20).expect("expressible")).expect("canonical");
         for rate in [0.0, -1.0, f64::NAN] {
             let estimate = expected_time_to_block(rate, target);
             assert!(estimate.expected_seconds.is_infinite());

@@ -295,9 +295,7 @@ fn run_worker(engine: &Arc<Engine>, slot: &Arc<MinerSlot>, sender: &Sender<Found
 fn wait_for_new_job(engine: &Arc<Engine>, slot: &Arc<MinerSlot>, version: u64) {
     let deadline = std::time::Instant::now() + NEW_JOB_WAIT;
     while std::time::Instant::now() < deadline {
-        if engine.stop.load(Ordering::Relaxed)
-            || slot.version.load(Ordering::Acquire) != version
-        {
+        if engine.stop.load(Ordering::Relaxed) || slot.version.load(Ordering::Acquire) != version {
             return;
         }
         thread::sleep(Duration::from_millis(1));

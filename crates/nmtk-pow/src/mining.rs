@@ -74,7 +74,11 @@ impl MiningConfig {
     /// 51% exactly. Raising the thread count above the core count fixes that — the operating
     /// system shares the cores out between the threads and each miner's measured rate lands on
     /// its share.
-    pub fn for_machine(bits: u32, miners: Vec<MinerSpec>, profile: &MachineProfile) -> MiningConfig {
+    pub fn for_machine(
+        bits: u32,
+        miners: Vec<MinerSpec>,
+        profile: &MachineProfile,
+    ) -> MiningConfig {
         MiningConfig::new(bits, miners, profile.default_worker_threads())
     }
 
