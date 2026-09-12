@@ -41,7 +41,14 @@ pub fn render(
     // The shell walks on at the end of a stage, so Enter still carries the reader forward there.
     let walk_on = quest.session.at_end() && quest.session.stage() + 1 < quest.stages.len();
     if quest.session.can_advance() || walk_on {
-        beats.push(nmtk_kq::Beat::ask(t(Msg::ConversationWaiting, language).to_string()));
+        // A reader who is offered Enter while work is visibly running does not know whether
+        // pressing it cuts the run short, so they sit and wait. One of them waited ninety seconds.
+        let waiting = if quest.session.run_state() == RunState::Running {
+            Msg::ConversationWaitingWhileRunning
+        } else {
+            Msg::ConversationWaiting
+        };
+        beats.push(nmtk_kq::Beat::ask(t(waiting, language).to_string()));
     } else if quest.session.run_state() == RunState::Running {
         // A conversation that has stopped and says nothing reads as a program that has hung.
         beats.push(nmtk_kq::Beat::event(t(Msg::ConversationWorking, language).to_string()));

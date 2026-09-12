@@ -126,6 +126,7 @@ messages! {
     KeyScroll { en: "scroll", ko: "스크롤" },
     ConversationWaiting { en: "Press Enter to carry on.", ko: "Enter를 눌러 계속합니다." },
     ConversationWorking { en: "Working. The next line arrives when the machine does.", ko: "돌아가는 중입니다. 기계가 답하면 다음 줄이 나옵니다." },
+    ConversationWaitingWhileRunning { en: "Press Enter to carry on. The run keeps going either way.", ko: "Enter를 눌러 계속합니다. 돌고 있는 실행은 그대로 이어집니다." },
     ConversationFinished { en: "That is the end of this quest. Press q for the list, or Shift+Tab to walk back through it.", ko: "이 퀘스트는 여기까지입니다. q를 누르면 목록으로 돌아가고, Shift+Tab으로 앞 단계를 다시 볼 수 있습니다." },
     // ---- Keys -----------------------------------------------------------------
     KeyMove { en: "move", ko: "이동" },
