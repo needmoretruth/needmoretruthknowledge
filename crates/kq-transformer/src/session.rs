@@ -87,6 +87,21 @@ enum Step {
     Run(Deed),
     /// The conversation waits here until the run has got somewhere.
     Await(Until),
+    /// A sentence chosen from what actually happened, rather than from what was asked for.
+    ///
+    /// A reader is free to set whatever they like and often does, so a fixed sentence after a run
+    /// is a guess. "Smaller, faster, and worse" was printed over a model the reader had made
+    /// bigger, and the SGD verdict over a run that had not used SGD.
+    Tell(Topic),
+}
+
+/// What a [`Step::Tell`] is about.
+#[derive(Debug, Clone, Copy)]
+enum Topic {
+    /// How this run compares with the one before it.
+    Settings,
+    /// The lesson of one attack, said only if that attack is what ran.
+    Attack { kind: usize, multiplier: f64, lesson: Msg },
 }
 
 /// Work a step starts.
@@ -106,7 +121,7 @@ enum Until {
 }
 
 use Deed::{Attack, Train};
-use Step::{Ask, Await, Run, Say};
+use Step::{Ask, Await, Run, Say, Tell};
 
 /// The one question a language model answers.
 const QUESTION: &[Step] = &[
@@ -163,7 +178,7 @@ const TUNE: &[Step] = &[
     Ask(Msg::SettingsAsk),
     Run(Train),
     Await(Until::Finished),
-    Say(Msg::SettingsSmaller),
+    Tell(Topic::Settings),
     Say(Msg::SettingsRefused),
 ];
 
@@ -176,25 +191,41 @@ const BREAK: &[Step] = &[
     Ask(Msg::BreakAskRunaway),
     Run(Attack),
     Await(Until::Finished),
-    Say(Msg::BreakAfterRunaway),
+    Tell(Topic::Attack {
+        kind: ATTACK_RUNAWAY,
+        multiplier: BREAKING_MULTIPLIER,
+        lesson: Msg::BreakAfterRunaway,
+    }),
     Say(Msg::BreakWarmupOne),
     Say(Msg::BreakWarmupTwo),
     Say(Msg::BreakWarmupThree),
     Ask(Msg::BreakAskWarmup),
     Run(Attack),
     Await(Until::Finished),
-    Say(Msg::BreakAfterWarmup),
+    Tell(Topic::Attack {
+        kind: ATTACK_NO_WARMUP,
+        multiplier: 10.0,
+        lesson: Msg::BreakAfterWarmup,
+    }),
     Say(Msg::BreakSgdOne),
     Say(Msg::BreakSgdTwo),
     Say(Msg::BreakSgdThree),
     Ask(Msg::BreakAskSgd),
     Run(Attack),
     Await(Until::Finished),
-    Say(Msg::BreakAfterSgd),
+    Tell(Topic::Attack {
+        kind: ATTACK_PLAIN_SGD,
+        multiplier: 1.0,
+        lesson: Msg::BreakAfterSgd,
+    }),
     Ask(Msg::BreakAskSgdAgain),
     Run(Attack),
     Await(Until::Finished),
-    Say(Msg::BreakLesson),
+    Tell(Topic::Attack {
+        kind: ATTACK_PLAIN_SGD,
+        multiplier: 100.0,
+        lesson: Msg::BreakLesson,
+    }),
 ];
 
 /// What the reader now knows, beside the numbers they made.
@@ -261,6 +292,11 @@ pub struct Session {
     latest: Option<TrainingSnapshot>,
     /// The last run that finished with sensible settings.
     honest: Option<Finished>,
+    /// The sensible run before that one, so "compare it with the one before" has something to
+    /// compare against rather than a sentence guessing what the reader did.
+    previous: Option<Finished>,
+    /// The attack and multiplier the run that just finished really used.
+    ran: Option<(usize, f64)>,
     /// The last run that finished with settings the reader broke.
     broken: Option<Finished>,
     /// Why the last attempt to start a run was refused, if it was.
@@ -290,6 +326,8 @@ impl Session {
             running_broken: false,
             latest: None,
             honest: None,
+            previous: None,
+            ran: None,
             broken: None,
             refused: None,
             vocabulary: Tokenizer::from_text(CORPUS).vocab_size(),
@@ -1102,6 +1140,51 @@ impl Session {
     }
 
     /// Reveals the next step and starts whatever it asks for.
+    /// A sentence about the run that just finished, built from its own numbers.
+    fn tell(&self, topic: Topic, language: Language) -> String {
+        match topic {
+            Topic::Settings => self.tell_settings(language),
+            Topic::Attack { kind, multiplier, lesson } => {
+                // The lesson is only true of the run it was written about. A reader who pressed
+                // Enter without touching the values ran something else, and used to be told the
+                // conclusion anyway.
+                let asked = self
+                    .ran
+                    .is_some_and(|(k, m)| k == kind && (m - multiplier).abs() < multiplier * 0.01);
+                let message = if asked { lesson } else { Msg::BreakNotThatRun };
+                message.text(language).to_string()
+            }
+        }
+    }
+
+    /// This run held against the one before it: what the reader changed, and what it cost.
+    fn tell_settings(&self, language: Language) -> String {
+        let (Some(now), Some(before)) = (self.honest.as_ref(), self.previous.as_ref()) else {
+            return Msg::SettingsFirstRun.text(language).to_string();
+        };
+        let (weights, was) = (now.snapshot.parameter_count, before.snapshot.parameter_count);
+        let (loss, loss_was) = (now.snapshot.loss, before.snapshot.loss);
+        let verdict = if weights == was {
+            Msg::SettingsSameShape
+        } else if weights < was {
+            if loss > loss_was { Msg::SettingsSmallerWorse } else { Msg::SettingsSmallerBetter }
+        } else if loss < loss_was {
+            Msg::SettingsBiggerBetter
+        } else {
+            Msg::SettingsBiggerWorse
+        };
+        format!(
+            "{} {} {} → {}, {} {:.3} → {:.3}.",
+            verdict.text(language),
+            Msg::LabelWeights.text(language),
+            format::count(was as u64),
+            format::count(weights as u64),
+            Msg::LabelLoss.text(language),
+            loss_was,
+            loss,
+        )
+    }
+
     fn advance(&mut self) -> bool {
         let script = self.script();
         if self.revealed + 1 >= script.len() {
@@ -1111,8 +1194,19 @@ impl Session {
         if let Run(deed) = script[self.revealed] {
             self.forget_run();
             let config = match deed {
-                Train => self.tuned(),
-                Attack => self.attacked(),
+                Train => {
+                    self.ran = None;
+                    self.tuned()
+                }
+                Attack => {
+                    // Kept so the sentence after the run can be about the run, not about the
+                    // values the conversation had hoped for.
+                    self.ran = Some((
+                        self.attack.get(BREAK_ATTACK).map_or(ATTACK_RUNAWAY, choice_of),
+                        self.attack.get(BREAK_MULTIPLIER).map_or(1.0, decimal_of),
+                    ));
+                    self.attacked()
+                }
             };
             // Always a fresh run. The old version answered Enter during training by doing nothing
             // at all, so a reader who changed a value and pressed Enter watched the old model
@@ -1120,6 +1214,7 @@ impl Session {
             self.start(config);
             match self.refused {
                 Some(error) => {
+                    self.ran = None;
                     let message = phrases::start_error(error);
                     self.say(Happening::Refused(message));
                 }
@@ -1247,6 +1342,7 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1365,6 +1461,7 @@ impl KqSession for Session {
                     if broken {
                         self.broken = Some(finished);
                     } else {
+                        self.previous = self.honest.take();
                         self.honest = Some(finished);
                     }
                 }
@@ -1715,6 +1812,27 @@ mod tests {
 
     /// A run as it would look part way through, so the panel can be drawn without waiting a
     /// minute for a real one. Every field here is the shape the engine really publishes.
+    /// A snapshot with nothing in it, for tests that care about two fields and not the rest.
+    fn blank_snapshot() -> TrainingSnapshot {
+        TrainingSnapshot {
+            step: 0,
+            total_steps: 0,
+            state: TrainingState::Finished,
+            loss: 0.0,
+            raw_loss: 0.0,
+            loss_history: Vec::new(),
+            gradient_norm: 0.0,
+            learning_rate: 0.0,
+            tokens_per_second: 0.0,
+            tokens_seen: 0,
+            parameter_count: 0,
+            vocab_size: 33,
+            elapsed: Duration::from_secs(0),
+            completion: String::new(),
+            attention: real_attention(),
+        }
+    }
+
     fn part_way(session: &mut Session) {
         session.latest = Some(TrainingSnapshot {
             step: 1_200,
@@ -1778,6 +1896,59 @@ mod tests {
             );
         }
         session.close();
+    }
+
+    /// A reviewer pressed Enter without choosing the attack the conversation had just named, and
+    /// was told the conclusion about that attack anyway — over a run that had not used it.
+    #[test]
+    fn a_lesson_about_an_attack_is_only_said_when_that_attack_is_what_ran() {
+        let mut session = Session::new(&machine());
+        let lesson = Msg::BreakAfterSgd;
+        let topic =
+            Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson };
+
+        session.ran = None;
+        assert_eq!(session.tell(topic, Language::ENGLISH), Msg::BreakNotThatRun.text(Language::ENGLISH));
+
+        // The runaway attack at its own multiplier is not plain SGD at one.
+        session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
+        assert_eq!(session.tell(topic, Language::ENGLISH), Msg::BreakNotThatRun.text(Language::ENGLISH));
+
+        session.ran = Some((ATTACK_PLAIN_SGD, 1.0));
+        assert_eq!(session.tell(topic, Language::ENGLISH), lesson.text(Language::ENGLISH));
+    }
+
+    /// "Smaller, faster, and worse" was printed over a model the reader had made bigger.
+    #[test]
+    fn the_settings_verdict_reads_the_two_runs_rather_than_assuming_one() {
+        let mut session = Session::new(&machine());
+        let english = Language::ENGLISH;
+        assert_eq!(session.tell(Topic::Settings, english), Msg::SettingsFirstRun.text(english));
+
+        let run = |weights: usize, loss: f32| Finished {
+            snapshot: TrainingSnapshot { parameter_count: weights, loss, ..blank_snapshot() },
+            rate: 0.002,
+        };
+        session.previous = Some(run(107_804, 0.803));
+        session.honest = Some(run(157_788, 0.494));
+        let bigger_better = session.tell(Topic::Settings, english);
+        assert!(bigger_better.starts_with(Msg::SettingsBiggerBetter.text(english)), "{bigger_better}");
+        assert!(bigger_better.contains("107,804"), "the numbers are missing: {bigger_better}");
+        assert!(bigger_better.contains("157,788"), "the numbers are missing: {bigger_better}");
+
+        session.honest = Some(run(26_000, 1.900));
+        let smaller_worse = session.tell(Topic::Settings, english);
+        assert!(smaller_worse.starts_with(Msg::SettingsSmallerWorse.text(english)), "{smaller_worse}");
+
+        session.honest = Some(run(107_804, 0.700));
+        let same = session.tell(Topic::Settings, english);
+        assert!(same.starts_with(Msg::SettingsSameShape.text(english)), "{same}");
+
+        // A composed beat is still a beat, and the standard puts a beat under 160 characters.
+        for language in Language::ALL {
+            let said = session.tell(Topic::Settings, *language);
+            assert!(said.chars().count() <= 160, "too much at once in {language}: {said:?}");
+        }
     }
 
     #[test]

@@ -64,7 +64,12 @@ nmtk_i18n::messages! {
     SettingsSix { en: "Too small and the run never arrives; too large and it steps straight over the answer.", ko: "너무 작으면 영영 도착하지 못하고, 너무 크면 답을 지나쳐 버립니다." },
     SettingsSeven { en: "The width is shared out between the heads, so it has to divide evenly by them.", ko: "너비는 헤드들이 나눠 갖기 때문에 헤드 수로 나누어떨어져야 합니다." },
     SettingsAsk { en: "Set the width to 32 and press Enter. That is roughly a quarter of the weights.", ko: "너비를 32로 놓고 Enter를 누르세요. 가중치가 대략 4분의 1이 됩니다." },
-    SettingsSmaller { en: "Smaller, faster, and worse. Compare that loss with the one before it.", ko: "더 작고 빠르고 나쁩니다. 그 손실을 앞의 것과 견줘 보세요." },
+    SettingsFirstRun { en: "That is the first run at settings of your own, so there is nothing yet to hold it against. Change something and press Enter again.", ko: "직접 고른 설정으로 돌린 첫 판이라 아직 견줄 것이 없습니다. 무언가 바꾸고 Enter를 다시 누르세요." },
+    SettingsSameShape { en: "The model is the same size as before, so whatever changed, changed in how it was trained.", ko: "모델 크기는 앞과 같습니다. 그러니 달라진 것이 있다면 학습하는 방식에서 달라진 것입니다." },
+    SettingsSmallerWorse { en: "Fewer weights, and a loss that stopped higher up. Smaller is faster and worse.", ko: "가중치는 줄었고 손실은 더 높은 데서 멈췄습니다. 작을수록 빠르고 나쁩니다." },
+    SettingsSmallerBetter { en: "Fewer weights and a lower loss: for this sentence the shape mattered more than the size.", ko: "가중치는 줄었는데 손실도 내려갔습니다. 이 문장에서는 크기보다 모양이 더 컸던 것입니다." },
+    SettingsBiggerBetter { en: "More weights and a lower loss, bought with the extra time the run took.", ko: "가중치가 늘었고 손실은 내려갔습니다. 그만큼 시간을 더 쓴 값입니다." },
+    SettingsBiggerWorse { en: "More weights and a higher loss. Bigger is not automatically better.", ko: "가중치는 늘었는데 손실은 올랐습니다. 크다고 저절로 좋아지지는 않습니다." },
     SettingsRefused { en: "The weight count on the right goes to nothing when the settings do not describe a model, and says why.", ko: "설정이 모델을 이루지 못하면 오른쪽 가중치 수가 사라지고 이유가 나옵니다." },
 
     // ---- Stage 5: breaking it --------------------------------------------------------
@@ -74,6 +79,7 @@ nmtk_i18n::messages! {
     BreakFour { en: "Then it does it again, the other way.", ko: "그다음에는 반대쪽으로 또 그럽니다." },
     BreakAskRunaway { en: "The attack on the right is a runaway rate, three thousand times the sensible one. Press Enter.", ko: "오른쪽 공격은 적당한 값의 3000배짜리 고삐 풀린 학습률입니다. Enter를 누르세요." },
     BreakAfterRunaway { en: "The loss never once got below where it started, and the answer collapsed into one letter repeated.", ko: "손실이 처음 값 아래로 한 번도 안 내려갔고, 답은 글자 하나만 되풀이하며 무너졌습니다." },
+    BreakNotThatRun { en: "Those were not the settings just asked for, so the line about them is skipped. Change the values on the right and press Enter to run it.", ko: "방금 말한 설정이 아니어서 그에 대한 설명은 건너뜁니다. 오른쪽 값을 바꾸고 Enter를 누르면 그 판이 돌아갑니다." },
     BreakWarmupOne { en: "The second attack removes the warmup.", ko: "두 번째 공격은 워밍업을 없앱니다." },
     BreakWarmupTwo { en: "A transformer's first steps are its most dangerous: attention is spread almost evenly and the gradients are large.", ko: "트랜스포머에게 가장 위험한 때는 첫 몇 스텝입니다. 어텐션이 거의 고르게 퍼져 있고 기울기가 큽니다." },
     BreakWarmupThree { en: "So the sensible schedule ramps the rate up from nothing over the first hundred steps.", ko: "그래서 제대로 된 일정은 처음 100스텝에 걸쳐 학습률을 0에서부터 올립니다." },
