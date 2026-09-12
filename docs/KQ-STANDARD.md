@@ -132,6 +132,8 @@ presets only has decided for the reader what is worth trying, which is the oppos
 Kinds: `Count` (whole numbers), `Share` (a percentage), `Decimal`, `Choice`, `Toggle`.
 
 Out-of-range input is refused and the old value stays. Typing shows a cursor; `Esc` discards it.
+While a number is being typed, report it through `KqSession::typing` — the shell then hands digits
+to the quest instead of using `1`–`5` to jump between stages.
 
 ## 8. Words
 
@@ -146,7 +148,13 @@ written at the same time never touch the same file.
 Write for someone who has not read the subject before. Name real things by their real names
 (nonce, UTXO, nullifier) and gloss each one the first time.
 
-## 9. Engines
+## 9. Alignment
+
+A Korean or Japanese glyph fills two terminal cells, so `format!("{:<12}")` lines a table up in
+English and pulls it apart in Korean. Use `nmtk_kq::text::{width, pad, truncate}` for every column
+you align. A table that only looks right in one language is a bug in both.
+
+## 10. Engines
 
 The code that does the work lives apart from the code that draws it (`crates/nmtk-pow`,
 `nmtk-ledger`, `nmtk-transformer`, `nmtk-zk`). An engine:
@@ -169,7 +177,7 @@ impl Handle {
 
 Work that finishes instantly is a plain function instead.
 
-## 10. Versions
+## 11. Versions
 
 A quest's `id` never changes. Its `version` rises, and **every version stays in the program**: a
 reader who learned from an older one can open exactly what they saw. The list shows the newest of
@@ -178,7 +186,7 @@ each quest; older versions are one keypress away.
 Raise `major` when the lesson changes enough that a returning reader would be surprised. Raise
 `minor` for everything else. Set `updated` to the day the version ships; leave `released` alone.
 
-## 11. What a quest must never do
+## 12. What a quest must never do
 
 - **Touch the network.** Not for updates, not for telemetry, not for anything. nmtk opens no
   sockets.
@@ -186,7 +194,7 @@ Raise `major` when the lesson changes enough that a returning reader would be su
 - **Fake a number.** Everything on screen came from something that really ran here.
 - **Invent interface.** Colours, borders, keys and shapes come from the standard.
 
-## 12. Adding a quest
+## 13. Adding a quest
 
 1. Write the engine in its own crate if the subject needs one: plain data out, no screen, no words.
 2. Write the quest crate: `KqMeta`, a phrase table, the stages, the knobs, a `KqSession`.
