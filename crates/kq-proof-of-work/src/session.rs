@@ -432,6 +432,10 @@ impl Session {
     fn start_run(&mut self) {
         self.stop_attack();
         self.stop_mining();
+        // The run about to start replaces the last one's numbers, and a start that is refused
+        // leaves none behind: a wait for blocks must never be answered by a run already over.
+        self.mining_snapshot = None;
+        self.rates.clear();
         let bits = match practice_bits(self.zero_bits()) {
             Ok(bits) => bits,
             Err(error) => {
@@ -446,7 +450,6 @@ impl Session {
             Ok(handle) => {
                 self.mining_snapshot = Some(handle.snapshot());
                 self.mining = Some(handle);
-                self.rates.clear();
                 self.refused = None;
                 self.state = RunState::Running;
             }
@@ -461,6 +464,9 @@ impl Session {
     fn start_the_attack(&mut self) {
         self.stop_mining();
         self.stop_attack();
+        // As with mining: a refused start leaves no snapshot, so the wait for an ending cannot be
+        // answered by the ending of the attack before it.
+        self.attack_snapshot = None;
         let bits = match practice_bits(self.zero_bits()) {
             Ok(bits) => bits,
             Err(error) => {
@@ -508,15 +514,39 @@ impl Session {
         }
     }
 
-    /// Throws the run away. The knobs keep their values: a reader who set a number wants it kept.
-    fn reset(&mut self) {
+    /// Stops every thread this quest has running, and keeps what they produced.
+    ///
+    /// Walking out of a stage has to stop the work — one heavy run at a time on one machine — but
+    /// the numbers a finished run left behind are what the recap is about, so they stay.
+    fn stop_runs(&mut self) {
         self.stop_mining();
         self.stop_attack();
-        self.mining_snapshot = None;
-        self.attack_snapshot = None;
-        self.rates.clear();
-        self.refused = None;
         self.state = RunState::Idle;
+    }
+
+    /// Forgets what is being said about a run in progress, without touching what finished runs
+    /// produced.
+    fn forget_run(&mut self) {
+        self.reported_blocks = 0;
+        self.said_paid = false;
+        self.said_released = false;
+        self.said_ended = false;
+        self.refused = None;
+    }
+
+    /// Throws away the numbers the stage showing now produced, and only those. Pressing `r` is
+    /// the one thing that does this: every other way out of a stage keeps them.
+    ///
+    /// The knobs keep their values either way: a reader who set a number wants it kept.
+    fn forget_results(&mut self) {
+        match self.stage {
+            STAGE_MINE | STAGE_TUNE => {
+                self.mining_snapshot = None;
+                self.rates.clear();
+            }
+            STAGE_ATTACK => self.attack_snapshot = None,
+            _ => {}
+        }
     }
 
     // ---- Numbers the screens share ---------------------------------------------
@@ -1064,14 +1094,14 @@ impl Session {
     }
 
     /// Back to the first sentence of this stage, with nothing running and nothing said.
+    ///
+    /// What finished runs produced is kept, so a recap reached from here — by Tab, by a digit key,
+    /// by any route at all — still has the reader's own numbers in it.
     fn restart(&mut self) {
-        self.reset();
+        self.stop_runs();
+        self.forget_run();
         self.revealed = 0;
         self.log.clear();
-        self.reported_blocks = 0;
-        self.said_paid = false;
-        self.said_released = false;
-        self.said_ended = false;
     }
 
     /// Whether the thing a waiting step is waiting for has happened.
@@ -1253,7 +1283,8 @@ impl KqSession for Session {
         self.stage = stage;
         self.chosen = 0;
         // One heavy run at a time: mining beside an attack halves both, and a 51% attack that
-        // cannot win because the screen is stealing its cores is a lie about proof of work.
+        // cannot win because the screen is stealing its cores is a lie about proof of work. The
+        // threads stop; what they already produced stays, because the recap is about it.
         self.restart();
     }
 
@@ -1314,6 +1345,7 @@ impl KqSession for Session {
                 if self.advance() { Reaction::Handled } else { Reaction::Ignored }
             }
             Action::Reset => {
+                self.forget_results();
                 self.restart();
                 Reaction::Handled
             }
@@ -1578,6 +1610,8 @@ fn short_hash(hash: Hash256) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, split};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1854,6 +1888,82 @@ mod tests {
         session.go_to(STAGE_ATTACK);
         assert!(session.mining.is_none(), "mining carried on into the attack");
         assert_eq!(session.run_state(), RunState::Idle);
+        session.close();
+    }
+
+    /// Ticks the way the shell's clock does, until the run has answered. Fails rather than hanging
+    /// if it never does.
+    fn run_until(session: &mut Session, answered: impl Fn(&Session) -> bool) {
+        let started = Instant::now();
+        while !answered(session) {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "the run never answered, so there is nothing to recap"
+            );
+            session.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A reader reaches the recap by pressing Tab, which is `go_to`, and their numbers have to
+    /// survive the journey. Six of the seven rows once read "not run yet" after a real run.
+    #[test]
+    fn the_recap_keeps_the_numbers_the_reader_made_on_the_way_to_it() {
+        let mut session = session();
+        // The lowest practice difficulty the knob allows, so the two real runs this test drives
+        // are over in milliseconds rather than seconds.
+        session.go_to(STAGE_TUNE);
+        session.chosen = KNOB_DIFFICULTY;
+        for c in "16".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert_eq!(session.zero_bits(), 16);
+
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        run_until(&mut session, |session| {
+            session.mining_snapshot.as_ref().is_some_and(|run| run.blocks_in_chain >= 1)
+        });
+        let mined = format::count(
+            session.mining_snapshot.as_ref().expect("a run to recap").blocks_in_chain,
+        );
+
+        session.go_to(STAGE_ATTACK);
+        walk(&mut session);
+        run_until(&mut session, |session| {
+            session.attack_snapshot.as_ref().is_some_and(|run| run.outcome.is_some())
+        });
+
+        session.go_to(STAGE_RECAP);
+        let text = draw(&session);
+        session.close();
+        // Six of the seven rows have nothing else to say when the results are gone, so this one
+        // line is the whole defect.
+        assert!(!text.contains("not run yet"), "the recap forgot the reader's own run:\n{text}");
+        assert!(text.contains("16 zero bits"), "the difficulty the reader set is gone:\n{text}");
+        assert!(
+            text.contains(&format!("{}{mined}", pad(Msg::RecapBlocks.text(Language::ENGLISH), 21))),
+            "the recap counts blocks the reader did not mine:\n{text}"
+        );
+    }
+
+    /// `r` is the one thing that forgets results, and only the ones made where it was pressed.
+    #[test]
+    fn r_forgets_this_stages_numbers_and_leaves_the_others_alone() {
+        let mut session = session();
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        session.tick();
+        assert!(session.mining_snapshot.is_some());
+
+        session.go_to(STAGE_ATTACK);
+        session.on(Action::Reset);
+        assert!(session.mining_snapshot.is_some(), "`r` on the attack threw away the mining");
+
+        session.go_to(STAGE_MINE);
+        session.on(Action::Reset);
+        assert!(session.mining_snapshot.is_none(), "`r` kept the run it was pressed on");
         session.close();
     }
 }

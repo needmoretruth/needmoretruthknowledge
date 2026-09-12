@@ -126,6 +126,10 @@ const RECAP: &[Step] = &[
 /// The stages' scripts, in the order `lib.rs` declares them.
 const SCRIPTS: [&[Step]; 6] = [COINS, SEND, GROW, TUNE, TWICE, RECAP];
 
+/// Where the recap sits. It runs nothing of its own, so it is the one stage that draws the record
+/// of the last run rather than the ledgers in front of it.
+const STAGE_RECAP: usize = 5;
+
 /// What one [`Deed`] did, kept against the step that caused it so the conversation can be rebuilt
 /// in any language without running anything again.
 struct Done {
@@ -133,11 +137,25 @@ struct Done {
     what: Outcome,
 }
 
+#[derive(Clone)]
 enum Outcome {
     /// One transfer into all three ledgers.
     Transfer(Box<SideBySide<ApplyOutcome>>),
     /// Two transfers against the same state.
     Double(Box<SideBySide<DoubleSpendReport>>),
+}
+
+/// What the last run left behind: the ledgers as they stood when it was over, and what it did to
+/// them.
+///
+/// Every run rebuilds the world from the same three coins of ten, and leaving a stage rebuilds it
+/// again, so by the time the reader reaches the recap the live ledgers no longer remember any of
+/// it. This is the only place what they did still exists.
+struct Kept {
+    /// Which stage produced it, so `r` pressed there forgets it and `r` elsewhere does not.
+    stage: usize,
+    scenario: Scenario,
+    what: Outcome,
 }
 
 pub struct Session {
@@ -146,6 +164,8 @@ pub struct Session {
     revealed: usize,
     scenario: Scenario,
     done: Vec<Done>,
+    /// The last run, kept apart from the live ledgers so the recap can still read it.
+    kept: Option<Kept>,
     knobs: Vec<Knob>,
     chosen: usize,
     alice: Key,
@@ -161,6 +181,7 @@ impl Session {
             revealed: 0,
             scenario: open_ledgers(alice.address()),
             done: Vec::new(),
+            kept: None,
             knobs: vec![
                 Knob::new(
                     "amount",
@@ -188,6 +209,9 @@ impl Session {
 
     /// Throws this stage's ledgers away and opens fresh ones, back at the first sentence. The
     /// knobs keep their values: a reader who set an amount did not ask for it back.
+    ///
+    /// The record of the last run is kept. Rebuilding the world is how every run starts from the
+    /// same three coins of ten; forgetting what the reader did is not part of that.
     fn restart(&mut self) {
         self.revealed = 0;
         self.scenario = open_ledgers(self.alice.address());
@@ -238,7 +262,26 @@ impl Session {
                 Outcome::Double(Box::new(self.scenario.double_spend(&first, &second)))
             }
         };
+        // Kept before the world is rebuilt for the next run, because after that it is gone.
+        let kept = Kept { stage: self.stage, scenario: self.scenario.clone(), what: what.clone() };
+        self.kept = Some(kept);
         self.done.push(Done { step, what });
+    }
+
+    /// The record the panel reads instead of the live ledgers.
+    ///
+    /// Only the recap reads it. Every other stage is looking at a world its own runs made, which
+    /// is in front of it; the recap is looking back at a run whose world has since been rebuilt.
+    fn recorded(&self) -> Option<&Kept> {
+        self.kept.as_ref().filter(|_| self.stage == STAGE_RECAP)
+    }
+
+    /// The ledgers the panel is drawing.
+    fn showing(&self) -> &Scenario {
+        match self.recorded() {
+            Some(kept) => &kept.scenario,
+            None => &self.scenario,
+        }
     }
 
     /// The beats one finished deed is worth.
@@ -268,9 +311,18 @@ impl Session {
         beats
     }
 
+    /// What the panel may draw from, newest first: the record the recap reads, then whatever this
+    /// stage has run since it opened.
+    fn runs(&self) -> impl Iterator<Item = &Outcome> {
+        self.recorded()
+            .map(|kept| &kept.what)
+            .into_iter()
+            .chain(self.done.iter().rev().map(|done| &done.what))
+    }
+
     /// The transfer whose numbers the panel is showing, if any.
     fn latest_transfer(&self) -> Option<&SideBySide<ApplyOutcome>> {
-        self.done.iter().rev().find_map(|done| match &done.what {
+        self.runs().find_map(|what| match what {
             Outcome::Transfer(side) => Some(side.as_ref()),
             Outcome::Double(_) => None,
         })
@@ -278,7 +330,7 @@ impl Session {
 
     /// The double spend, if this stage has run one.
     fn latest_double(&self) -> Option<&SideBySide<DoubleSpendReport>> {
-        self.done.iter().rev().find_map(|done| match &done.what {
+        self.runs().find_map(|what| match what {
             Outcome::Double(reports) => Some(reports.as_ref()),
             Outcome::Transfer(_) => None,
         })
@@ -320,11 +372,12 @@ impl Session {
     /// The balance is drawn once rather than three times because all three agree on it — which is
     /// the point. They disagree about how it is stored, never about how much there is.
     fn ledger_lines(&self, language: Language, theme: Theme) -> Vec<Line<'static>> {
-        let facts = self.scenario.facts();
+        let scenario = self.showing();
+        let facts = scenario.facts();
         let transfer = self.latest_transfer();
         let double = self.latest_double();
         let mut lines = Vec::new();
-        if let Some(balance) = self.scenario.agreed_balance(&self.alice.address()) {
+        if let Some(balance) = scenario.agreed_balance(&self.alice.address()) {
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", Msg::LabelHolds.text(language)), theme.muted()),
                 Span::styled(format::count(balance), theme.heading()),
@@ -456,6 +509,10 @@ impl KqSession for Session {
                 Reaction::Handled
             }
             Action::Reset => {
+                // `r` is the one thing that forgets results, and only the ones made here.
+                if self.kept.as_ref().is_some_and(|kept| kept.stage == self.stage) {
+                    self.kept = None;
+                }
                 self.restart();
                 Reaction::Handled
             }
@@ -632,8 +689,40 @@ fn verdict_line(report: &DoubleSpendReport, language: Language, theme: Theme) ->
 #[cfg(test)]
 mod tests {
     use nmtk_kq::session::Voice;
+    use nmtk_kq::theme::{MIN_HEIGHT, MIN_WIDTH, split};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
+
+    /// Draws the quest's panel exactly where the shell puts it on the smallest screen nmtk allows.
+    fn draw(session: &Session) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).expect("backend");
+        terminal
+            .draw(|frame| {
+                let [_, body, _] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .areas(frame.area());
+                let (talk, run) = split(body.width);
+                let [_, panel] =
+                    Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)])
+                        .areas(body);
+                session.render(frame, panel, Theme::new(true), Language::ENGLISH);
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     /// Presses Enter until the stage runs out of steps.
     fn walk(session: &mut Session) {
@@ -831,6 +920,42 @@ mod tests {
         assert_eq!(session.transcript(Language::ENGLISH).len(), 1);
         let back = session.scenario.balances(&session.alice.address());
         assert_eq!(*back.get(Model::Utxo), 30, "reset did not restore the opening holdings");
+    }
+
+    /// A reader reaches the recap by pressing Tab, which is `go_to`, and the world is rebuilt
+    /// before every run — so the recap has to read the record of what they did rather than the
+    /// opening coins sitting in front of it.
+    #[test]
+    fn the_recap_shows_what_the_reader_did_rather_than_the_opening_coins() {
+        let mut session = Session::new();
+        session.go_to(4);
+        walk(&mut session);
+        assert!(session.latest_double().is_some(), "the attack stage never ran");
+
+        session.go_to(STAGE_RECAP);
+        let text = draw(&session);
+        assert!(text.contains("stopped it"), "the recap lost the three verdicts:\n{text}");
+        assert!(
+            text.contains("Alice holds 20"),
+            "the recap shows the opening coins rather than what the reader spent:\n{text}"
+        );
+    }
+
+    /// `r` forgets the results of the stage it was pressed on, and leaves the rest alone.
+    #[test]
+    fn r_forgets_this_stages_run_and_leaves_the_others_alone() {
+        let mut session = Session::new();
+        session.go_to(4);
+        walk(&mut session);
+
+        session.go_to(1);
+        session.on(Action::Reset);
+        assert!(session.kept.is_some(), "`r` on a stage that ran nothing threw away the attack");
+
+        session.go_to(4);
+        walk(&mut session);
+        session.on(Action::Reset);
+        assert!(session.kept.is_none(), "`r` kept the run it was pressed on");
     }
 
     #[test]
