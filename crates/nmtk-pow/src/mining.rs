@@ -646,6 +646,27 @@ mod tests {
     /// A fixed sleep asserts that a busy machine is a fast one. These tests drive real threads,
     /// and on a machine already running something else a tenth of a second buys no hashes at all —
     /// which made them fail for a reason that had nothing to do with the code.
+    /// Waits until every miner has done some hashing of its own.
+    ///
+    /// Threads do not all start at the same instant, and the first miner's are started first. On
+    /// a machine that is busy with something else, the second miner's can still be starting when
+    /// a window opens — and then the window measures the start order rather than the split.
+    fn wait_until_all_are_hashing(
+        handle: &MiningHandle,
+        each: u64,
+        limit: Duration,
+    ) -> MiningSnapshot {
+        let deadline = Instant::now() + limit;
+        loop {
+            let snapshot = handle.snapshot();
+            let all = snapshot.miners.iter().all(|miner| miner.hashes >= each);
+            if all || Instant::now() > deadline {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait_for_hashes(handle: &MiningHandle, wanted: u64, limit: Duration) -> MiningSnapshot {
         let deadline = Instant::now() + limit;
         loop {
@@ -710,23 +731,22 @@ mod tests {
             100,
         );
         let handle = start_mining(config).expect("valid config");
-        // A hundred threads do not all start at the same instant, and the first miner's are
-        // started first. Measuring the difference between two later readings leaves that out.
-        thread::sleep(Duration::from_millis(300));
-        let start = handle.snapshot();
-        // Enough hashing for the ratio to settle, however long that takes on a busy machine.
-        const ENOUGH: u64 = 4_000_000;
-        let end = wait_for_hashes(&handle, start.total_hashes + ENOUGH, Duration::from_secs(30));
+        // The window opens once both miners are really hashing, not after a fixed wait: on a busy
+        // machine a hundred threads take longer than any sleep worth writing down to come up.
+        let start = wait_until_all_are_hashing(&handle, 100_000, Duration::from_secs(30));
+        // Measured over a stretch of time rather than a count of hashes. What is being tested is
+        // how the scheduler shares a dozen cores between a hundred threads, and that only evens
+        // out over seconds: a window of a few tens of milliseconds measures which threads
+        // happened to be running in it, which is why this used to fail whenever the machine was
+        // busy with something else.
+        thread::sleep(Duration::from_secs(3));
+        let end = handle.snapshot();
         handle.stop();
         assert_eq!(end.miners[0].threads, 51);
         assert_eq!(end.miners[1].threads, 49);
         let bigger = end.miners[0].hashes.saturating_sub(start.miners[0].hashes) as f64;
         let smaller = end.miners[1].hashes.saturating_sub(start.miners[1].hashes) as f64;
-        assert!(
-            bigger + smaller >= ENOUGH as f64,
-            "only {} hashes in thirty seconds",
-            bigger + smaller
-        );
+        assert!(bigger + smaller > 1_000_000.0, "only {} hashes in three seconds", bigger + smaller);
         let share = bigger / (bigger + smaller);
         assert!(
             (share - 0.51).abs() < 0.08,
