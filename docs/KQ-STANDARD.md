@@ -154,7 +154,9 @@ three.
 - A quest's version is **the nmtk version it shipped in**. They move together.
 - Minor or patch is a judgement call; `1.0.0` only on an explicit instruction.
 - Timestamps are **UTC, to the second** (`2026-09-12T10:22:31Z`).
-- Every version of a quest stays reachable from the shelf with `v`.
+- **A release carries one version of each quest: the newest.** Older ones are not shipped beside
+  it. A reader who wants the version they learned from checks out that release of the repository
+  and builds it, which costs them one command and costs every other reader nothing.
 
 ## 7. Values the reader turns
 

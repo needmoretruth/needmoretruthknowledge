@@ -49,15 +49,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     // The order and the narrowing belong to the list, so they are written on the list. They used
     // to sit at the foot of the quest's own panel, where a quest with a long summary pushed them
     // off the bottom and pressing o or f looked like the program losing quests.
-    let title = match app.versions_of {
-        Some(_) => t(Msg::OlderVersions, language).to_string(),
-        None => format!(
-            "{}  ·  {}  ·  {}",
-            t(Msg::Quests, language),
-            t(sort_name(app.sort), language),
-            t(filter_name(&app.filter), language)
-        ),
-    };
+    let title = format!(
+        "{}  ·  {}  ·  {}",
+        t(Msg::Quests, language),
+        t(sort_name(app.sort), language),
+        t(filter_name(&app.filter), language)
+    );
     let title = truncate(&title, list_area.width.saturating_sub(4) as usize);
     let list_block = theme.titled_panel(&title);
     let inner = list_block.inner(list_area);
@@ -102,7 +99,7 @@ fn rows<'a>(
     theme: Theme,
     language: Language,
 ) -> Vec<Line<'a>> {
-    let group = app.sort == SortKey::Category && app.versions_of.is_none();
+    let group = app.sort == SortKey::Category;
     let mut lines = Vec::new();
     let mut last: Option<Category> = None;
     for (index, quest) in quests.iter().enumerate() {

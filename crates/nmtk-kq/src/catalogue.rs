@@ -1,7 +1,8 @@
 //! The list of quests, and the orders a reader can put it in.
 //!
-//! Several versions of the same quest live here at once. The list shows the newest of each by
-//! default, and a reader who learned from an older one can always open exactly that.
+//! One quest per id: a release carries the newest version of each and nothing else. Someone who
+//! wants the version they learned from checks out that release of the repository and builds it,
+//! which is what a repository is for.
 
 use std::cmp::Reverse;
 
@@ -50,7 +51,7 @@ impl Filter {
     }
 }
 
-/// Every quest the program knows, every version of it.
+/// Every quest the program knows.
 pub struct Catalogue {
     entries: Vec<Box<dyn Kq>>,
 }
@@ -68,7 +69,8 @@ impl Catalogue {
         self.entries.is_empty()
     }
 
-    /// The newest version of every quest, filtered and ordered.
+    /// Every quest, filtered and ordered. Two entries sharing an id would be a packaging mistake,
+    /// and the newer of them is the one that is shown.
     pub fn list(&self, filter: &Filter, sort: SortKey, language: Language) -> Vec<&dyn Kq> {
         let mut newest: Vec<&dyn Kq> = Vec::new();
         for quest in self.entries.iter().map(|entry| entry.as_ref()) {
@@ -85,16 +87,9 @@ impl Catalogue {
         newest
     }
 
-    /// Every version of one quest, newest first. A reader can open any of them.
-    pub fn versions_of(&self, id: KqId) -> Vec<&dyn Kq> {
-        let mut found: Vec<&dyn Kq> = self
-            .entries
-            .iter()
-            .map(|entry| entry.as_ref())
-            .filter(|quest| quest.meta().id == id)
-            .collect();
-        found.sort_by_key(|quest| Reverse(quest.meta().version));
-        found
+    /// One quest by its permanent name.
+    pub fn find(&self, id: KqId) -> Option<&dyn Kq> {
+        self.entries.iter().map(|entry| entry.as_ref()).find(|quest| quest.meta().id == id)
     }
 
     /// The categories that actually have quests in them.

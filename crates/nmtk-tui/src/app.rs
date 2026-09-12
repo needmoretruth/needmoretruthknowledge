@@ -74,8 +74,6 @@ pub struct App {
     pub list_index: usize,
     pub sort: SortKey,
     pub filter: Filter,
-    /// Set while the reader is looking at the older versions of one quest.
-    pub versions_of: Option<KqId>,
     pub open: Option<OpenQuest>,
     pub settings_index: usize,
     /// Which row the language list is on while it is open.
@@ -104,7 +102,6 @@ impl App {
             list_index: 0,
             sort: SortKey::Category,
             filter: Filter::default(),
-            versions_of: None,
             open: None,
             settings_index: 0,
             language_index: 0,
@@ -125,12 +122,9 @@ impl App {
         self.settings.resolved_worker_threads(&self.machine)
     }
 
-    /// The rows the shelf is showing: either the newest of each quest, or every version of one.
+    /// The rows the shelf is showing.
     pub fn visible(&self) -> Vec<&dyn Kq> {
-        match self.versions_of {
-            Some(id) => self.catalogue.versions_of(id),
-            None => self.catalogue.list(&self.filter, self.sort, self.language()),
-        }
+        self.catalogue.list(&self.filter, self.sort, self.language())
     }
 
     /// Handles one key. Releases and repeats are ignored: a held key must not open a quest twice.
@@ -225,11 +219,9 @@ impl App {
             KeyCode::Enter => self.open_chosen(),
             KeyCode::Char('o') => self.cycle_sort(),
             KeyCode::Char('f') => self.cycle_filter(),
-            KeyCode::Char('v') => self.toggle_versions(),
             KeyCode::Char('s') => self.screen = Screen::Settings,
             KeyCode::Char('l') => self.toggle_language(),
             KeyCode::Char('?') => self.open_help(),
-            KeyCode::Esc if self.versions_of.is_some() => self.toggle_versions(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             _ => {}
         }
@@ -364,10 +356,7 @@ impl App {
     /// The quest definition behind the open session, for its stage names.
     pub fn open_definition(&self) -> Option<&dyn Kq> {
         let open = self.open.as_ref()?;
-        self.catalogue
-            .versions_of(open.id)
-            .into_iter()
-            .find(|quest| quest.meta().version == open.version)
+        self.catalogue.find(open.id)
     }
 
     /// Called after each draw so scrolling cannot run past the end of a conversation that changed.
@@ -396,13 +385,10 @@ impl App {
             })
         };
         let Some((id, version, stages)) = chosen else { return };
-        let opened = {
-            let versions = self.catalogue.versions_of(id);
-            versions
-                .iter()
-                .find(|quest| quest.meta().version == version)
-                .map(|quest| (quest.title(self.settings.language), quest.open(&self.machine)))
-        };
+        let opened = self
+            .catalogue
+            .find(id)
+            .map(|quest| (quest.title(self.settings.language), quest.open(&self.machine)));
         if let Some((title, session)) = opened {
             self.close_quest();
             self.open = Some(OpenQuest { id, version, title, stages, session });
@@ -437,25 +423,6 @@ impl App {
                 match at {
                     Some(index) if index + 1 < categories.len() => Some(categories[index + 1]),
                     _ => None,
-                }
-            }
-        };
-        self.list_index = 0;
-    }
-
-    fn toggle_versions(&mut self) {
-        self.versions_of = match self.versions_of {
-            Some(_) => None,
-            None => {
-                let id = self.visible().get(self.list_index).map(|quest| quest.meta().id);
-                // A view named for older versions that contains only the current one teaches the
-                // reader that the key is broken. With nothing older to show, say so and stay put.
-                match id.filter(|id| self.catalogue.versions_of(*id).len() > 1) {
-                    Some(id) => Some(id),
-                    None => {
-                        self.status = Some(Msg::OnlyVersion);
-                        return;
-                    }
                 }
             }
         };

@@ -119,7 +119,7 @@ The only key you need to start is `Enter`.
 | `PgUp` `PgDn` | scroll back through what has been said |
 | `Space` | pause and resume a run |
 | `r` | start this stage over |
-| `o` `f` `v` | on the shelf: sort, filter, older versions |
+| `o` `f` | on the list: sort and filter |
 | `l` | pick a language |
 | `s` | settings |
 | `?` | every key, grouped by where it works |
@@ -147,10 +147,9 @@ You can change the thread count, the language and colour under `s`, and your cho
 the list can mark them. It is the only thing nmtk records about what you did, and it never leaves
 your machine.
 
-Quests keep their version, and nmtk can hold several versions of the same quest at once — `v` on
-the list opens them. While nmtk is below `1.0` the format itself is still changing, so a new
-version of a quest replaces the old one rather than sitting beside it, and `v` says so. Once the
-shape settles, the version you learned from stays reachable for good.
+Quests carry their version, and a release carries one version of each: the newest. Nothing is
+kept around from before. If you want the version you learned from, check out that release of this
+repository and build it — the whole history is there, and it is what a repository is for.
 
 ## What nmtk will not do
 

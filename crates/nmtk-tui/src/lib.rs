@@ -135,7 +135,6 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
             say("l", Msg::KeyLanguage),
             say("o", Msg::LabelSort),
             say("f", Msg::LabelFilter),
-            say("v", Msg::LabelVersion),
         ],
         Screen::Settings => vec![
             say("↑↓", Msg::KeyMove),
@@ -285,19 +284,6 @@ mod tests {
             .find(|line| line.contains(&title) && line.contains("v0."))
             .expect("the finished quest is on the list");
         assert!(row.contains('+'), "the finished quest carries no mark: {row:?}");
-    }
-
-    /// `v` opened a view titled for older versions that held only the current one.
-    #[test]
-    fn asking_for_older_versions_of_a_quest_that_has_none_says_so() {
-        let mut app = app_in(Language::ENGLISH);
-        press(&mut app, KeyCode::Char('v'));
-        assert!(app.versions_of.is_none(), "an empty version view opened");
-        let text = shot(&mut app, 100, 30);
-        println!("\n===== v with nothing older =====\n{text}");
-        let said = t(Msg::OnlyVersion, Language::ENGLISH);
-        let head: String = said.chars().take(20).collect();
-        assert!(text.contains(&head), "nothing was said:\n{text}");
     }
 
     #[test]

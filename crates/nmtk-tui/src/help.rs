@@ -15,7 +15,7 @@ use nmtk_kq::Theme;
 ///
 /// A key that works and is not here is the same failure as a key that is here and does nothing:
 /// the reader who never finds Space concludes a run cannot be paused.
-const KEYS: [(Option<&str>, Msg); 20] = [
+const KEYS: [(Option<&str>, Msg); 19] = [
     (None, Msg::HelpEverywhere),
     (Some("l"), Msg::KeyLanguage),
     (Some("s"), Msg::KeySettings),
@@ -26,7 +26,6 @@ const KEYS: [(Option<&str>, Msg); 20] = [
     (Some("Enter"), Msg::KeyOpen),
     (Some("o"), Msg::LabelSort),
     (Some("f"), Msg::LabelFilter),
-    (Some("v"), Msg::LabelVersion),
     (None, Msg::HelpInAQuest),
     (Some("Enter"), Msg::KeyContinue),
     (Some("Tab"), Msg::KeyStage),
