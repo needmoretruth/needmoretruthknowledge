@@ -42,9 +42,9 @@ impl Kq for ZeroKnowledge {
     fn meta(&self) -> KqMeta {
         KqMeta {
             id: KqId("cryptography.zero-knowledge"),
-            version: Version::new(0, 1, 1),
+            version: Version::new(0, 2, 0),
             released: Stamp::new(2026, 9, 12, 10, 20, 48),
-            updated: Stamp::new(2026, 9, 12, 12, 28, 17),
+            updated: Stamp::new(2026, 9, 12, 14, 40, 42),
             category: Category::Cryptography,
             subcategory: "zero-knowledge",
             difficulty: Difficulty::Hard,

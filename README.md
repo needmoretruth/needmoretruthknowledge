@@ -147,9 +147,10 @@ You can change the thread count, the language and colour under `s`, and your cho
 the list can mark them. It is the only thing nmtk records about what you did, and it never leaves
 your machine.
 
-Quests keep their version. From 0.1.1 on, a quest is never rewritten out from under you: when a
-new version ships the old one stays in the program, and `v` on the shelf opens exactly the one you
-learned from. The 0.1.0 quests were replaced rather than kept, because the format itself changed.
+Quests keep their version, and nmtk can hold several versions of the same quest at once — `v` on
+the list opens them. While nmtk is below `1.0` the format itself is still changing, so a new
+version of a quest replaces the old one rather than sitting beside it, and `v` says so. Once the
+shape settles, the version you learned from stays reachable for good.
 
 ## What nmtk will not do
 
