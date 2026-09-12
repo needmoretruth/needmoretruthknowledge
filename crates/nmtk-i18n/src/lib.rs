@@ -66,6 +66,15 @@ messages! {
     MenuZeroKnowledge { en: "Zero-knowledge proofs", ko: "영지식 증명" },
     MenuZeroKnowledgeAbout { en: "Prove you know a secret without showing it, from sigma protocols to halo2, seen from four sides.", ko: "비밀을 보여 주지 않고 안다는 것만 증명합니다. 시그마 프로토콜부터 halo2까지, 네 사람의 눈으로 봅니다." },
     MenuSettings { en: "Settings", ko: "설정" },
+
+    // ---- The first launch, and the only time nmtk asks anything ------------------
+    WelcomeTitle { en: "Welcome", ko: "환영합니다" },
+    WelcomeOne { en: "nmtk is a program for learning by running the real thing on your own machine.", ko: "nmtk는 진짜를 내 컴퓨터에서 직접 돌려 보며 배우는 프로그램입니다." },
+    WelcomeTwo { en: "Every quest talks you through one subject, one sentence at a time, and the numbers you see were measured here.", ko: "각 퀘스트가 한 주제를 한 문장씩 이야기해 주고, 화면의 숫자는 전부 여기서 실제로 잰 값입니다." },
+    WelcomeThree { en: "Nothing goes to the network. Ever.", ko: "네트워크로 나가는 것은 아무것도 없습니다. 한 번도요." },
+    WelcomeFour { en: "A few things to set first. You can change any of them later with s.", ko: "먼저 몇 가지만 정합니다. 나중에 s를 눌러 언제든 바꿀 수 있습니다." },
+    WelcomeStart { en: "start", ko: "시작" },
+    WelcomeSaved { en: "Saved. Everything else is on the shelf.", ko: "저장했습니다. 나머지는 선반에 있습니다." },
     MenuSettingsAbout { en: "Language, threads, colour, and the defaults each subject starts from.", ko: "언어, 스레드 수, 색, 그리고 각 주제가 시작하는 기본값." },
     MenuQuit { en: "Quit", ko: "끝내기" },
     // ---- Quest list -----------------------------------------------------------

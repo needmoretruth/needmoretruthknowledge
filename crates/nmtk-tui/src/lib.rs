@@ -12,6 +12,7 @@ mod logo;
 mod quest;
 mod quests;
 mod settings_screen;
+mod welcome;
 
 use std::io;
 use std::time::Duration;
@@ -78,6 +79,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     chrome::title_bar(frame, title_area, theme, &screen_title(app, language), language);
 
     match app.screen {
+        Screen::Welcome => welcome::render(frame, body_area, app, theme),
         Screen::Quests => quests::render(frame, body_area, app, theme),
         Screen::Settings => settings_screen::render(frame, body_area, app, theme),
         Screen::Help => help::render(frame, body_area, language, theme),
@@ -101,6 +103,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn screen_title(app: &App, language: nmtk_core::Language) -> String {
     match app.screen {
+        Screen::Welcome => t(Msg::WelcomeTitle, language).to_string(),
         Screen::Quests => t(Msg::Quests, language).to_string(),
         Screen::Settings => t(Msg::MenuSettings, language).to_string(),
         Screen::Help => t(Msg::HelpTitle, language).to_string(),
@@ -116,6 +119,12 @@ fn screen_title(app: &App, language: nmtk_core::Language) -> String {
 fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, String)> {
     let say = |key: &'static str, message: Msg| (key, t(message, language).to_string());
     match app.screen {
+        Screen::Welcome => vec![
+            say("↑↓", Msg::KeyMove),
+            say("←→", Msg::KeyChoose),
+            say("l", Msg::KeyLanguage),
+            say("Enter", Msg::WelcomeStart),
+        ],
         Screen::Quests => vec![
             say("↑↓", Msg::KeyMove),
             say("Enter", Msg::KeyOpen),
@@ -311,6 +320,39 @@ mod tests {
         for key in ["Tab", "PgUp", "o", "f", "v"] {
             assert!(text.contains(key), "help left out {key}:\n{text}");
         }
+    }
+
+    /// The one screen a reader who has never run nmtk sees. It has to say what this is, and it
+    /// has to offer the language before anything else, because a Korean reader arrives at a
+    /// screen of English and needs a way out of it that does not require reading English.
+    #[test]
+    fn the_first_launch_says_what_nmtk_is_and_offers_the_language_first() {
+        for language in Language::ALL {
+            let mut app = app_in(*language);
+            app.screen = Screen::Welcome;
+            let text = shot(&mut app, 80, 30);
+            println!("\n===== welcome ({language}) =====\n{text}");
+            let flat = text.replace(' ', "");
+            assert!(flat.contains("nmtk"), "the program does not name itself:\n{text}");
+            let network = t(Msg::WelcomeThree, *language).replace(' ', "");
+            assert!(flat.contains(&network), "the offline promise is missing:\n{text}");
+            let rows = text.lines().position(|line| line.contains("▸")).expect("a chosen row");
+            assert!(rows > 0, "nothing is chosen:\n{text}");
+            assert!(
+                text.lines().nth(rows).unwrap().replace(' ', "").contains(
+                    &t(Msg::SettingsLanguage, *language).replace(' ', "")
+                ),
+                "the first row is not the language:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_on_the_first_launch_writes_the_settings_and_opens_the_shelf() {
+        let mut app = app_in(Language::ENGLISH);
+        app.screen = Screen::Welcome;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.screen, Screen::Quests, "Enter did not finish the setup");
     }
 
     #[test]

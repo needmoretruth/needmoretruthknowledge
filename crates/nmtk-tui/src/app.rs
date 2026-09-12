@@ -42,6 +42,8 @@ impl SettingItem {
 /// Which screen is in front.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    /// The first launch: what nmtk is, and the settings worth having before the first quest.
+    Welcome,
     /// The shelf of quests.
     Quests,
     /// A quest a reader has opened.
@@ -92,11 +94,12 @@ pub struct App {
 
 impl App {
     pub fn new(catalogue: Catalogue) -> Self {
+        let (settings, first_run) = Settings::load_saying_whether_it_is_the_first_time();
         Self {
-            settings: Settings::load(),
+            settings,
             machine: MachineProfile::detect(),
             catalogue,
-            screen: Screen::Quests,
+            screen: if first_run { Screen::Welcome } else { Screen::Quests },
             behind_help: None,
             list_index: 0,
             sort: SortKey::Category,
@@ -142,11 +145,39 @@ impl App {
         }
         self.status = None;
         match self.screen {
+            Screen::Welcome => self.on_key_welcome(key.code),
             Screen::Help => self.on_key_help(key.code),
             Screen::Languages => self.on_key_languages(key.code),
             Screen::Quests => self.on_key_quests(key.code),
             Screen::Quest => self.on_key_quest(key.code),
             Screen::Settings => self.on_key_settings(key.code),
+        }
+    }
+
+    /// The first launch. Enter finishes it, and finishing it writes the file that means it is
+    /// never shown again — even if nothing was changed, because "English is fine" is an answer.
+    fn on_key_welcome(&mut self, code: KeyCode) {
+        let count = SettingItem::ALL.len();
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_index = previous(self.settings_index, count)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_index = next(self.settings_index, count)
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.adjust_setting(-1),
+            KeyCode::Right => self.adjust_setting(1),
+            KeyCode::Char('l') => self.toggle_language(),
+            KeyCode::Enter => {
+                self.remember();
+                self.screen = Screen::Quests;
+                self.settings_index = 0;
+            }
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.remember();
+                self.quit = true;
+            }
+            _ => {}
         }
     }
 

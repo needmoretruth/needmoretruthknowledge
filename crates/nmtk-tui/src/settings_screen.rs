@@ -8,6 +8,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app::{App, SettingItem};
 use nmtk_kq::Theme;
+use nmtk_kq::text::pad;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let area = centred(area, 72);
@@ -28,7 +29,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             let marker = if index == selected { "▸ " } else { "  " };
             let style = if index == selected { theme.selected() } else { theme.plain() };
             Line::from(vec![
-                Span::styled(format!("{marker}{:<16}", t(item.title(), language)), style),
+                Span::styled(format!("{marker}{}", pad(t(item.title(), language), 18)), style),
                 Span::styled(value_of(*item, app, language), theme.heading()),
             ])
         })
@@ -56,8 +57,9 @@ fn centred(area: Rect, width: u16) -> Rect {
     Rect { x, width, ..area }
 }
 
-/// The value as the reader sees it, brackets included.
-fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> String {
+/// The value as the reader sees it, brackets included. Shared with the first-launch screen so the
+/// same setting never reads two different ways.
+pub fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> String {
     match item {
         SettingItem::Language => format!("[ {} ]", app.settings.language.endonym()),
         SettingItem::Threads => {

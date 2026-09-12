@@ -5,7 +5,7 @@
 //! not an error: nmtk starts with defaults sized for the machine and says nothing.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,9 +32,28 @@ impl Default for Settings {
 impl Settings {
     /// Settings from disk, or defaults. Never fails and never blocks startup.
     pub fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default() };
-        let Ok(text) = fs::read_to_string(path) else { return Self::default() };
-        toml::from_str(&text).unwrap_or_default()
+        Self::load_saying_whether_it_is_the_first_time().0
+    }
+
+    /// The same, and whether nothing was found to read.
+    ///
+    /// A reader with no settings file has never run nmtk before, and that is the one moment worth
+    /// stopping to ask them what language they read in. Afterwards the file exists and the
+    /// question is never asked again.
+    pub fn load_saying_whether_it_is_the_first_time() -> (Self, bool) {
+        match Self::path().and_then(|path| Self::read_from(&path)) {
+            Some(settings) => (settings, false),
+            None => (Self::default(), true),
+        }
+    }
+
+    /// Settings from one named file, or nothing when there is no file to read.
+    ///
+    /// A file that exists but does not parse is not a first launch: the reader has been here
+    /// before, and asking them to set nmtk up again because a line got damaged would be rude.
+    fn read_from(path: &Path) -> Option<Self> {
+        let text = fs::read_to_string(path).ok()?;
+        Some(toml::from_str(&text).unwrap_or_default())
     }
 
     /// Writes the settings, creating the directory if needed.
@@ -121,6 +140,29 @@ mod tests {
         let settings = Settings { language: Language::KOREAN, worker_threads: 3, colour: false };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+    }
+
+    /// The first launch is the only moment nmtk asks anything, so it has to be told apart from
+    /// every launch after it — including from a launch whose file is damaged.
+    #[test]
+    fn a_missing_file_is_a_first_launch_and_a_damaged_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("nmtk-settings-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let _ = fs::remove_file(&path);
+        assert!(Settings::read_from(&path).is_none(), "a file that is not there was read");
+
+        fs::create_dir_all(&dir).expect("a directory under the temp dir");
+        fs::write(&path, "this is not toml at all\n").expect("a file under the temp dir");
+        assert_eq!(
+            Settings::read_from(&path),
+            Some(Settings::default()),
+            "a damaged file should give defaults, not a fresh setup"
+        );
+
+        fs::write(&path, "language = \"ko\"\n").expect("a file under the temp dir");
+        assert_eq!(Settings::read_from(&path).map(|s| s.language), Some(Language::KOREAN));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
