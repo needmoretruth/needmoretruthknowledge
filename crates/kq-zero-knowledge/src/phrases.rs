@@ -34,10 +34,10 @@ nmtk_i18n::messages! {
     // ---- Stage 2: the four systems ---------------------------------------------------
     FourOne { en: "Four systems run here, in the order the field arrived at them.", ko: "여기서 네 가지 방식이 돕니다. 이 분야가 실제로 거쳐 온 순서 그대로입니다." },
     FourTwo { en: "Each fixes something the one before it could not, and each asks you to trust something different.", ko: "각각은 앞의 것이 풀지 못한 것을 풀고, 각각 다른 것을 믿으라고 요구합니다." },
-    FourSigma { en: "A sigma protocol is three messages, and the verifier has to be there while you prove.", ko: "시그마 프로토콜은 메시지 세 번이고, 증명하는 동안 검증자가 그 자리에 있어야 합니다." },
-    FourFiatShamir { en: "Fiat-Shamir turns the verifier's coin flip into a hash, so the conversation becomes a file anyone can check later.", ko: "피아트-샤미르는 검증자의 동전 던지기를 해시로 바꿉니다. 주고받던 대화가 누구나 나중에 검사할 수 있는 파일이 됩니다." },
-    FourTrustedSetup { en: "A trusted setup buys short proofs, but is sound only because a number was destroyed after the setup.", ko: "신뢰 설정은 짧은 증명을 얻지만, 설정 뒤에 어떤 수를 없앴다는 전제에서만 안전합니다." },
-    FourHalo2 { en: "halo2 is a real circuit, really compiled on this machine, with no setup to trust.", ko: "halo2는 진짜 회로이고, 이 컴퓨터에서 실제로 컴파일됩니다. 믿어야 할 설정이 없습니다." },
+    FourSigma { en: "The first one needs the two of you there at the same time. Fine for a login, useless for a chain nobody is watching.", ko: "첫 번째 방식은 둘이 같은 자리에 함께 있어야 합니다. 로그인에는 괜찮지만, 아무도 지켜보지 않는 체인에는 쓸 수 없습니다." },
+    FourFiatShamir { en: "The second takes the verifier out of the room, and the proof becomes a file. Anyone can check it, a year later, alone.", ko: "두 번째는 검증자를 그 자리에서 빼냅니다. 증명이 파일이 되니, 누구든 일 년 뒤에 혼자서도 검사할 수 있습니다." },
+    FourTrustedSetup { en: "The third makes that file far smaller, in exchange for one promise you cannot check: that a certain number was destroyed.", ko: "세 번째는 그 파일을 훨씬 작게 만듭니다. 대신 검사할 수 없는 약속 하나를 받아야 합니다. 어떤 수를 없앴다는 약속입니다." },
+    FourHalo2 { en: "The fourth asks for no such promise, and pays for that in time. You will watch it take the longest of the four.", ko: "네 번째는 그런 약속을 요구하지 않습니다. 대신 시간으로 값을 치릅니다. 넷 중 가장 오래 걸리는 것을 곧 보게 됩니다." },
     FourNumbers { en: "Three numbers separate them: how long a proof takes to make, how long it takes to check, and how big it is.", ko: "셋을 가르는 숫자는 셋입니다. 증명을 만드는 시간, 검사하는 시간, 그리고 증명의 크기." },
 
     // ---- Stage 3: running them ---------------------------------------------------------
@@ -48,7 +48,9 @@ nmtk_i18n::messages! {
     RunWhy { en: "That is the whole reason the later systems exist.", ko: "뒤에 나온 방식들이 존재하는 이유가 그것입니다." },
 
     // ---- Stage 4: the three messages ------------------------------------------------------
-    SigmaIntro { en: "The first system is three messages. Walk through them one at a time.", ko: "첫 번째 방식은 메시지 세 번입니다. 하나씩 따라가 봅니다." },
+    SigmaIntro { en: "The first system sends three messages. Five steps to walk, because what sits on the table at the start and the verdict at the end each deserve a stop.", ko: "첫 번째 방식은 메시지를 세 번 주고받습니다. 걸음은 다섯입니다. 처음에 놓여 있는 것과 마지막 판정도 한 번씩 볼 값이 있기 때문입니다." },
+    SigmaOneWay { en: "It all rests on one sum that is easy one way and hopeless the other: multiply a secret by a fixed starting point, and nobody can work the secret back out.", ko: "모든 것이 계산 하나에 기댑니다. 한쪽으로는 쉽고 반대로는 가망이 없는 계산입니다. 비밀 수에 고정된 출발점을 곱하면, 아무도 그 비밀을 되짚어 낼 수 없습니다." },
+    SigmaNames { en: "Three names and that is the whole vocabulary: the secret is x, the fixed starting point is G, and what the two make together is P.", ko: "이름 셋이면 낱말은 끝입니다. 비밀은 x, 고정된 출발점은 G, 둘이 함께 만들어 내는 것이 P입니다." },
     SigmaLesson { en: "Three messages, and the verifier ends up certain without ever seeing the secret.", ko: "메시지 셋으로, 검증자는 비밀을 한 번도 보지 않고 확신에 이릅니다." },
 
     // ---- Stage 5: your run ------------------------------------------------------------------
@@ -125,11 +127,11 @@ nmtk_i18n::messages! {
     SideProver { en: "from the prover", ko: "증명자가 보냄" },
     SideVerifier { en: "from the verifier", ko: "검증자가 보냄" },
     SidePublic { en: "agreed beforehand", ko: "미리 합의된 값" },
-    WhyStatement { en: "P = x times G. Everyone knows the point P. Only the prover knows the number x behind it.", ko: "P = x 곱하기 G입니다. 점 P는 누구나 압니다. 그 뒤에 있는 수 x는 증명자만 압니다." },
-    WhyCommitment { en: "The prover picks a random r and sends R = r times G. Nothing about x has been said yet.", ko: "증명자가 무작위 수 r을 골라 R = r 곱하기 G를 보냅니다. 아직 x에 대해서는 아무 말도 하지 않았습니다." },
+    WhyStatement { en: "P sits in the open for anyone to look at. Only the prover knows the x behind it, and that is exactly what they are about to prove.", ko: "P는 누구나 볼 수 있게 놓여 있습니다. 그 뒤의 x는 증명자만 알고, 바로 그것을 증명하려는 참입니다." },
+    WhyCommitment { en: "The prover picks a throwaway number r and sends R, made from r exactly the way P was made from x. Still nothing about x.", ko: "증명자가 쓰고 버릴 수 r을 골라 R을 보냅니다. P를 x로 만든 것과 똑같은 방법으로 r에서 만든 것입니다. 아직 x에 대해서는 아무것도 없습니다." },
     WhyChallenge { en: "Only now, with R already in hand, does the verifier draw a fresh number c. The prover could not have prepared an answer for it.", ko: "R을 이미 손에 쥔 지금에서야 검증자가 새 수 c를 뽑습니다. 증명자는 그 수에 대한 답을 미리 준비해 둘 수 없었습니다." },
-    WhyResponse { en: "The prover answers s = r + c times x. Without x there is nothing to answer with, and s on its own hides x behind r.", ko: "증명자가 s = r + c 곱하기 x로 답합니다. x가 없으면 답할 것이 없고, s 하나만으로는 r 뒤에 x가 가려집니다." },
-    WhyVerdict { en: "The verifier checks that s times G equals R plus c times P. It never sees x, and it never learns it.", ko: "검증자는 s 곱하기 G가 R 더하기 c 곱하기 P와 같은지 봅니다. x를 본 적도 없고, 알게 되지도 않습니다." },
+    WhyResponse { en: "The prover answers s = r + c times x: the secret mixed with the challenge, and buried under the throwaway number. Without x there is nothing to answer with.", ko: "증명자가 s = r + c 곱하기 x로 답합니다. 비밀을 도전 값과 섞은 뒤 쓰고 버릴 수 밑에 묻은 것입니다. x가 없으면 답할 것이 없습니다." },
+    WhyVerdict { en: "One check settles it: s times G has to come out equal to R plus c times P. It only adds up if x was really there, and x never appears.", ko: "검사 한 번으로 끝납니다. s 곱하기 G가 R 더하기 c 곱하기 P와 같아야 합니다. x가 실제로 있어야만 맞아떨어지고, x는 끝내 나타나지 않습니다." },
     KeyNextMessage { en: "next message", ko: "다음 메시지" },
     // ---- Tune ------------------------------------------------------------------
     TuneTitle { en: "Your run", ko: "내 설정으로 돌리기" },
@@ -158,6 +160,10 @@ nmtk_i18n::messages! {
     ForgeOverspend { en: "spent more than the note held", ko: "쪽지에 든 것보다 많이 씀" },
     VerdictAccepted { en: "accepted", ko: "통과" },
     VerdictRejected { en: "rejected", ko: "거절" },
+    // The same two facts from the system's side, for the column whose mark is about the system.
+    // "+ guessed the response  rejected" put a success mark on a refusal and read as a mistake.
+    VerdictHeld { en: "held", ko: "막음" },
+    VerdictBroken { en: "broken", ko: "뚫림" },
     WasteHolds { en: "The commitment holds", ko: "커밋먼트에 든 값" },
     WasteOpened { en: "It was opened as", ko: "열어 보인 값" },
     WasteVerifier { en: "The unchanged verifier said", ko: "손대지 않은 검증자의 답" },

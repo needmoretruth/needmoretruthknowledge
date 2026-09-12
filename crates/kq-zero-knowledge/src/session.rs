@@ -274,6 +274,10 @@ const RUN: &[Step] = &[
 /// The interactive protocol, one message at a time.
 const MESSAGES: &[Step] = &[
     Say(Msg::SigmaIntro),
+    // The vocabulary before the algebra. A reviewer reached "P = x times G" without having been
+    // told what a point or a G is, and stopped reading there.
+    Say(Msg::SigmaOneWay),
+    Say(Msg::SigmaNames),
     Run(Sigma),
     Await(Until::Finished),
     Run(Message(0)),
@@ -674,8 +678,8 @@ impl Session {
             return vec![Line::from(Span::styled(text.text(language).to_string(), theme.muted()))];
         }
         // Two cells in front of every attack carry the mark, and the verdict closes the row.
-        let verdict_column = text::width(Msg::VerdictAccepted.text(language))
-            .max(text::width(Msg::VerdictRejected.text(language)));
+        let verdict_column = text::width(Msg::VerdictHeld.text(language))
+            .max(text::width(Msg::VerdictBroken.text(language)));
         let attacks: Vec<Msg> = self
             .outcomes
             .iter()
@@ -699,8 +703,8 @@ impl Session {
                 }
                 // Green means the system held, which is an attack that was refused.
                 let state = if attempt.accepted { State::Bad } else { State::Good };
-                let verdict =
-                    if attempt.accepted { Msg::VerdictAccepted } else { Msg::VerdictRejected };
+                // The mark is about the system, so the word beside it is too.
+                let verdict = if attempt.accepted { Msg::VerdictBroken } else { Msg::VerdictHeld };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", state.mark()), theme.state(state)),
                     Span::styled(
@@ -1708,6 +1712,27 @@ mod tests {
     /// Walking to another stage stopped the runs and threw their measurements away with them,
     /// so the last stage — which draws its four viewpoints out of exactly those measurements —
     /// was empty however much work the reader had done.
+    /// The standard's limit on one beat, and the reason it is a limit: a reviewer who met three
+    /// dense sentences at once stopped reading the quest at that point.
+    #[test]
+    fn every_beat_of_every_stage_is_short_in_both_languages() {
+        for (stage, script) in SCRIPTS.iter().enumerate() {
+            for language in Language::ALL {
+                for step in *script {
+                    let text = match step {
+                        Say(message) | Ask(message) => message.text(*language),
+                        _ => continue,
+                    };
+                    assert!(
+                        text.chars().count() <= 160,
+                        "stage {stage} in {language} says too much at once: {text:?}"
+                    );
+                    assert!(!text.is_empty(), "stage {stage} has a blank beat in {language}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn walking_to_another_stage_keeps_what_the_runs_measured() {
         let mut session = finished();

@@ -431,8 +431,11 @@ mod tests {
 
         assert!(screen.contains("guessed the response"), "no sigma attack:\n{screen}");
         assert!(screen.contains("kept the setup randomness"), "no waste attack:\n{screen}");
+        // The attack table answers for the system, because that is what its mark is about.
+        assert!(screen.contains("broken"), "no system broken on screen:\n{screen}");
+        assert!(screen.contains("held"), "no system held on screen:\n{screen}");
+        // The verifier's own word stays where the lesson is that a verifier accepted a forgery.
         assert!(screen.contains("accepted"), "no acceptance on screen:\n{screen}");
-        assert!(screen.contains("rejected"), "no rejection on screen:\n{screen}");
 
         // And the conversation itself names the two that got through.
         let beats = session.transcript(Language::ENGLISH);
