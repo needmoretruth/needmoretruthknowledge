@@ -45,6 +45,10 @@ pub fn render(
     } else if quest.session.run_state() == RunState::Running {
         // A conversation that has stopped and says nothing reads as a program that has hung.
         beats.push(nmtk_kq::Beat::event(t(Msg::ConversationWorking, language).to_string()));
+    } else if quest.session.at_end() {
+        // The last stage of the last quest used to end in silence with "Enter continue" still in
+        // the key bar, so the reader pressed it until they concluded the program was broken.
+        beats.push(nmtk_kq::Beat::say(t(Msg::ConversationFinished, language).to_string()));
     }
     let furthest = conversation::render(frame, inner, theme, &beats, app.transcript_scroll);
 

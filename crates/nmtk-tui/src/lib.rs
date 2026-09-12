@@ -150,8 +150,16 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
         Screen::Quest => {
             // Ordered by how badly a reader needs it, because a narrow terminal keeps the front
             // of this list and drops the back.
-            let mut keys =
-                vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack), say("?", Msg::KeyHelp)];
+            let over = app.open.as_ref().is_some_and(|quest| {
+                quest.session.at_end() && quest.session.stage() + 1 >= quest.stages.len()
+            });
+            // At the end of the last stage Enter has nothing left to carry, so it stops being
+            // offered rather than being offered and doing nothing.
+            let mut keys = if over {
+                vec![say("q", Msg::KeyBack), say("Tab", Msg::KeyStage), say("?", Msg::KeyHelp)]
+            } else {
+                vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack), say("?", Msg::KeyHelp)]
+            };
             if let Some(quest) = &app.open {
                 keys.extend(
                     quest.session.keys(language).into_iter().map(|(k, l)| (k, l.to_string())),
@@ -270,6 +278,32 @@ mod tests {
         );
     }
 
+    /// A reviewer pressed Enter four times at the end of a quest before concluding it was over:
+    /// nothing was said, and the key bar still offered "Enter continue".
+    #[test]
+    fn the_end_of_a_quest_says_so_and_stops_offering_enter() {
+        for language in Language::ALL {
+            let mut app = opened(*language);
+            for _ in 0..20 {
+                press(&mut app, KeyCode::Tab);
+            }
+            for _ in 0..80 {
+                press(&mut app, KeyCode::Enter);
+            }
+            let session = &app.open.as_ref().expect("a quest is open").session;
+            assert!(session.at_end(), "the last stage never finished saying its piece");
+            let text = shot(&mut app, 100, 30);
+            println!("\n===== the end ({language}) =====\n{text}");
+            let flat = text.replace(' ', "");
+            let over = t(Msg::ConversationFinished, *language).replace(' ', "");
+            let head: String = over.chars().take(12).collect();
+            assert!(flat.contains(&head), "the quest never says it is over:\n{text}");
+            let bar = text.lines().last().unwrap_or_default().replace(' ', "");
+            let carry = t(Msg::KeyContinue, *language).replace(' ', "");
+            assert!(!bar.contains(&format!("Enter{carry}")), "Enter is still offered: {bar:?}");
+        }
+    }
+
     #[test]
     fn tab_walks_the_stages_and_stops_at_the_end() {
         let mut app = opened(Language::ENGLISH);
@@ -307,7 +341,6 @@ mod tests {
         assert!(text.contains("17_"), "what was typed is not on screen:\n{text}");
     }
 
-    #[test]
     /// A reviewer at 80x24 lost "? help" and "l language" off both the quest list and the quest
     /// screen, which makes every key they name undiscoverable at the smallest size nmtk supports.
     #[test]
