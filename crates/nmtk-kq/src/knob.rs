@@ -42,10 +42,13 @@ impl Knob {
         }
     }
 
-    /// Accepts what was typed. Returns false when it does not parse or falls outside the range,
-    /// leaving the old value in place.
-    pub fn commit(&mut self) -> bool {
-        let Some(text) = self.typing.take() else { return false };
+    /// Accepts what was typed, and says what became of it.
+    ///
+    /// A number outside the range is pulled to the nearest end rather than dropped: a reader who
+    /// typed 40 into a knob that stops at 30 asked for as much as they could have, and a screen
+    /// that silently puts 7 back reads as a broken key.
+    pub fn commit(&mut self) -> Typed {
+        let Some(text) = self.typing.take() else { return Typed::Nothing };
         self.value.set_from(&text)
     }
 
@@ -65,6 +68,45 @@ impl Knob {
             Some(text) => format!("{text}_"),
             None => self.value.display(),
         }
+    }
+}
+
+/// What became of a number the reader typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+    /// Nothing was being typed.
+    Nothing,
+    /// Taken exactly as it was typed.
+    Taken,
+    /// Outside what this knob allows, so it was pulled to the nearest end. The value it landed
+    /// on comes with it, already written the way the reader sees it.
+    PulledIn { to: String },
+    /// Not a number this knob could read. The value did not move.
+    NotANumber,
+}
+
+/// The values a run was started with, so a later change can be told apart from a repeat.
+///
+/// A reader who turns a knob while the work is running has asked for the work to be done again;
+/// a reader who presses Enter twice has not. Nothing else can tell those two apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settled(Vec<(&'static str, String)>);
+
+impl Settled {
+    /// Reads the knobs as they stand. Drafts being typed are not read — a half-typed number is
+    /// not yet a value the reader has asked for.
+    pub fn of(knobs: &[Knob]) -> Self {
+        Self(knobs.iter().map(|knob| (knob.id, knob.value.display())).collect())
+    }
+
+    /// Whether the knobs still hold what this was read from.
+    pub fn still(&self, knobs: &[Knob]) -> bool {
+        self.0.len() == knobs.len()
+            && self
+                .0
+                .iter()
+                .zip(knobs)
+                .all(|((id, value), knob)| *id == knob.id && *value == knob.value.display())
     }
 }
 
@@ -110,44 +152,46 @@ impl KnobValue {
         }
     }
 
-    /// Parses typed text into this knob's value. Out-of-range and unparsable text are refused.
-    fn set_from(&mut self, text: &str) -> bool {
+    /// Parses typed text into this knob's value, pulling it into range rather than refusing it.
+    ///
+    /// Answers with whether the number landed where it was typed, so the caller can say so. The
+    /// text of the landing place is read back afterwards, once the value is no longer borrowed.
+    fn set_from(&mut self, text: &str) -> Typed {
         let text = text.trim();
-        match self {
-            KnobValue::Count { current, min, max, .. } => match text.parse::<u64>() {
-                Ok(value) if value >= *min && value <= *max => {
-                    *current = value;
-                    true
-                }
-                _ => false,
-            },
-            KnobValue::Share { current, min, max, .. } => match text.parse::<f64>() {
+        let asked = text.parse::<f64>().ok().filter(|value| value.is_finite());
+        let exact = match self {
+            KnobValue::Count { current, min, max, .. } => {
+                // A count typed with a fractional part is still a number the reader meant; it is
+                // rounded rather than thrown away, and the answer says where it landed.
+                let Some(asked) = asked.map(f64::round) else { return Typed::NotANumber };
+                let landed = asked.clamp(*min as f64, *max as f64);
+                *current = landed as u64;
+                landed == asked
+            }
+            KnobValue::Share { current, min, max, .. } => {
                 // A share is typed as a percentage, because that is how it is displayed.
-                Ok(value) => {
-                    let ratio = value / 100.0;
-                    if ratio.is_finite() && ratio >= *min && ratio <= *max {
-                        *current = ratio;
-                        true
-                    } else {
-                        false
-                    }
+                let Some(asked) = asked.map(|value| value / 100.0) else {
+                    return Typed::NotANumber;
+                };
+                let landed = asked.clamp(*min, *max);
+                *current = landed;
+                landed == asked
+            }
+            KnobValue::Decimal { current, min, max, .. } => {
+                let Some(asked) = asked else { return Typed::NotANumber };
+                let landed = asked.clamp(*min, *max);
+                *current = landed;
+                landed == asked
+            }
+            KnobValue::Choice { current, count } => {
+                let Ok(asked) = text.parse::<usize>() else { return Typed::NotANumber };
+                if *count == 0 {
+                    return Typed::NotANumber;
                 }
-                _ => false,
-            },
-            KnobValue::Decimal { current, min, max, .. } => match text.parse::<f64>() {
-                Ok(value) if value.is_finite() && value >= *min && value <= *max => {
-                    *current = value;
-                    true
-                }
-                _ => false,
-            },
-            KnobValue::Choice { current, count } => match text.parse::<usize>() {
-                Ok(value) if value < *count => {
-                    *current = value;
-                    true
-                }
-                _ => false,
-            },
+                let landed = asked.min(*count - 1);
+                *current = landed;
+                landed == asked
+            }
             KnobValue::Toggle { current } => match text {
                 "0" => {
                     *current = false;
@@ -157,9 +201,10 @@ impl KnobValue {
                     *current = true;
                     true
                 }
-                _ => false,
+                _ => return Typed::NotANumber,
             },
-        }
+        };
+        if exact { Typed::Taken } else { Typed::PulledIn { to: self.display() } }
     }
 
     /// The stored value as the reader sees it.
@@ -220,18 +265,38 @@ mod tests {
         for c in "7".chars() {
             knob.type_char(c);
         }
-        assert!(knob.commit());
+        assert_eq!(knob.commit(), Typed::Taken);
         assert_eq!(knob.display(), "7");
     }
 
     #[test]
-    fn a_refused_number_leaves_the_old_one_alone() {
+    fn a_number_past_the_end_lands_on_the_end_and_says_where() {
         let mut knob = threads();
         for c in "99".chars() {
             knob.type_char(c);
         }
-        assert!(!knob.commit());
+        assert_eq!(knob.commit(), Typed::PulledIn { to: "12".to_string() });
+        assert_eq!(knob.display(), "12");
+    }
+
+    #[test]
+    fn what_is_not_a_number_leaves_the_value_alone() {
+        let mut knob = threads();
+        knob.type_char('.');
+        knob.type_char('.');
+        assert_eq!(knob.commit(), Typed::NotANumber);
         assert_eq!(knob.display(), "4");
+    }
+
+    #[test]
+    fn a_run_can_tell_a_changed_knob_from_an_unchanged_one() {
+        let mut knobs = vec![threads()];
+        let settled = Settled::of(&knobs);
+        assert!(settled.still(&knobs));
+        knobs[0].type_char('8');
+        assert!(settled.still(&knobs), "a number still being typed is not yet a change");
+        knobs[0].commit();
+        assert!(!settled.still(&knobs));
     }
 
     #[test]
@@ -249,7 +314,7 @@ mod tests {
         for c in "51".chars() {
             knob.type_char(c);
         }
-        assert!(knob.commit());
+        assert_eq!(knob.commit(), Typed::Taken);
         assert_eq!(knob.display(), "51.0%");
     }
 

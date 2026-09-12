@@ -51,7 +51,7 @@ pub mod theme;
 pub mod widgets;
 
 pub use catalogue::{Catalogue, Filter, SortKey};
-pub use knob::{Knob, KnobValue};
+pub use knob::{Knob, KnobValue, Settled, Typed};
 pub use meta::{
     Category, Difficulty, Fit, KqId, KqMeta, MachineNeeds, Requirements, StageRole, StageSpec,
     Stamp, Version,

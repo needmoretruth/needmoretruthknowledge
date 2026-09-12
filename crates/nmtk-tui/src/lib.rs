@@ -153,11 +153,25 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
                 quest.session.at_end() && quest.session.stage() + 1 >= quest.stages.len()
             });
             // At the end of the last stage Enter has nothing left to carry, so it stops being
-            // offered rather than being offered and doing nothing.
-            let mut keys = if over {
-                vec![say("q", Msg::KeyBack), say("Tab", Msg::KeyStage), say("?", Msg::KeyHelp)]
-            } else {
-                vec![say("Enter", Msg::KeyContinue), say("q", Msg::KeyBack), say("?", Msg::KeyHelp)]
+            // offered rather than being offered and doing nothing — unless the quest has said
+            // what Enter does instead, which on a stage with knobs is to run it again.
+            let named = app.open.as_ref().and_then(|quest| quest.session.go_name(language));
+            let mut keys = match (over, named) {
+                (_, Some(name)) => vec![
+                    ("Enter", name.to_string()),
+                    say("q", Msg::KeyBack),
+                    say("?", Msg::KeyHelp),
+                ],
+                (true, None) => {
+                    vec![say("q", Msg::KeyBack), say("Tab", Msg::KeyStage), say("?", Msg::KeyHelp)]
+                }
+                (false, None) => {
+                    vec![
+                        say("Enter", Msg::KeyContinue),
+                        say("q", Msg::KeyBack),
+                        say("?", Msg::KeyHelp),
+                    ]
+                }
             };
             if let Some(quest) = &app.open {
                 // Space works but no quest names it, and a reviewer found it by guessing. It is
@@ -292,6 +306,53 @@ mod tests {
             .find(|line| line.contains(&title) && line.contains("v0."))
             .expect("the finished quest is on the list");
         assert!(row.contains('+'), "the finished quest carries no mark: {row:?}");
+    }
+
+    #[test]
+    fn the_keypress_that_reveals_the_last_beat_finishes_the_quest() {
+        let mut app = opened(Language::ENGLISH);
+        let id = app.open.as_ref().expect("a quest is open").id.to_string();
+        // Straight to the last stage and read it to the end — no extra keypress afterwards. The
+        // Enter that reveals the last beat is handled by the quest, and the mark used to be made
+        // only on a keypress the quest ignored, so reading to the end recorded nothing.
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Tab);
+        }
+        let mut finished = false;
+        for _ in 0..80 {
+            press(&mut app, KeyCode::Enter);
+            if app.settings.has_finished(&id) {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "reading a quest to its last beat was not remembered");
+    }
+
+    #[test]
+    fn the_language_screen_lines_up_where_the_glyphs_are_wide() {
+        let mut app = app_in(Language::ENGLISH);
+        press(&mut app, KeyCode::Char('l'));
+        let text = shot(&mut app, 100, 30);
+        println!("\n===== languages =====\n{text}");
+        // The row is found by its name, and the code by its own letters within that row: "en"
+        // also lives inside the word "open" down in the key bar.
+        let column_of = |name: &str, code: &str| {
+            text.lines().find(|line| line.contains(name)).map(|line| {
+                // Counted in cells, not bytes: a Korean glyph is three bytes and one cell in the
+                // shot, so byte offsets would report a difference that is not on the screen.
+                let at = line.find(code).expect("the code is on the row");
+                line[..at].chars().count()
+            })
+        };
+        let english = column_of("English", "en").expect("English is listed");
+        // One character of the endonym: the test backend writes a wide glyph as the glyph plus a
+        // filler cell, so "한국어" is never contiguous in the shot.
+        let korean = column_of("한", "ko").expect("Korean is listed");
+        assert_eq!(
+            english, korean,
+            "한국어 is three characters and six cells; the codes must still line up"
+        );
     }
 
     #[test]

@@ -185,6 +185,15 @@ pub trait KqSession {
     /// The keys this quest adds to the bottom bar, beyond the ones every screen has.
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)>;
 
+    /// What Enter does right now, in the quest's own words, when it is not simply "continue".
+    ///
+    /// The shell knows Enter carries a conversation on; only the quest knows that at the end of a
+    /// stage with knobs the same key runs the work again with the values on screen. A key bar
+    /// that says "continue" while Enter mines a block has told the reader the wrong thing.
+    fn go_name(&self, _language: Language) -> Option<&'static str> {
+        None
+    }
+
     /// Whether a number is being typed into a knob right now.
     ///
     /// While this is true the shell hands digits to the quest; otherwise digits jump between
