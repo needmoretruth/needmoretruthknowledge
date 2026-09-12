@@ -236,6 +236,42 @@ mod tests {
         app
     }
 
+    /// At 80x24 a reviewer read "v0." instead of a version, lost the words "6 stages" across two
+    /// lines, and never saw how the list was sorted — the sort sat at the foot of a panel that
+    /// had already run out of room.
+    #[test]
+    fn the_smallest_screen_still_carries_the_version_the_sort_and_the_fit() {
+        for language in Language::ALL {
+            let mut app = app_in(*language);
+            let text = shot(&mut app, 80, 24);
+            println!("\n===== quests ({language}, 80x24) =====\n{text}");
+            let flat = text.replace(' ', "");
+            let quest = app.visible()[app.list_index].meta();
+            assert!(flat.contains(&format!("v{}", quest.version)), "version cut short:\n{text}");
+            let sort = t(Msg::SortByCategory, *language).replace(' ', "");
+            assert!(flat.contains(&sort), "the sort is not on screen:\n{text}");
+            let stages = format!("{}{}", quest.stages.len(), t(Msg::LabelStages, *language))
+                .replace(' ', "");
+            assert!(flat.contains(&stages), "the stage count is split:\n{text}");
+            let fit = t(Msg::FitRecommended, *language).replace(' ', "");
+            let fit_head: String = fit.chars().take(8).collect();
+            assert!(flat.contains(&fit_head), "the machine's fit fell off:\n{text}");
+        }
+    }
+
+    /// `v` opened a view titled for older versions that held only the current one.
+    #[test]
+    fn asking_for_older_versions_of_a_quest_that_has_none_says_so() {
+        let mut app = app_in(Language::ENGLISH);
+        press(&mut app, KeyCode::Char('v'));
+        assert!(app.versions_of.is_none(), "an empty version view opened");
+        let text = shot(&mut app, 100, 30);
+        println!("\n===== v with nothing older =====\n{text}");
+        let said = t(Msg::OnlyVersion, Language::ENGLISH);
+        let head: String = said.chars().take(20).collect();
+        assert!(text.contains(&head), "nothing was said:\n{text}");
+    }
+
     #[test]
     fn the_shelf_shows_a_quest_at_the_smallest_screen() {
         let mut app = app_in(Language::ENGLISH);

@@ -430,8 +430,16 @@ impl App {
         self.versions_of = match self.versions_of {
             Some(_) => None,
             None => {
-                let list = self.visible();
-                list.get(self.list_index).map(|quest| quest.meta().id)
+                let id = self.visible().get(self.list_index).map(|quest| quest.meta().id);
+                // A view named for older versions that contains only the current one teaches the
+                // reader that the key is broken. With nothing older to show, say so and stay put.
+                match id.filter(|id| self.catalogue.versions_of(*id).len() > 1) {
+                    Some(id) => Some(id),
+                    None => {
+                        self.status = Some(Msg::OnlyVersion);
+                        return;
+                    }
+                }
             }
         };
         self.list_index = 0;

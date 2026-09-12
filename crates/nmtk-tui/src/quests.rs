@@ -4,7 +4,7 @@ use nmtk_core::{Language, MachineProfile, format};
 use nmtk_i18n::{Msg, t};
 use nmtk_kq::meta::{Category, Difficulty, Fit, MachineNeeds, Requirements};
 use nmtk_kq::session::Kq;
-use nmtk_kq::text::{pad, truncate};
+use nmtk_kq::text::{column, pad, truncate};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_kq::{Filter, SortKey};
 use ratatui::Frame;
@@ -26,17 +26,41 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     .areas(area);
     render_banner(frame, banner, theme, language, room_for_logo);
 
+    // An answer to a keypress goes under both panels, where there is always a line for it. Inside
+    // the quest's own panel it landed below whatever that panel had already filled, and was never
+    // seen.
+    let [body, answer] =
+        Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).areas(body);
+    if let Some(status) = app.status {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", t(status, language)),
+                theme.muted(),
+            ))),
+            answer,
+        );
+    }
+
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(body);
 
     let quests = app.visible();
     let chosen = app.list_index.min(quests.len().saturating_sub(1));
 
+    // The order and the narrowing belong to the list, so they are written on the list. They used
+    // to sit at the foot of the quest's own panel, where a quest with a long summary pushed them
+    // off the bottom and pressing o or f looked like the program losing quests.
     let title = match app.versions_of {
-        Some(_) => t(Msg::OlderVersions, language),
-        None => t(Msg::Quests, language),
+        Some(_) => t(Msg::OlderVersions, language).to_string(),
+        None => format!(
+            "{}  ·  {}  ·  {}",
+            t(Msg::Quests, language),
+            t(sort_name(app.sort), language),
+            t(filter_name(&app.filter), language)
+        ),
     };
-    let list_block = theme.titled_panel(title);
+    let title = truncate(&title, list_area.width.saturating_sub(4) as usize);
+    let list_block = theme.titled_panel(&title);
     let inner = list_block.inner(list_area);
     frame.render_widget(list_block, list_area);
 
@@ -46,7 +70,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             inner,
         );
     } else {
-        frame.render_widget(Paragraph::new(rows(app, &quests, chosen, theme, language)), inner);
+        frame.render_widget(
+            Paragraph::new(rows(app, &quests, chosen, inner.width as usize, theme, language)),
+            inner,
+        );
         render_detail(frame, detail_area, quests[chosen], app, theme, language);
     }
 }
@@ -72,6 +99,7 @@ fn rows<'a>(
     app: &App,
     quests: &[&'a dyn Kq],
     chosen: usize,
+    width: usize,
     theme: Theme,
     language: Language,
 ) -> Vec<Line<'a>> {
@@ -94,15 +122,18 @@ fn rows<'a>(
         let marker = if picked { State::Chosen.mark() } else { " " };
         let name = quest.title(language);
         let style = if picked { theme.selected() } else { theme.plain() };
+        let time = format!("{:>3}{}  ", meta.minutes, t(Msg::LabelMinutes, language));
+        let version = format!("v{}", meta.version);
+        // The name gives up its room first. A version cut to "v0." is worse than a title cut
+        // short, because a shortened title still says which quest it is.
+        let fixed = 2 + 7 + nmtk_kq::text::width(&time) + nmtk_kq::text::width(&version);
+        let room = width.saturating_sub(fixed).clamp(12, 26);
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), theme.state(State::Chosen)),
-            Span::styled(pad(&truncate(name, 26), 26), style),
+            Span::styled(column(name, room), style),
             Span::styled(format!(" {} ", meta.difficulty.marks()), theme.muted()),
-            Span::styled(
-                format!("{:>3}{}  ", meta.minutes, t(Msg::LabelMinutes, language)),
-                theme.muted(),
-            ),
-            Span::styled(format!("v{}", meta.version), theme.muted()),
+            Span::styled(time, theme.muted()),
+            Span::styled(version, theme.muted()),
         ]));
     }
     lines
@@ -140,17 +171,19 @@ fn render_detail(
         ]),
         Line::from(vec![
             Span::styled(format!("{} ", meta.difficulty.marks()), theme.muted()),
-            Span::styled(pad(t(difficulty(meta.difficulty), language), 14), theme.plain()),
-            Span::styled(
-                format!("{} {}", meta.stages.len(), t(Msg::LabelStages, language)),
-                theme.muted(),
-            ),
+            Span::styled(t(difficulty(meta.difficulty), language), theme.plain()),
         ]),
+        // One line, because at 80 columns this panel is 28 cells wide and two facts sharing a
+        // line put "6" at the end of one and "stages" at the start of the next.
         Line::from(vec![
             Span::styled(format!("{} ", t(Msg::LabelLength, language)), theme.muted()),
             Span::styled(
                 format!("{} {}", meta.minutes, t(Msg::LabelMinutes, language)),
                 theme.plain(),
+            ),
+            Span::styled(
+                format!("  ·  {} {}", meta.stages.len(), t(Msg::LabelStages, language)),
+                theme.muted(),
             ),
         ]),
         Line::from(""),
@@ -161,13 +194,6 @@ fn render_detail(
         ]),
     ];
     facts.extend(needs_lines(&meta.needs, &app.machine, language, theme));
-    facts.push(Line::from(""));
-    facts.push(Line::from(vec![
-        Span::styled(format!("{} ", t(Msg::LabelSort, language)), theme.muted()),
-        Span::styled(t(sort_name(app.sort), language), theme.plain()),
-        Span::styled(format!("   {} ", t(Msg::LabelFilter, language)), theme.muted()),
-        Span::styled(t(filter_name(&app.filter), language), theme.plain()),
-    ]));
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: true }), facts_area);
 }
 
