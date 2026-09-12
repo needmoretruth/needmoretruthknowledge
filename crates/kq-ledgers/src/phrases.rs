@@ -45,19 +45,22 @@ nmtk_i18n::messages! {
     GrowOne { en: "Alice sends Bob three. Her coins are worth ten each.", ko: "앨리스가 밥에게 3을 보냅니다. 앨리스의 코인은 하나에 10짜리입니다." },
     GrowTwo { en: "You cannot send part of a coin, the same way you cannot hand over part of a banknote.", ko: "코인의 일부만 보낼 수는 없습니다. 지폐를 반으로 찢어 줄 수 없는 것과 같습니다." },
     GrowUtxo { en: "Bitcoin's way grew. The ten was destroyed and two new coins were made: three for Bob, seven back to Alice. That seven is change.", ko: "비트코인 쪽은 커졌습니다. 10짜리를 없애고 코인 둘을 새로 만들었습니다. 3은 밥에게, 7은 앨리스에게 돌아옵니다. 그 7이 거스름돈입니다." },
-    GrowAccount { en: "Ethereum's way did not grow at all. Two numbers were edited. Nobody was created.", ko: "이더리움 쪽은 전혀 커지지 않았습니다. 숫자 둘을 고쳤을 뿐이고 새로 만든 것이 없습니다." },
+    GrowAccount { en: "Ethereum's way grew by one line as well, but only because Bob had none yet. Send him another three and nothing new is made.", ko: "이더리움 쪽도 줄 하나가 늘었습니다. 다만 밥에게 줄이 아직 없었기 때문입니다. 밥에게 3을 또 보내면 새로 생기는 것은 없습니다." },
     GrowObject { en: "Sui's way grew too, for the same reason as Bitcoin: a thing was split, so there is a new thing.", ko: "Sui 쪽도 커졌습니다. 이유는 비트코인과 같습니다. 물건을 쪼갰으니 새 물건이 하나 생긴 것입니다." },
-    GrowLesson { en: "That is the first real difference. Counting coins means making change; keeping a book means editing numbers.", ko: "이것이 첫 번째 진짜 차이입니다. 코인을 세는 방식은 거스름돈을 만들어야 하고, 장부를 쓰는 방식은 숫자만 고치면 됩니다." },
+    GrowLesson { en: "That is the first real difference. Counting coins makes change every time; keeping a book makes a line once and edits it after that.", ko: "이것이 첫 번째 진짜 차이입니다. 코인을 세는 방식은 보낼 때마다 거스름돈을 만들고, 장부를 쓰는 방식은 줄을 한 번 만든 뒤로는 고치기만 합니다." },
     GrowCost { en: "Every node on the network keeps this state forever. Change is not free.", ko: "이 상태는 네트워크의 모든 노드가 영원히 들고 있어야 합니다. 거스름돈은 공짜가 아닙니다." },
 
     // ---- Stage 4: your turn ----------------------------------------------------
     TuneOne { en: "Your turn. Two values are yours to set: how much, and who to.", ko: "이제 직접 해 보세요. 정할 값은 둘입니다. 얼마를, 누구에게." },
     TuneThree { en: "Up and down pick a value, left and right change it, or just type a number. Enter sends.", ko: "위아래로 값을 고르고 좌우로 바꿉니다. 숫자를 그냥 입력해도 됩니다. Enter를 누르면 보냅니다." },
     TuneFresh { en: "Each send starts again from the same three coins of ten, so two sends are worth comparing.", ko: "보낼 때마다 같은 10짜리 코인 셋에서 다시 시작합니다. 그래야 두 번을 견줄 수 있습니다." },
+    GrowFresh { en: "The ledgers go back to the same three coins of ten first, so this send can be held against the last one.", ko: "먼저 원장이 같은 10짜리 코인 셋으로 되돌아갑니다. 그래야 이번에 보내는 것을 앞의 것과 견줄 수 있습니다." },
     TuneTwo { en: "Start with exactly one coin's worth — 10 — and press Enter.", ko: "먼저 코인 하나와 딱 맞는 금액으로 해 보세요. 10으로 두고 Enter를 누릅니다." },
     TuneAgain { en: "Now something smaller than one coin — 3, or 7 — and press Enter again.", ko: "이번에는 코인 하나보다 작은 금액입니다. 3이나 7로 바꾸고 다시 Enter를 누르세요." },
-    TuneSent { en: "Sent. The sizes on the right moved — or did not.", ko: "보냈습니다. 오른쪽 크기가 움직였거나, 그대로입니다." },
-    TuneNote { en: "Only the book came out the same size both times. It has no coins to break up, so it never has change to store.", ko: "두 번 다 크기가 그대로인 것은 장부뿐입니다. 쪼갤 코인이 없으니 넣어 둘 거스름돈도 없습니다." },
+    TuneSentWhole { en: "That was a whole number of coins, so nothing had to be broken and no change was put anywhere.", ko: "코인 개수와 딱 떨어지는 금액이라 쪼갤 것이 없었고, 어디에도 거스름돈이 들어가지 않았습니다." },
+    TuneSentPart { en: "That was not a whole coin, so a coin was broken and the change had to be stored. Bitcoin's side grew.", ko: "코인 하나와 딱 떨어지지 않아 코인을 쪼갰고, 거스름돈을 어딘가에 넣어야 했습니다. 비트코인 쪽이 커졌습니다." },
+    TuneOnlyOne { en: "That is one send. Change the amount and press Enter again, so there are two to hold against each other.", ko: "아직 한 번 보냈을 뿐입니다. 금액을 바꾸고 Enter를 다시 누르면 견줄 것이 둘이 됩니다." },
+    TuneBookLine { en: "The book grows only when the money reaches someone it has no line for. Coins grow whenever one has to be broken.", ko: "장부는 줄이 없는 사람에게 돈이 갈 때만 커집니다. 코인 쪽은 하나를 쪼개야 할 때마다 커집니다." },
 
     // ---- Stage 5: spend it twice ------------------------------------------------
     TwiceOne { en: "Now the thing every one of these systems exists to stop: spending the same money twice.", ko: "이제 이 방식들이 존재하는 이유를 봅니다. 같은 돈을 두 번 쓰는 것을 막는 일입니다." },

@@ -39,6 +39,8 @@ enum Step {
     Ask(Msg),
     /// Real work, run the moment this step is reached.
     Run(Deed),
+    /// One sentence, chosen from what the run actually did.
+    Tell(Topic),
 }
 
 /// Work a step does to the three ledgers.
@@ -55,7 +57,17 @@ enum Deed {
 }
 
 use Deed::{SendChosen, SendPartOfACoin, SendWholeCoin, SpendTwice};
-use Step::{Ask, Run, Say};
+
+/// What a [`Step::Tell`] is about: a sentence built from the send that just happened rather than
+/// from the amount the conversation suggested, because the amount is the reader's to choose.
+#[derive(Debug, Clone, Copy)]
+enum Topic {
+    /// What this send did to the three ledgers.
+    Sent,
+    /// What the two sends, held together, showed.
+    Compared,
+}
+use Step::{Ask, Run, Say, Tell};
 
 /// Where money lives. Nothing runs; the panel already shows three ledgers holding the same thing.
 const COINS: &[Step] = &[
@@ -82,6 +94,7 @@ const SEND: &[Step] = &[
 const GROW: &[Step] = &[
     Say(Msg::GrowOne),
     Say(Msg::GrowTwo),
+    Say(Msg::GrowFresh),
     Run(SendPartOfACoin),
     Say(Msg::GrowUtxo),
     Say(Msg::GrowAccount),
@@ -97,10 +110,10 @@ const TUNE: &[Step] = &[
     Say(Msg::TuneFresh),
     Ask(Msg::TuneTwo),
     Run(SendChosen),
-    Say(Msg::TuneSent),
+    Tell(Topic::Sent),
     Ask(Msg::TuneAgain),
     Run(SendChosen),
-    Say(Msg::TuneNote),
+    Tell(Topic::Compared),
 ];
 
 /// The attack every one of these systems exists to stop.
@@ -274,6 +287,37 @@ impl Session {
     /// is in front of it; the recap is looking back at a run whose world has since been rebuilt.
     fn recorded(&self) -> Option<&Kept> {
         self.kept.as_ref().filter(|_| self.stage == STAGE_RECAP)
+    }
+
+    fn tell_sentence(&self, topic: Topic, language: Language) -> &'static str {
+        let sends: Vec<&SideBySide<ApplyOutcome>> = self
+            .done
+            .iter()
+            .filter_map(|done| match &done.what {
+                Outcome::Transfer(side) => Some(side.as_ref()),
+                Outcome::Double(_) => None,
+            })
+            .collect();
+        match topic {
+            // Whether a coin had to be broken is the engine's answer, not the amount's: the
+            // reader picks the amount, and the sentence used to be written for the suggested one.
+            Topic::Sent => match sends.last() {
+                Some(side) if side.get(Model::Utxo).entry_delta() == 0 => Msg::TuneSentWhole,
+                Some(_) => Msg::TuneSentPart,
+                None => Msg::TuneOnlyOne,
+            },
+            // Every send rebuilds the world from the same three coins, which is what makes two
+            // sends comparable — and it means the book gains Bob's line every time. The old
+            // sentence claimed the book came out the same size both times; it never does.
+            Topic::Compared => {
+                if sends.len() < 2 { Msg::TuneOnlyOne } else { Msg::TuneBookLine }
+            }
+        }
+        .text(language)
+    }
+
+    fn tell(&self, topic: Topic, language: Language) -> String {
+        self.tell_sentence(topic, language).to_string()
     }
 
     /// The ledgers the panel is drawing.
@@ -467,6 +511,7 @@ impl KqSession for Session {
                         beats.extend(self.beats_for(done, language));
                     }
                 }
+                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
             }
         }
         beats
@@ -694,6 +739,78 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+
+    /// Puts the amount knob where a reader's keystrokes would have put it.
+    fn set_amount(session: &mut Session, amount: Amount) {
+        if let KnobValue::Count { current, .. } = &mut session.knobs[0].value {
+            *current = amount;
+        }
+    }
+
+    /// The reader picks the amount, so the sentence after the send has to read the send. Sending
+    /// 7 when the conversation suggested 10 used to be answered with the lesson about 10.
+    #[test]
+    fn what_is_said_after_a_send_is_about_the_send_that_happened() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new();
+        session.go_to(3);
+        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneOnlyOne.text(english));
+
+        // A whole coin: nothing to break.
+        set_amount(&mut session, 10);
+        session.perform(4, SendChosen);
+        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneSentWhole.text(english));
+        assert_eq!(session.tell(Topic::Compared, english), Msg::TuneOnlyOne.text(english));
+
+        // Less than a coin: change has to go somewhere.
+        set_amount(&mut session, 7);
+        session.perform(7, SendChosen);
+        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneSentPart.text(english));
+        assert_eq!(session.tell(Topic::Compared, english), Msg::TuneBookLine.text(english));
+    }
+
+    /// What the three models really do when a coin has to be broken up, so the sentences beside
+    /// the panel can be checked against it rather than against what they assume.
+    /// What the three models really do when a coin has to be broken up, so the sentences beside
+    /// the panel can be held against it rather than against what they assume.
+    #[test]
+    fn breaking_a_coin_grows_every_model_that_has_to_make_change() {
+        let mut session = Session::new();
+        session.perform(0, SendPartOfACoin);
+        let Some(Done { what: Outcome::Transfer(reports), .. }) = session.done.last() else {
+            panic!("the transfer did not happen");
+        };
+        for model in Model::ALL {
+            let report = reports.get(model);
+            println!(
+                "{model:?}: entries {} -> {}, delta {}",
+                report.entries_before,
+                report.entries_after,
+                report.entry_delta()
+            );
+        }
+        assert!(reports.get(Model::Utxo).entry_delta() > 0, "bitcoin made change and did not grow");
+        assert!(reports.get(Model::Object).entry_delta() > 0, "sui split and did not grow");
+        assert!(
+            reports.get(Model::Account).entry_delta() > 0,
+            "the account model reached a reader it had no line for and did not make one"
+        );
+
+        // The difference is not the first payment but the second: coins go on making change,
+        // while a book that already has the line only edits it.
+        let mut scenario = open_ledgers(session.alice.address());
+        scenario.transfer(&TransferRequest::new(session.alice, session.bob, 3));
+        let again = scenario.transfer(&TransferRequest::new(session.alice, session.bob, 3));
+        for model in Model::ALL {
+            println!("second payment, {model:?}: delta {}", again.get(model).entry_delta());
+        }
+        assert!(again.get(Model::Utxo).entry_delta() > 0, "bitcoin stopped making change");
+        assert_eq!(
+            again.get(Model::Account).entry_delta(),
+            0,
+            "the account model made a second line for a reader it already had"
+        );
+    }
 
     /// Draws the quest's panel exactly where the shell puts it on the smallest screen nmtk allows.
     fn draw(session: &Session) -> String {

@@ -55,7 +55,9 @@ nmtk_i18n::messages! {
     TuneKeys { en: "Up and down pick a value, left and right change it, or just type a number. Enter runs with them.", ko: "위아래로 값을 고르고 좌우로 바꿉니다. 숫자를 그냥 입력해도 됩니다. Enter를 누르면 그 값으로 돌립니다." },
     TuneBits { en: "Each extra bit of practice difficulty doubles what one block costs.", ko: "연습 난이도가 1비트 올라갈 때마다 블록 하나에 드는 비용이 두 배가 됩니다." },
     TuneAskBits { en: "Add one bit to the difficulty and press Enter.", ko: "난이도를 1 올리고 Enter를 누르세요." },
-    TuneAfterBits { en: "Blocks cost twice what they did, and nothing about the machine changed.", ko: "블록 하나에 드는 비용이 두 배가 됐습니다. 컴퓨터는 아무것도 바뀌지 않았는데 말입니다." },
+    TuneBitsUnchanged { en: "The difficulty is where it was, so the cost is too. Move it and press Enter to watch the cost move with it.", ko: "난이도가 그대로라 비용도 그대로입니다. 난이도를 옮기고 Enter를 누르면 비용이 따라 움직입니다." },
+    TuneBitsUp { en: "Every bit doubles the work, and nothing about the machine changed. Read the cost line on the right.", ko: "비트 하나마다 할 일이 두 배가 됩니다. 컴퓨터는 아무것도 바뀌지 않았습니다. 오른쪽 비용 줄을 보세요." },
+    TuneBitsDown { en: "Every bit taken off halves the work. Blocks are cheaper now, and nothing about the machine changed.", ko: "비트를 하나 뺄 때마다 할 일이 절반이 됩니다. 블록이 그만큼 싸졌고, 컴퓨터는 아무것도 바뀌지 않았습니다." },
     TuneWhole { en: "Threads are whole things. A machine with seven of them cannot give one miner 51% and another 49%.", ko: "스레드는 쪼갤 수 없습니다. 스레드가 일곱 개인 기계는 한 채굴자에게 51%, 다른 채굴자에게 49%를 줄 수 없습니다." },
     TuneAskMiners { en: "Set the miners to three and press Enter.", ko: "채굴자 수를 셋으로 바꾸고 Enter를 누르세요." },
     TuneAsked { en: "The panel shows the share each miner asked for beside the share it really holds. They rarely match.", ko: "오른쪽에 각 채굴자가 요청한 몫과 실제로 쥔 몫이 나란히 있습니다. 둘이 맞는 경우는 드뭅니다." },
@@ -74,6 +76,9 @@ nmtk_i18n::messages! {
     AttackLost { en: "Below half, the attacker falls behind and keeps falling — paying for hash power the whole way down.", ko: "절반에 못 미치면 공격자는 뒤처지고 계속 뒤처집니다. 그 내내 해시 파워 값을 치르면서 말입니다." },
     AttackAskHigh { en: "Now give the attacker 51% and press Enter again.", ko: "이번에는 공격자에게 51%를 주고 다시 Enter를 누르세요." },
     AttackWon { en: "Above half it catches up eventually. Not quickly and not cheaply, but eventually.", ko: "절반을 넘으면 언젠가는 따라잡습니다. 빠르지도 싸지도 않지만, 언젠가는 됩니다." },
+    AttackLuckyWin { en: "Below half, and it still got there. A short race is chance as much as arithmetic; run it again and it usually does not.", ko: "절반에 못 미치는데도 해냈습니다. 짧은 경주는 계산만큼이나 운입니다. 다시 돌리면 대개는 안 됩니다." },
+    AttackRanOut { en: "Above half and it still stopped short. Catching up is slow, and this one ran out of time before it got there.", ko: "절반을 넘는데도 못 미치고 멈췄습니다. 따라잡는 데는 시간이 걸리고, 이번에는 그 전에 시간이 다했습니다." },
+    AttackNotYetRun { en: "Nothing has been attacked yet. Press Enter to send the attacker at the chain.", ko: "아직 아무것도 공격하지 않았습니다. Enter를 누르면 공격자가 체인으로 갑니다." },
     AttackWhyName { en: "That is why the number has a name. 51% is not a trick — it is where the arithmetic changes sides.", ko: "그래서 그 숫자에 이름이 붙었습니다. 51%는 무슨 묘수가 아니라, 산수가 편을 바꾸는 지점입니다." },
 
     // ---- Stage 6: recap ------------------------------------------------------------

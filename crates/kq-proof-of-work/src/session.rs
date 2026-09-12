@@ -89,6 +89,21 @@ enum Step {
     /// The conversation waits here until the machine has done something. Enter does nothing; the
     /// beats that arrive meanwhile are the answer.
     Await(Until),
+    /// One sentence, chosen from what the run actually did.
+    Tell(Topic),
+}
+
+/// What a [`Step::Tell`] is about.
+///
+/// The share is the reader's to set, and an Ask is a suggestion rather than a gate. A fixed
+/// sentence after the run stated the outcome of the suggested share: "above half it catches up"
+/// was printed under an attacker holding 27% of the machine, which had won by luck.
+#[derive(Debug, Clone, Copy)]
+enum Topic {
+    /// How the attack that just finished ended, and at what share.
+    Attack,
+    /// What moving the difficulty did to the cost of a block.
+    Difficulty,
 }
 
 /// Work a step starts.
@@ -110,7 +125,7 @@ enum Until {
 }
 
 use Deed::{Attack, Mine};
-use Step::{Ask, Await, Run, Say};
+use Step::{Ask, Await, Run, Say, Tell};
 
 /// Why a network burns electricity to agree on anything.
 const WHY: &[Step] = &[
@@ -159,7 +174,7 @@ const TUNE_STAGE: &[Step] = &[
     Ask(Msg::TuneAskBits),
     Run(Mine),
     Await(Until::Blocks(1)),
-    Say(Msg::TuneAfterBits),
+    Tell(Topic::Difficulty),
     Say(Msg::TuneWhole),
     Ask(Msg::TuneAskMiners),
     Run(Mine),
@@ -181,11 +196,11 @@ const ATTACK_STAGE: &[Step] = &[
     Ask(Msg::AttackAskLow),
     Run(Attack),
     Await(Until::AttackOver),
-    Say(Msg::AttackLost),
+    Tell(Topic::Attack),
     Ask(Msg::AttackAskHigh),
     Run(Attack),
     Await(Until::AttackOver),
-    Say(Msg::AttackWon),
+    Tell(Topic::Attack),
     Say(Msg::AttackWhyName),
 ];
 
@@ -236,6 +251,9 @@ pub struct Session {
     break_knobs: Vec<Knob>,
     chosen: usize,
     mining: Option<MiningHandle>,
+    /// The difficulty as it stood when the tuning stage opened, so "you moved it" can be checked
+    /// rather than assumed.
+    bits_on_entry: u32,
     mining_snapshot: Option<MiningSnapshot>,
     attack: Option<AttackHandle>,
     attack_snapshot: Option<AttackSnapshot>,
@@ -318,6 +336,7 @@ impl Session {
             ],
             chosen: 0,
             mining: None,
+            bits_on_entry: zero_bits as u32,
             mining_snapshot: None,
             attack: None,
             attack_snapshot: None,
@@ -1104,6 +1123,42 @@ impl Session {
         self.log.clear();
     }
 
+    /// A sentence about the attack that finished, read off that attack.
+    ///
+    /// Four endings, because a race is not arithmetic alone: below half it usually loses and
+    /// sometimes wins, and above half it usually wins and sometimes runs out of time first.
+    fn tell(&self, topic: Topic, language: Language) -> String {
+        match topic {
+            Topic::Attack => self.tell_attack(language),
+            Topic::Difficulty => {
+                // The reader sets the difficulty, so the sentence reads the difficulty rather
+                // than the one the conversation suggested. Pressing Enter without moving it used
+                // to be answered with "blocks cost twice what they did".
+                let now = self.zero_bits();
+                let message = match now.cmp(&self.bits_on_entry) {
+                    std::cmp::Ordering::Equal => Msg::TuneBitsUnchanged,
+                    std::cmp::Ordering::Greater => Msg::TuneBitsUp,
+                    std::cmp::Ordering::Less => Msg::TuneBitsDown,
+                };
+                message.text(language).to_string()
+            }
+        }
+    }
+
+    fn tell_attack(&self, language: Language) -> String {
+        let Some(snapshot) = &self.attack_snapshot else {
+            return Msg::AttackNotYetRun.text(language).to_string();
+        };
+        let majority = snapshot.attacker_share >= 0.5;
+        let message = match (majority, snapshot.outcome) {
+            (false, Some(AttackOutcome::Succeeded)) => Msg::AttackLuckyWin,
+            (false, _) => Msg::AttackLost,
+            (true, Some(AttackOutcome::Succeeded)) => Msg::AttackWon,
+            (true, _) => Msg::AttackRanOut,
+        };
+        message.text(language).to_string()
+    }
+
     /// Whether the thing a waiting step is waiting for has happened.
     fn satisfied(&self, until: Until) -> bool {
         match until {
@@ -1282,6 +1337,7 @@ impl KqSession for Session {
         }
         self.stage = stage;
         self.chosen = 0;
+        self.bits_on_entry = self.zero_bits();
         // One heavy run at a time: mining beside an attack halves both, and a 51% attack that
         // cannot win because the screen is stealing its cores is a lie about proof of work. The
         // threads stop; what they already produced stays, because the recap is about it.
@@ -1295,6 +1351,7 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
+                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1626,6 +1683,19 @@ mod tests {
         })
     }
 
+    /// An attack snapshot with nothing in it, for tests about the two fields that pick a sentence.
+    fn blank_attack() -> AttackSnapshot {
+        let mut session = session();
+        session.start_the_attack();
+        let snapshot = session
+            .attack
+            .as_ref()
+            .map(|handle| handle.snapshot())
+            .expect("the attack started");
+        session.stop_attack();
+        snapshot
+    }
+
     /// Draws the quest's panel exactly where the shell puts it on the smallest screen nmtk allows.
     fn draw(session: &Session) -> String {
         let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).expect("backend");
@@ -1907,6 +1977,40 @@ mod tests {
 
     /// A reader reaches the recap by pressing Tab, which is `go_to`, and their numbers have to
     /// survive the journey. Six of the seven rows once read "not run yet" after a real run.
+    /// A reviewer pressed Enter without moving anything and was told "blocks cost twice what
+    /// they did", and was told "above half it catches up" under an attacker holding 27%.
+    #[test]
+    fn what_is_said_after_a_run_is_read_off_the_run() {
+        let english = Language::ENGLISH;
+        let mut session = session();
+        KqSession::go_to(&mut session, STAGE_TUNE);
+
+        assert_eq!(session.tell(Topic::Difficulty, english), Msg::TuneBitsUnchanged.text(english));
+        let raised = session.bits_on_entry as u64 + 1;
+        if let KnobValue::Count { current, .. } = &mut session.tune_knobs[KNOB_DIFFICULTY].value {
+            *current = raised;
+        }
+        assert_eq!(session.tell(Topic::Difficulty, english), Msg::TuneBitsUp.text(english));
+
+        assert_eq!(session.tell(Topic::Attack, english), Msg::AttackNotYetRun.text(english));
+        for (share, outcome, expected) in [
+            (0.30, Some(AttackOutcome::GaveUp), Msg::AttackLost),
+            (0.30, Some(AttackOutcome::Succeeded), Msg::AttackLuckyWin),
+            (0.51, Some(AttackOutcome::Succeeded), Msg::AttackWon),
+            (0.51, Some(AttackOutcome::GaveUp), Msg::AttackRanOut),
+        ] {
+            let mut snapshot = blank_attack();
+            snapshot.attacker_share = share;
+            snapshot.outcome = outcome;
+            session.attack_snapshot = Some(snapshot);
+            assert_eq!(
+                session.tell(Topic::Attack, english),
+                expected.text(english),
+                "share {share} ending {outcome:?} was described wrongly"
+            );
+        }
+    }
+
     #[test]
     fn the_recap_keeps_the_numbers_the_reader_made_on_the_way_to_it() {
         let mut session = session();
