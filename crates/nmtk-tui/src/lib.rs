@@ -206,14 +206,17 @@ mod tests {
     use crate::app::SettingItem;
 
     fn app_in(language: Language) -> App {
-        let mut app = App::new(catalogue());
-        app.settings = Settings { language, ..Settings::default() };
-        app.machine = MachineProfile {
-            logical_cores: 12,
-            total_memory_bytes: 14_000_000_000,
-            available_memory_bytes: 0,
-        };
-        app
+        // Detached: a test that read the real settings file started on the welcome screen on a
+        // machine that had never run nmtk, and one that wrote it changed the reader's language.
+        App::detached(
+            catalogue(),
+            Settings { language, ..Settings::default() },
+            MachineProfile {
+                logical_cores: 12,
+                total_memory_bytes: 14_000_000_000,
+                available_memory_bytes: 0,
+            },
+        )
     }
 
     fn press(app: &mut App, code: KeyCode) {

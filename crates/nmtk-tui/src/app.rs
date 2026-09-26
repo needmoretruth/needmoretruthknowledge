@@ -88,16 +88,28 @@ pub struct App {
     behind_languages: Option<Screen>,
     pub status: Option<Msg>,
     pub quit: bool,
+    /// Whether settings are written to disk. Off for an app built by a test, which must never
+    /// read or rewrite the settings of whoever runs `cargo test`.
+    persist: bool,
 }
 
 impl App {
+    /// The app the program runs: settings read from disk, and written back as they change.
     pub fn new(catalogue: Catalogue) -> Self {
         let (settings, first_run) = Settings::load_saying_whether_it_is_the_first_time();
+        let mut app = Self::detached(catalogue, settings, MachineProfile::detect());
+        app.screen = if first_run { Screen::Welcome } else { Screen::Quests };
+        app.persist = true;
+        app
+    }
+
+    /// An app that never touches the disk, opened on the shelf with the settings it is given.
+    pub fn detached(catalogue: Catalogue, settings: Settings, machine: MachineProfile) -> Self {
         Self {
             settings,
-            machine: MachineProfile::detect(),
+            machine,
             catalogue,
-            screen: if first_run { Screen::Welcome } else { Screen::Quests },
+            screen: Screen::Quests,
             behind_help: None,
             list_index: 0,
             sort: SortKey::Category,
@@ -111,7 +123,13 @@ impl App {
             behind_languages: None,
             status: None,
             quit: false,
+            persist: false,
         }
+    }
+
+    /// Writes the settings when this app keeps them, and reports success when it does not.
+    fn save_settings(&self) -> bool {
+        !self.persist || self.settings.save().is_ok()
     }
 
     pub fn language(&self) -> Language {
@@ -316,7 +334,7 @@ impl App {
         }
         let id = quest.id.to_string();
         if self.settings.remember_finished(&id) {
-            let _ = self.settings.save();
+            self.save_settings();
         }
     }
 
@@ -484,11 +502,8 @@ impl App {
     }
 
     fn remember(&mut self) {
-        self.status = Some(if self.settings.save().is_ok() {
-            Msg::SettingsSaved
-        } else {
-            Msg::SettingsNotSaved
-        });
+        self.status =
+            Some(if self.save_settings() { Msg::SettingsSaved } else { Msg::SettingsNotSaved });
     }
 }
 

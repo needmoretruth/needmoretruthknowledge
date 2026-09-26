@@ -73,7 +73,14 @@ impl Settings {
             fs::create_dir_all(parent).map_err(SettingsError::Write)?;
         }
         let text = toml::to_string_pretty(self).map_err(|_| SettingsError::Encode)?;
-        fs::write(path, text).map_err(SettingsError::Write)
+        // Written beside the file and renamed over it, so a program killed mid-write leaves the
+        // old settings rather than half of the new ones.
+        let partial = path.with_extension("toml.partial");
+        fs::write(&partial, text).map_err(SettingsError::Write)?;
+        fs::rename(&partial, &path).map_err(|e| {
+            let _ = fs::remove_file(&partial);
+            SettingsError::Write(e)
+        })
     }
 
     /// Where the file lives: `$XDG_CONFIG_HOME/nmtk/settings.toml`, falling back to

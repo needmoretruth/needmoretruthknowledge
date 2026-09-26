@@ -746,7 +746,11 @@ mod tests {
         assert_eq!(end.miners[1].threads, 49);
         let bigger = end.miners[0].hashes.saturating_sub(start.miners[0].hashes) as f64;
         let smaller = end.miners[1].hashes.saturating_sub(start.miners[1].hashes) as f64;
-        assert!(bigger + smaller > 1_000_000.0, "only {} hashes in three seconds", bigger + smaller);
+        assert!(
+            bigger + smaller > 1_000_000.0,
+            "only {} hashes in three seconds",
+            bigger + smaller
+        );
         let share = bigger / (bigger + smaller);
         assert!(
             (share - 0.51).abs() < 0.08,
