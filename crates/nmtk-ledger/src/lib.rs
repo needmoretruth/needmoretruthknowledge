@@ -145,7 +145,9 @@ pub struct Holding {
 /// The step of validation a transaction died at.
 ///
 /// The order of the variants is the order the checks run in, so a screen can line the three
-/// models up against each other and show where each one stops.
+/// models up against each other and show where each one stops — with one exception. The object
+/// model checks versions before owners, because a transaction names each object at an exact
+/// version and a version that has been moved past has no owner left to check.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CheckStep {
     /// Before a transaction exists: the sender could not even assemble one.

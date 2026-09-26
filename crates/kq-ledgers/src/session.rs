@@ -11,11 +11,11 @@
 use nmtk_core::{Language, format};
 use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
-use nmtk_kq::text::{column, pad, rpad};
+use nmtk_kq::text::{column, rpad, wrap};
 use nmtk_kq::theme::{State, Theme};
 use nmtk_ledger::{
-    Address, Amount, ApplyOutcome, DoubleSpendReport, Genesis, Key, Model, Scenario, SideBySide,
-    TransferRequest,
+    Address, Amount, ApplyOutcome, DoubleSpendReport, Genesis, Key, Model, RejectionKind, Scenario,
+    SideBySide, TransferRequest,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -66,10 +66,20 @@ enum Topic {
     Sent,
     /// What the two sends, held together, showed.
     Compared,
+    /// How many transfers the reader sent over the whole quest, and how many made change.
+    RecapSends,
+    /// The most storage one of those transfers added, per ledger.
+    RecapStorage,
+    /// How the reader's double spend ended, if they tried one.
+    RecapAttack,
 }
 use Step::{Ask, Run, Say, Tell};
 
 /// Where money lives. Nothing runs; the panel already shows three ledgers holding the same thing.
+///
+/// A node is explained before the sentence about bytes leans on it, and bytes before the one that
+/// asks the reader to watch the sizes. The byte column itself stays off the panel until then: a
+/// `B` on screen that nothing has explained is a word the reader has to guess.
 const COINS: &[Step] = &[
     Say(Msg::CoinsOne),
     Say(Msg::CoinsTwo),
@@ -77,10 +87,13 @@ const COINS: &[Step] = &[
     Say(Msg::CoinsSui),
     Say(Msg::CoinsFour),
     Say(Msg::CoinsFive),
-    Say(Msg::CoinsSix),
-    Say(Msg::CoinsBytes),
     Say(Msg::CoinsNode),
+    Say(Msg::CoinsBytes),
+    Say(Msg::CoinsSix),
 ];
+
+/// Where in [`COINS`] bytes are explained, and so where the byte column may appear.
+const COINS_BYTES_AT: usize = 7;
 
 /// One whole coin changes hands. The first thing the reader makes happen.
 const SEND: &[Step] = &[
@@ -100,6 +113,7 @@ const GROW: &[Step] = &[
     Say(Msg::GrowFresh),
     Run(SendPartOfACoin),
     Say(Msg::GrowUtxo),
+    Say(Msg::GrowChange),
     Say(Msg::GrowAccount),
     Say(Msg::GrowObject),
     // The acronym is earned here: the reader has just watched an unspent coin be destroyed and
@@ -124,9 +138,14 @@ const TUNE: &[Step] = &[
 ];
 
 /// The attack every one of these systems exists to stop.
+///
+/// The counter and the version are introduced before the run, because the run's own verdicts name
+/// them the moment Enter is pressed.
 const TWICE: &[Step] = &[
     Say(Msg::TwiceOne),
     Say(Msg::TwiceTwo),
+    Say(Msg::TwiceMarkCounter),
+    Say(Msg::TwiceMarkVersion),
     Say(Msg::TwiceThree),
     Run(SpendTwice),
     Say(Msg::TwiceUtxo),
@@ -137,9 +156,20 @@ const TWICE: &[Step] = &[
     Say(Msg::TwiceLesson),
 ];
 
-/// What the reader now knows, in four sentences.
-const RECAP: &[Step] =
-    &[Say(Msg::RecapOne), Say(Msg::RecapTwo), Say(Msg::RecapThree), Say(Msg::RecapFour)];
+/// What the reader now knows, read out of the record of everything they did.
+///
+/// It used to be four `Say`s, one of which told every reader that the same transfer had cost the
+/// three ledgers different amounts and the same attack had failed for different reasons — including
+/// a reader who had pressed Tab straight here and done neither.
+const RECAP: &[Step] = &[
+    Say(Msg::RecapOne),
+    Say(Msg::RecapTwo),
+    Say(Msg::RecapTwoSui),
+    Tell(Topic::RecapSends),
+    Tell(Topic::RecapStorage),
+    Tell(Topic::RecapAttack),
+    Say(Msg::RecapFour),
+];
 
 /// The stages' scripts, in the order `lib.rs` declares them.
 const SCRIPTS: [&[Step]; 6] = [COINS, SEND, GROW, TUNE, TWICE, RECAP];
@@ -147,6 +177,31 @@ const SCRIPTS: [&[Step]; 6] = [COINS, SEND, GROW, TUNE, TWICE, RECAP];
 /// Where the recap sits. It runs nothing of its own, so it is the one stage that draws the record
 /// of the last run rather than the ledgers in front of it.
 const STAGE_RECAP: usize = 5;
+
+/// The stage whose script explains what "UTXO" stands for.
+const STAGE_GROW: usize = 2;
+
+/// One transfer the reader sent, as the recap needs it. Kept for the whole quest, because the
+/// recap is about the whole quest and not about whichever run happened to be last.
+#[derive(Debug, Clone, Copy)]
+struct SentRecord {
+    /// Which stage sent it, so `r` there forgets it and `r` elsewhere does not.
+    stage: usize,
+    /// Whether a coin had to be broken and change made.
+    made_change: bool,
+    /// What it did to each ledger's size, in bytes.
+    size_delta: SideBySide<i64>,
+}
+
+/// One double spend the reader tried.
+#[derive(Debug, Clone, Copy)]
+struct AttackRecord {
+    stage: usize,
+    /// Whether each ledger stopped the second spend.
+    stopped: SideBySide<bool>,
+    /// The reason each ledger gave.
+    reason: SideBySide<Option<RejectionKind>>,
+}
 
 /// What one [`Deed`] did, kept against the step that caused it so the conversation can be rebuilt
 /// in any language without running anything again.
@@ -184,9 +239,16 @@ pub struct Session {
     done: Vec<Done>,
     /// The last run, kept apart from the live ledgers so the recap can still read it.
     kept: Option<Kept>,
-    /// What became of the last number the reader typed, said once at the end of the conversation
-    /// and forgotten the moment they do anything else.
-    typed: Option<Typed>,
+    /// What became of the last number the reader typed, and into which knob, said once at the end
+    /// of the conversation and forgotten the moment they do anything else.
+    typed: Option<(usize, Typed)>,
+    /// Every transfer the reader has sent in this quest.
+    sends: Vec<SentRecord>,
+    /// Every double spend the reader has tried in this quest.
+    attacks: Vec<AttackRecord>,
+    /// Whether the conversation has said what "UTXO" stands for. Until it has, the heading says
+    /// "Bitcoin" and nothing more.
+    utxo_named: bool,
     /// The values the last send used, so a changed amount can be told from a repeat.
     sent_with: Option<Settled>,
     knobs: Vec<Knob>,
@@ -206,6 +268,9 @@ impl Session {
             done: Vec::new(),
             kept: None,
             typed: None,
+            sends: Vec::new(),
+            attacks: Vec::new(),
+            utxo_named: false,
             sent_with: None,
             knobs: vec![
                 Knob::new(
@@ -264,11 +329,6 @@ impl Session {
         }
     }
 
-    /// Does one deed and files the result under the step that asked for it.
-    ///
-    /// The ledgers go back to their opening state first. Every run is then a change from the same
-    /// three coins of ten, which is the only way two runs can be compared — and it is why a reader
-    /// can send 30 twice without being told the second time that Alice is out of money.
     /// Whether the reader has changed a value since the last send.
     fn values_moved(&self) -> bool {
         match &self.sent_with {
@@ -294,6 +354,12 @@ impl Session {
         Reaction::Handled
     }
 
+    /// Does one deed and files the result under the step that asked for it, and in the record of
+    /// the whole quest.
+    ///
+    /// The ledgers go back to their opening state first. Every run is then a change from the same
+    /// three coins of ten, which is the only way two runs can be compared — and it is why a reader
+    /// can send 30 twice without being told the second time that Alice is out of money.
     fn perform(&mut self, step: usize, deed: Deed) {
         let settled = Settled::of(self.knobs());
         self.sent_with = Some(settled);
@@ -318,6 +384,18 @@ impl Session {
                 Outcome::Double(Box::new(self.scenario.double_spend(&first, &second)))
             }
         };
+        match &what {
+            Outcome::Transfer(side) => self.sends.push(SentRecord {
+                stage: self.stage,
+                made_change: made_change(side.get(Model::Utxo)),
+                size_delta: side.as_ref().clone().map(|_, outcome| outcome.size_delta()),
+            }),
+            Outcome::Double(reports) => self.attacks.push(AttackRecord {
+                stage: self.stage,
+                stopped: reports.as_ref().clone().map(|_, report| report.stopped()),
+                reason: reports.as_ref().clone().map(|_, report| report.stopped_by()),
+            }),
+        }
         // Kept before the world is rebuilt for the next run, because after that it is gone.
         let kept = Kept { stage: self.stage, scenario: self.scenario.clone(), what: what.clone() };
         self.kept = Some(kept);
@@ -332,39 +410,132 @@ impl Session {
         self.kept.as_ref().filter(|_| self.stage == STAGE_RECAP)
     }
 
-    fn tell_sentence(&self, topic: Topic, language: Language) -> &'static str {
-        let sends: Vec<&SideBySide<ApplyOutcome>> = self
-            .done
-            .iter()
+    /// The sends this stage made before step `at`, oldest first.
+    ///
+    /// A `Tell` reads the sends that came before it and no later ones. The conversation is rebuilt
+    /// every frame, and the sentence after the first send used to read "the last send" — so the
+    /// moment the second one went in, the first sentence silently changed to describe it.
+    fn sends_before(&self, at: usize) -> Vec<&SideBySide<ApplyOutcome>> {
+        let mut done: Vec<&Done> = self.done.iter().filter(|done| done.step < at).collect();
+        done.sort_by_key(|done| done.step);
+        done.into_iter()
             .filter_map(|done| match &done.what {
                 Outcome::Transfer(side) => Some(side.as_ref()),
                 Outcome::Double(_) => None,
             })
-            .collect();
-        match topic {
-            // Whether a coin had to be broken is the engine's answer, not the amount's: the
-            // reader picks the amount, and the sentence used to be written for the suggested one.
-            Topic::Sent => match sends.last() {
-                Some(side) if side.get(Model::Utxo).entry_delta() == 0 => Msg::TuneSentWhole,
-                Some(_) => Msg::TuneSentPart,
-                None => Msg::TuneOnlyOne,
-            },
-            // Every send rebuilds the world from the same three coins, which is what makes two
-            // sends comparable — and it means the book gains Bob's line every time. The old
-            // sentence claimed the book came out the same size both times; it never does.
-            Topic::Compared => {
-                if sends.len() < 2 {
-                    Msg::TuneOnlyOne
-                } else {
-                    Msg::TuneBookLine
-                }
-            }
-        }
-        .text(language)
+            .collect()
     }
 
-    fn tell(&self, topic: Topic, language: Language) -> String {
-        self.tell_sentence(topic, language).to_string()
+    /// The sentence a `Tell` at step `at` says, read from what the runs actually did.
+    fn tell(&self, topic: Topic, at: usize, language: Language) -> String {
+        let sends = self.sends_before(at);
+        match topic {
+            // Whether a coin had to be broken is the engine's answer, not the amount's: the
+            // reader picks the amount. The count of coins that follows is the engine's too — 17
+            // breaks a coin and still leaves Bitcoin's side the same size, because two coins went
+            // in to cover it, and a sentence claiming it grew would be a sentence about 3.
+            Topic::Sent => match sends.last() {
+                Some(side) => {
+                    let utxo = side.get(Model::Utxo);
+                    let said =
+                        if made_change(utxo) { Msg::TuneSentPart } else { Msg::TuneSentWhole };
+                    format!(
+                        "{} {} {} → {}.",
+                        said.text(language),
+                        Msg::TuneCoinsLabel.text(language),
+                        utxo.entries_before,
+                        utxo.entries_after,
+                    )
+                }
+                None => Msg::TuneOnlyOne.text(language).to_string(),
+            },
+            // Every send rebuilds the world from the same three coins, which is what makes two
+            // sends comparable. Two sends that both broke a coin, or both did not, show nothing,
+            // and the sentence says so rather than drawing the lesson over a run that lacks it.
+            Topic::Compared => match sends.as_slice() {
+                [.., first, second] => {
+                    let broke =
+                        (made_change(first.get(Model::Utxo)), made_change(second.get(Model::Utxo)));
+                    match broke {
+                        (true, true) => Msg::TuneBothPart,
+                        (false, false) => Msg::TuneBothWhole,
+                        _ => Msg::TuneBookLine,
+                    }
+                    .text(language)
+                    .to_string()
+                }
+                _ => Msg::TuneOnlyOne.text(language).to_string(),
+            },
+            Topic::RecapSends => self.recap_sends(language),
+            Topic::RecapStorage => self.recap_storage(language),
+            Topic::RecapAttack => self.recap_attack(language),
+        }
+    }
+
+    /// `Transfers you sent: 5. Ones that broke a coin and made change: 3.`
+    fn recap_sends(&self, language: Language) -> String {
+        if self.sends.is_empty() {
+            return Msg::RecapNothingSent.text(language).to_string();
+        }
+        let broke = self.sends.iter().filter(|sent| sent.made_change).count();
+        format!(
+            "{} {}. {} {}.",
+            Msg::RecapSentCount.text(language),
+            self.sends.len(),
+            Msg::RecapBrokeCount.text(language),
+            broke,
+        )
+    }
+
+    /// `The most storage one of your transfers added: Bitcoin +64 B, Ethereum +36 B, Sui +69 B.`
+    fn recap_storage(&self, language: Language) -> String {
+        if self.sends.is_empty() {
+            return Msg::RecapNothingSent.text(language).to_string();
+        }
+        let most: Vec<String> = Model::ALL
+            .iter()
+            .map(|model| {
+                let largest =
+                    self.sends.iter().map(|sent| *sent.size_delta.get(*model)).max().unwrap_or(0);
+                format!("{} {}", phrases::short_model(*model).text(language), signed_bytes(largest))
+            })
+            .collect();
+        format!("{} {}.", Msg::RecapStorage.text(language), most.join(", "))
+    }
+
+    /// How the reader's last double spend ended, or that they have not tried one.
+    fn recap_attack(&self, language: Language) -> String {
+        let Some(attack) = self.attacks.last() else {
+            return Msg::RecapNoAttack.text(language).to_string();
+        };
+        let all_stopped = Model::ALL.iter().all(|model| *attack.stopped.get(*model));
+        let mut reasons: Vec<Option<RejectionKind>> =
+            Model::ALL.iter().map(|model| *attack.reason.get(*model)).collect();
+        reasons.sort();
+        reasons.dedup();
+        match (all_stopped, reasons.len() == Model::ALL.len()) {
+            (true, true) => Msg::RecapAttackThree,
+            (true, false) => Msg::RecapAttackStopped,
+            (false, _) => Msg::RecapAttackThrough,
+        }
+        .text(language)
+        .to_string()
+    }
+
+    /// The name a ledger goes by right now. "UTXO" is a word the reader has to be given before it
+    /// is used, so until the grow stage has said what it stands for, Bitcoin is just Bitcoin.
+    fn model_name(&self, model: Model) -> Msg {
+        if model == Model::Utxo && !self.utxo_named {
+            phrases::short_model(model)
+        } else {
+            phrases::model(model)
+        }
+    }
+
+    /// Whether the byte column may be drawn: everywhere but the opening stage, and there only once
+    /// the conversation has said what a byte is.
+    fn bytes_explained(&self) -> bool {
+        self.stage != 0 || self.revealed >= COINS_BYTES_AT
     }
 
     /// The ledgers the panel is drawing.
@@ -389,13 +560,15 @@ impl Session {
                 } else {
                     beats.push(Beat::outcome(State::Bad, Msg::SendRefused.text(language)));
                     for model in Model::ALL {
-                        beats.push(transfer_beat(model, side.get(model), language));
+                        let name = self.model_name(model).text(language);
+                        beats.push(transfer_beat(name, side.get(model), language));
                     }
                 }
             }
             Outcome::Double(reports) => {
                 for model in Model::ALL {
-                    beats.push(double_beat(model, reports.get(model), language));
+                    let name = self.model_name(model).text(language);
+                    beats.push(double_beat(name, reports.get(model), language));
                 }
             }
         }
@@ -462,7 +635,7 @@ impl Session {
     ///
     /// The balance is drawn once rather than three times because all three agree on it — which is
     /// the point. They disagree about how it is stored, never about how much there is.
-    fn ledger_lines(&self, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    fn ledger_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let scenario = self.showing();
         let facts = scenario.facts();
         let transfer = self.latest_transfer();
@@ -477,36 +650,49 @@ impl Session {
         }
         // The counts under here are the whole ledger's, not Alice's. Sitting straight under
         // "Alice holds 20", "coins 3" read as three coins of hers.
-        lines.push(Line::from(Span::styled(
-            Msg::LabelWholeState.text(language).to_string(),
-            theme.muted(),
-        )));
+        // Wrapped here rather than left to run off the edge: at 80 columns the panel is 38 wide
+        // and this sentence was cut off at "how", in both languages.
+        for part in wrap(Msg::LabelWholeState.text(language), width) {
+            lines.push(Line::from(Span::styled(part, theme.muted())));
+        }
         lines.push(Line::from(""));
-        for model in Model::ALL {
+        for (index, model) in Model::ALL.into_iter().enumerate() {
             let fact = facts.get(model);
+            // The gap between blocks, not after the last one: at 80×24 the tuning stage fills
+            // the panel to its last row, and a trailing blank is the row that falls off.
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(Span::styled(
-                phrases::model(model).text(language),
+                self.model_name(model).text(language),
                 theme.heading(),
             )));
+            let bytes = if self.bytes_explained() {
+                rpad(&format::bytes(fact.state_size_bytes), BYTES_COLUMN)
+            } else {
+                String::new()
+            };
             lines.push(Line::from(vec![
                 Span::styled("  ", theme.plain()),
                 // The kind comes before the number so no language has to agree a plural: "coins 3"
                 // and "lines 1" both read, where "1 lines" does not.
                 Span::styled(
-                    column(phrases::entry_kind(fact.entry_kind).text(language), 14),
+                    column(phrases::entry_kind(fact.entry_kind).text(language), LABEL_COLUMN),
                     theme.muted(),
                 ),
                 // Right-aligned so the numbers sit under each other: 192, 36 and 207 left-aligned
                 // do not compare, which is the one thing this panel exists for.
-                Span::styled(rpad(&format::count(fact.entry_count as u64), 4), theme.plain()),
-                Span::styled(rpad(&format::bytes(fact.state_size_bytes), 12), theme.plain()),
+                Span::styled(
+                    rpad(&format::count(fact.entry_count as u64), COUNT_COLUMN),
+                    theme.plain(),
+                ),
+                Span::styled(bytes, theme.plain()),
             ]));
             if let Some(reports) = double {
                 lines.push(verdict_line(reports.get(model), language, theme));
             } else if let Some(side) = transfer {
-                lines.push(change_line(side.get(model), language, theme));
+                lines.push(change_line(side.get(model), self.bytes_explained(), language, theme));
             }
-            lines.push(Line::from(""));
         }
         lines
     }
@@ -527,7 +713,7 @@ impl Session {
                 };
                 Line::from(vec![
                     Span::styled(format!("{marker} "), theme.state(State::Chosen)),
-                    Span::styled(pad(labels[index].text(language), 16), theme.plain()),
+                    Span::styled(column(labels[index].text(language), 16), theme.plain()),
                     Span::styled(value, if picked { theme.heading() } else { theme.muted() }),
                 ])
             })
@@ -567,20 +753,29 @@ impl KqSession for Session {
                         beats.extend(self.beats_for(done, language));
                     }
                 }
-                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
+                Tell(topic) => beats.push(Beat::say(self.tell(*topic, index, language))),
             }
         }
         match &self.typed {
-            Some(Typed::PulledIn { to }) => beats.push(Beat::outcome(
-                State::Chosen,
-                format!(
-                    "{}  ·  {} {}",
-                    Msg::EventOutsideRange.text(language),
-                    Msg::EventSetTo.text(language),
-                    to,
-                ),
-            )),
-            Some(Typed::NotANumber) => {
+            Some((knob, Typed::PulledIn { to })) => {
+                // The recipient is a choice, and the knob reports where it landed as the number
+                // of the choice. "set to 1" beside a knob that reads "Carol" is two answers.
+                let to = if *knob == 1 {
+                    self.recipient_name().text(language).to_string()
+                } else {
+                    to.clone()
+                };
+                beats.push(Beat::outcome(
+                    State::Chosen,
+                    format!(
+                        "{}  ·  {} {}",
+                        Msg::EventOutsideRange.text(language),
+                        Msg::EventSetTo.text(language),
+                        to,
+                    ),
+                ))
+            }
+            Some((_, Typed::NotANumber)) => {
                 beats.push(Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)))
             }
             _ => {}
@@ -626,6 +821,9 @@ impl KqSession for Session {
                     return self.rerun();
                 }
                 self.revealed += 1;
+                if self.stage == STAGE_GROW && matches!(script[self.revealed], Say(Msg::GrowName)) {
+                    self.utxo_named = true;
+                }
                 if let Run(deed) = script[self.revealed] {
                     let at = self.revealed;
                     self.perform(at, deed);
@@ -637,6 +835,9 @@ impl KqSession for Session {
                 if self.kept.as_ref().is_some_and(|kept| kept.stage == self.stage) {
                     self.kept = None;
                 }
+                let stage = self.stage;
+                self.sends.retain(|sent| sent.stage != stage);
+                self.attacks.retain(|attack| attack.stage != stage);
                 self.restart();
                 Reaction::Handled
             }
@@ -680,8 +881,8 @@ impl KqSession for Session {
                 // A number that goes nowhere reads as a broken key unless the screen says what
                 // happened to it.
                 let typed = self.knobs[self.chosen].commit();
-                self.typed =
-                    matches!(typed, Typed::PulledIn { .. } | Typed::NotANumber).then_some(typed);
+                self.typed = matches!(typed, Typed::PulledIn { .. } | Typed::NotANumber)
+                    .then_some((self.chosen, typed));
                 Reaction::Handled
             }
             Action::Cancel => {
@@ -713,9 +914,11 @@ impl KqSession for Session {
             let [knobs, ledgers] =
                 Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
             frame.render_widget(Paragraph::new(self.knob_lines(language, theme)), knobs);
-            frame.render_widget(Paragraph::new(self.ledger_lines(language, theme)), ledgers);
+            let lines = self.ledger_lines(usize::from(ledgers.width), language, theme);
+            frame.render_widget(Paragraph::new(lines), ledgers);
         } else {
-            frame.render_widget(Paragraph::new(self.ledger_lines(language, theme)), inner);
+            let lines = self.ledger_lines(usize::from(inner.width), language, theme);
+            frame.render_widget(Paragraph::new(lines), inner);
         }
     }
 
@@ -746,10 +949,32 @@ fn open_ledgers(alice: Address) -> Scenario {
     Scenario::new(&Genesis::new().holding(alice, &OPENING_COINS))
 }
 
+/// Cells the label at the head of a ledger row takes, after its two-cell indent.
+const LABEL_COLUMN: usize = 14;
+/// Cells the entry count takes, right-aligned.
+const COUNT_COLUMN: usize = 4;
+/// Cells the byte count takes, right-aligned.
+const BYTES_COLUMN: usize = 12;
+
+/// Whether this UTXO transfer broke a coin and paid change back.
+///
+/// Read off what the transaction wrote rather than off the amount: it writes every coin it spends
+/// and every coin it makes, and reads only the ones it spends, so the difference is how many coins
+/// it made. One is the payment; a second is the change.
+fn made_change(utxo: &ApplyOutcome) -> bool {
+    utxo.touched.write_count().saturating_sub(utxo.touched.read_count()) > 1
+}
+
+/// `+64 B`, `-128 B`, `+0 B`: a size change in the same unit as the column above it. Every ledger
+/// here is well under a kibibyte, so bytes are the one unit and nothing is scaled.
+fn signed_bytes(delta: i64) -> String {
+    let sign = if delta < 0 { '-' } else { '+' };
+    format!("{sign}{}", format::bytes(delta.unsigned_abs()))
+}
+
 /// `Bitcoin (UTXO)  accepted` — or, when it was not, where it died and why.
-fn transfer_beat(model: Model, outcome: &ApplyOutcome, language: Language) -> Beat {
+fn transfer_beat(name: &str, outcome: &ApplyOutcome, language: Language) -> Beat {
     let accepted = outcome.accepted();
-    let name = phrases::model(model).text(language);
     let verdict = if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }.text(language);
     let mut text = format!("{name}  {verdict}");
     if let Some((step, reason)) = outcome.rejection() {
@@ -763,9 +988,8 @@ fn transfer_beat(model: Model, outcome: &ApplyOutcome, language: Language) -> Be
 }
 
 /// `Ethereum (account)  stopped it — checking it is current: that counter has already been used`.
-fn double_beat(model: Model, report: &DoubleSpendReport, language: Language) -> Beat {
+fn double_beat(name: &str, report: &DoubleSpendReport, language: Language) -> Beat {
     let stopped = report.stopped();
-    let name = phrases::model(model).text(language);
     let verdict = if stopped { Msg::LabelStopped } else { Msg::LabelLetThrough }.text(language);
     let mut text = format!("{name}  {verdict}");
     if let (Some(step), Some(kind)) = (report.stopped_at(), report.stopped_by()) {
@@ -778,25 +1002,37 @@ fn double_beat(model: Model, report: &DoubleSpendReport, language: Language) -> 
     Beat::outcome(if stopped { State::Good } else { State::Bad }, text)
 }
 
-/// What the last transfer cost this ledger, in entries and in bytes.
-fn change_line(outcome: &ApplyOutcome, language: Language, theme: Theme) -> Line<'static> {
+/// What the last transfer cost this ledger, in entries and in bytes, each under its own column.
+///
+/// The label is "this send" rather than "change": two stages later "change" means the coins paid
+/// back to Alice, and "change +1" over Bitcoin read as one coin of change. The numbers used to
+/// trail the label wherever it ended, so they sat under nothing; they are now put in the count and
+/// byte columns of the row above, with the verdict carried by the mark.
+fn change_line(
+    outcome: &ApplyOutcome,
+    with_bytes: bool,
+    language: Language,
+    theme: Theme,
+) -> Line<'static> {
     let accepted = outcome.accepted();
     let state = if accepted { State::Good } else { State::Bad };
+    let mark = Span::styled(format!("  {} ", state.mark()), theme.state(state));
+    if !accepted {
+        return Line::from(vec![
+            mark,
+            Span::styled(Msg::LabelRejected.text(language).to_string(), theme.state(state)),
+        ]);
+    }
+    // The mark and its gap take two of the label column's cells.
+    let label = column(Msg::ColumnChange.text(language), LABEL_COLUMN - 2);
     let mut spans = vec![
-        Span::styled(format!("  {} ", state.mark()), theme.state(state)),
-        Span::styled(
-            pad(if accepted { Msg::LabelAccepted } else { Msg::LabelRejected }.text(language), 12),
-            theme.state(state),
-        ),
+        mark,
+        Span::styled(label, theme.muted()),
+        Span::styled(rpad(&format!("{:+}", outcome.entry_delta()), COUNT_COLUMN), theme.muted()),
     ];
-    if accepted {
+    if with_bytes {
         spans.push(Span::styled(
-            format!(
-                "{} {:+}   {:+} B",
-                Msg::ColumnChange.text(language),
-                outcome.entry_delta(),
-                outcome.size_delta()
-            ),
+            rpad(&signed_bytes(outcome.size_delta()), BYTES_COLUMN),
             theme.muted(),
         ));
     }
@@ -838,7 +1074,7 @@ mod tests {
         let mut session = Session::new();
         session.perform(0, SendWholeCoin);
         for language in Language::ALL {
-            let lines = session.ledger_lines(*language, Theme::new(true));
+            let lines = session.ledger_lines(38, *language, Theme::new(true));
             let text: String = lines
                 .iter()
                 .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
@@ -857,23 +1093,31 @@ mod tests {
         let english = Language::ENGLISH;
         let mut session = Session::new();
         session.go_to(3);
-        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneOnlyOne.text(english));
+        assert_eq!(session.tell(Topic::Sent, TUNE_SENT, english), Msg::TuneOnlyOne.text(english));
 
         // A whole coin: nothing to break.
         set_amount(&mut session, 10);
-        session.perform(4, SendChosen);
-        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneSentWhole.text(english));
-        assert_eq!(session.tell(Topic::Compared, english), Msg::TuneOnlyOne.text(english));
+        session.perform(TUNE_FIRST_RUN, SendChosen);
+        let sent = session.tell(Topic::Sent, TUNE_SENT, english);
+        assert!(sent.starts_with(Msg::TuneSentWhole.text(english)), "{sent}");
+        assert_eq!(
+            session.tell(Topic::Compared, TUNE_COMPARED, english),
+            Msg::TuneOnlyOne.text(english)
+        );
 
         // Less than a coin: change has to go somewhere.
         set_amount(&mut session, 7);
-        session.perform(7, SendChosen);
-        assert_eq!(session.tell(Topic::Sent, english), Msg::TuneSentPart.text(english));
-        assert_eq!(session.tell(Topic::Compared, english), Msg::TuneBookLine.text(english));
+        session.perform(TUNE_SECOND_RUN, SendChosen);
+        assert_eq!(
+            session.tell(Topic::Compared, TUNE_COMPARED, english),
+            Msg::TuneBookLine.text(english)
+        );
+        // The sentence after the first send is still about the first send. It used to read "the
+        // last send", and changed to describe the 7 the moment the 7 went in.
+        let first = session.tell(Topic::Sent, TUNE_SENT, english);
+        assert!(first.starts_with(Msg::TuneSentWhole.text(english)), "{first}");
     }
 
-    /// What the three models really do when a coin has to be broken up, so the sentences beside
-    /// the panel can be checked against it rather than against what they assume.
     /// What the three models really do when a coin has to be broken up, so the sentences beside
     /// the panel can be held against it rather than against what they assume.
     #[test]
@@ -917,6 +1161,10 @@ mod tests {
 
     /// Draws the quest's panel exactly where the shell puts it on the smallest screen nmtk allows.
     fn draw(session: &Session) -> String {
+        draw_in(session, Language::ENGLISH)
+    }
+
+    fn draw_in(session: &Session, language: Language) -> String {
         let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).expect("backend");
         terminal
             .draw(|frame| {
@@ -930,7 +1178,7 @@ mod tests {
                 let [_, panel] =
                     Layout::horizontal([Constraint::Length(talk), Constraint::Length(run)])
                         .areas(body);
-                session.render(frame, panel, Theme::new(true), Language::ENGLISH);
+                session.render(frame, panel, Theme::new(true), language);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
@@ -1049,9 +1297,26 @@ mod tests {
         );
         assert_eq!(
             reports.get(Model::Object).stopped_by(),
-            Some(RejectionKind::NotOwner),
-            "the quest says the coin has changed hands"
+            Some(RejectionKind::StaleObjectVersion),
+            "the quest says the transfer names a version the coin has left behind"
         );
+        // The step each verdict names: "looking it up", then "checking it is current" twice.
+        assert_eq!(
+            reports.get(Model::Utxo).stopped_at(),
+            Some(nmtk_ledger::CheckStep::StateLookup)
+        );
+        assert_eq!(
+            reports.get(Model::Account).stopped_at(),
+            Some(nmtk_ledger::CheckStep::Freshness)
+        );
+        assert_eq!(
+            reports.get(Model::Object).stopped_at(),
+            Some(nmtk_ledger::CheckStep::Freshness)
+        );
+        // "The first one goes in everywhere."
+        for (model, report) in reports.iter() {
+            assert!(report.first.accepted(), "{model:?} refused the first, honest transfer");
+        }
     }
 
     #[test]
@@ -1209,6 +1474,305 @@ mod tests {
         walk(&mut session);
         session.on(Action::Reset);
         assert!(session.kept.is_none(), "`r` kept the run it was pressed on");
+    }
+
+    /// Where the tuning stage's runs and tells sit in its script.
+    const TUNE_FIRST_RUN: usize = 5;
+    const TUNE_SENT: usize = 6;
+    const TUNE_SECOND_RUN: usize = 8;
+    const TUNE_COMPARED: usize = 9;
+
+    #[test]
+    fn the_tuning_steps_the_tests_name_are_where_the_script_has_them() {
+        assert!(matches!(TUNE[TUNE_FIRST_RUN], Run(SendChosen)));
+        assert!(matches!(TUNE[TUNE_SENT], Tell(Topic::Sent)));
+        assert!(matches!(TUNE[TUNE_SECOND_RUN], Run(SendChosen)));
+        assert!(matches!(TUNE[TUNE_COMPARED], Tell(Topic::Compared)));
+        assert!(matches!(COINS[COINS_BYTES_AT], Say(Msg::CoinsBytes)));
+    }
+
+    /// Sentences in a piece of text: a full stop, question or exclamation mark followed by a space
+    /// or the end. A decimal point is followed by a digit and is not counted.
+    fn sentences(text: &str) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                matches!(c, '.' | '?' | '!') && chars.get(i + 1).is_none_or(|next| *next == ' ')
+            })
+            .count()
+    }
+
+    /// §1: one or two sentences, under ~160 characters — for every line in the table, in both
+    /// columns. Eleven Korean lines ran to three or four sentences where the English had two.
+    #[test]
+    fn every_phrase_is_one_or_two_sentences_in_both_languages() {
+        for message in Msg::ALL {
+            for language in Language::ALL {
+                let text = message.text(*language);
+                assert!(text.chars().count() <= 160, "{message:?} in {language} is long: {text}");
+                assert!(sentences(text) <= 2, "{message:?} in {language} is a paragraph: {text}");
+            }
+        }
+    }
+
+    /// Every English line has a Korean one, and it is not the English left in place.
+    #[test]
+    fn every_phrase_has_its_own_korean() {
+        for message in Msg::ALL {
+            let english = message.text(Language::ENGLISH);
+            let korean = message.text(Language::KOREAN);
+            // A name that is written the same in both.
+            if *message == Msg::ShortObject {
+                continue;
+            }
+            assert_ne!(english, korean, "{message:?} has no Korean");
+        }
+    }
+
+    /// Composed beats — tells, verdicts, typed numbers — have to pass the same test as the table.
+    #[test]
+    fn every_beat_of_the_whole_quest_is_one_or_two_sentences() {
+        let mut session = Session::new();
+        for stage in 0..SCRIPTS.len() {
+            session.go_to(stage);
+            walk(&mut session);
+            for language in Language::ALL {
+                for beat in session.transcript(*language) {
+                    assert!(
+                        sentences(&beat.text) <= 2,
+                        "stage {stage} in {language} is a paragraph: {:?}",
+                        beat.text
+                    );
+                    assert!(beat.text.chars().count() <= 160, "{:?}", beat.text);
+                }
+            }
+        }
+    }
+
+    /// "Nothing new was stored", "grew by one line", "nothing new either" — against the engine.
+    #[test]
+    fn what_is_said_about_one_whole_coin_is_what_the_engine_did() {
+        let mut session = Session::new();
+        session.go_to(1);
+        walk(&mut session);
+        let side = session.latest_transfer().expect("stage 2 never sent anything");
+        assert_eq!(side.get(Model::Utxo).entry_delta(), 0, "SendUtxo: nothing new was stored");
+        assert_eq!(side.get(Model::Account).entry_delta(), 1, "SendAccount: one line for Bob");
+        assert_eq!(side.get(Model::Object).entry_delta(), 0, "SendObject: nothing new either");
+        assert!(!made_change(side.get(Model::Utxo)), "one whole coin made change");
+    }
+
+    /// "The ten was destroyed and two new coins were made: three for Bob, seven back to Alice."
+    #[test]
+    fn what_is_said_about_change_is_what_the_engine_did() {
+        let mut session = Session::new();
+        session.go_to(2);
+        walk(&mut session);
+        let utxo = session.latest_transfer().expect("stage 3 never sent anything").get(Model::Utxo);
+        assert_eq!(utxo.touched.read_count(), 1, "more than one coin was destroyed");
+        assert_eq!(utxo.touched.write_count() - utxo.touched.read_count(), 2, "not two new coins");
+        let alice = session.scenario.holdings(&session.alice.address());
+        let mut values: Vec<Amount> = alice.utxo.iter().map(|holding| holding.value).collect();
+        values.sort_unstable();
+        assert_eq!(values, [7, 10, 10], "seven did not come back to Alice");
+        assert_eq!(session.scenario.balances(&session.bob).utxo, 3);
+    }
+
+    /// "Alice has three coins of ten", and "right now they already disagree" about the space.
+    #[test]
+    fn the_opening_ledgers_hold_what_the_first_stage_says() {
+        let session = Session::new();
+        let alice = session.scenario.holdings(&session.alice.address());
+        for coins in [&alice.utxo, &alice.object] {
+            assert_eq!(coins.iter().map(|holding| holding.value).collect::<Vec<_>>(), [10, 10, 10]);
+        }
+        let sizes = session.scenario.state_sizes();
+        assert!(sizes.utxo != sizes.account && sizes.account != sizes.object);
+        assert!(sizes.utxo != sizes.object);
+    }
+
+    /// 17 breaks a coin and still leaves Bitcoin's coin count where it was; 20 breaks none and
+    /// shrinks it. The old sentence read the count, so it told the reader who sent 17 that nothing
+    /// was broken, and the reader who sent 20 that a coin was broken and Bitcoin's side grew.
+    #[test]
+    fn whether_a_coin_was_broken_is_read_from_the_transfer_not_the_coin_count() {
+        let english = Language::ENGLISH;
+        for (amount, broke, before, after) in [(17, true, 3, 3), (20, false, 3, 2), (3, true, 3, 4)]
+        {
+            let mut session = Session::new();
+            session.go_to(3);
+            set_amount(&mut session, amount);
+            session.perform(TUNE_FIRST_RUN, SendChosen);
+            let said = session.tell(Topic::Sent, TUNE_SENT, english);
+            let expected = if broke { Msg::TuneSentPart } else { Msg::TuneSentWhole };
+            assert!(said.starts_with(expected.text(english)), "{amount}: {said}");
+            assert!(said.ends_with(&format!("{before} → {after}.")), "{amount}: {said}");
+        }
+    }
+
+    /// Two sends that do not differ in the one way that matters are not a comparison, and the
+    /// sentence after them says so rather than drawing the lesson anyway.
+    #[test]
+    fn two_sends_that_show_no_difference_are_told_so() {
+        let english = Language::ENGLISH;
+        for (first, second, expected) in
+            [(10, 20, Msg::TuneBothWhole), (3, 7, Msg::TuneBothPart), (7, 10, Msg::TuneBookLine)]
+        {
+            let mut session = Session::new();
+            session.go_to(3);
+            set_amount(&mut session, first);
+            session.perform(TUNE_FIRST_RUN, SendChosen);
+            set_amount(&mut session, second);
+            session.perform(TUNE_SECOND_RUN, SendChosen);
+            assert_eq!(
+                session.tell(Topic::Compared, TUNE_COMPARED, english),
+                expected.text(english),
+                "{first} then {second}"
+            );
+            // "The book gained a line both times, for the person paid, whatever the amount."
+            for side in session.sends_before(TUNE_COMPARED + 1) {
+                assert_eq!(side.get(Model::Account).entry_delta(), 1);
+            }
+        }
+    }
+
+    /// The recap reads the record of the whole quest. A reader who sent two coins and attacked
+    /// once is told so; a reader who pressed Tab straight to the end is not told they did anything.
+    #[test]
+    fn the_recap_is_built_from_everything_the_reader_did() {
+        let english = Language::ENGLISH;
+        let recap_line = |session: &Session, topic: Topic| {
+            let at = RECAP.iter().position(|step| matches!(step, Tell(t) if std::mem::discriminant(t) == std::mem::discriminant(&topic))).expect("the recap tells it");
+            session.tell(topic, at, english)
+        };
+
+        let mut jumped = Session::new();
+        jumped.go_to(STAGE_RECAP);
+        assert_eq!(recap_line(&jumped, Topic::RecapSends), Msg::RecapNothingSent.text(english));
+        assert_eq!(recap_line(&jumped, Topic::RecapAttack), Msg::RecapNoAttack.text(english));
+
+        let mut session = Session::new();
+        for stage in [1, 2, 4] {
+            session.go_to(stage);
+            walk(&mut session);
+        }
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        assert_eq!(
+            recap_line(&session, Topic::RecapSends),
+            "Transfers you sent: 2. Ones that broke a coin and made change: 1."
+        );
+        assert_eq!(
+            recap_line(&session, Topic::RecapStorage),
+            "The most storage one of your transfers added: Bitcoin +64 B, Ethereum +36 B, Sui +69 B."
+        );
+        assert_eq!(recap_line(&session, Topic::RecapAttack), Msg::RecapAttackThree.text(english));
+
+        // `r` on the grow stage forgets the send made there, and nothing else.
+        session.go_to(2);
+        session.on(Action::Reset);
+        session.go_to(STAGE_RECAP);
+        assert!(recap_line(&session, Topic::RecapSends).starts_with("Transfers you sent: 1."));
+        assert_eq!(recap_line(&session, Topic::RecapAttack), Msg::RecapAttackThree.text(english));
+    }
+
+    /// Everything on screen but the gaps, so text drawn across wide glyphs can be searched.
+    fn squeezed(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace() && *c != '│').collect()
+    }
+
+    /// §9: at 80×24, in both languages, the panel shows every block whole. The note over the
+    /// counts ran off the edge at "how", and the tuning stage's last row was a blank that pushed
+    /// nothing off only because nothing came after it.
+    #[test]
+    fn the_panel_reads_whole_at_80_by_24_in_both_languages() {
+        for stage in 0..SCRIPTS.len() {
+            for language in Language::ALL {
+                let mut session = Session::new();
+                session.go_to(4);
+                walk(&mut session);
+                session.go_to(stage);
+                walk(&mut session);
+                let drawn = squeezed(&draw_in(&session, *language));
+                let note = squeezed(Msg::LabelWholeState.text(*language));
+                assert!(
+                    drawn.contains(&note),
+                    "stage {stage} in {language} cut the note:\n{drawn}"
+                );
+                for model in Model::ALL {
+                    let name = squeezed(session.model_name(model).text(*language));
+                    assert!(drawn.contains(&name), "stage {stage} in {language} lost {model:?}");
+                }
+                if session.tuning() {
+                    let label = squeezed(Msg::ColumnChange.text(*language));
+                    assert_eq!(
+                        drawn.matches(&label).count(),
+                        3,
+                        "stage {stage} in {language} lost a ledger's last row:\n{drawn}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The change row's numbers sit under the count and byte columns of the row above, in both
+    /// languages, rather than wherever its label happened to end.
+    #[test]
+    fn the_change_row_lines_up_with_the_counts_above_it() {
+        let mut session = Session::new();
+        session.go_to(3);
+        session.perform(TUNE_FIRST_RUN, SendChosen);
+        for language in Language::ALL {
+            let lines = session.ledger_lines(38, *language, Theme::new(false));
+            let rows: Vec<String> = lines
+                .iter()
+                .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+                .collect();
+            let kind = phrases::entry_kind(nmtk_ledger::EntryKind::UnspentOutput).text(*language);
+            let at = rows
+                .iter()
+                .position(|row| row.trim_start().starts_with(kind))
+                .expect("Bitcoin's row is drawn");
+            let (counts, change) = (&rows[at], &rows[at + 1]);
+            assert_eq!(
+                nmtk_kq::text::width(counts),
+                nmtk_kq::text::width(change),
+                "in {language}:\n{counts}\n{change}"
+            );
+        }
+    }
+
+    /// "B" is on the panel from the first press, and the sentence saying what it means is the
+    /// eighth. The byte column waits for it, and "UTXO" waits for the stage that spells it out.
+    #[test]
+    fn no_word_reaches_the_panel_before_it_is_explained() {
+        let mut session = Session::new();
+        let opening = draw(&session);
+        assert!(!opening.contains(" B "), "bytes drawn before they are explained:\n{opening}");
+        assert!(!opening.contains("UTXO"), "UTXO drawn before it is explained:\n{opening}");
+        walk(&mut session);
+        assert!(draw(&session).contains("192 B"), "the byte column never appeared");
+
+        session.go_to(STAGE_GROW);
+        walk(&mut session);
+        assert!(draw(&session).contains("Bitcoin (UTXO)"), "the heading never took the acronym");
+    }
+
+    /// The recipient is a choice. A number typed past its end used to be reported as "set to 1"
+    /// beside a knob that read "Carol".
+    #[test]
+    fn a_recipient_typed_out_of_range_is_named_where_it_landed() {
+        let mut session = Session::new();
+        session.go_to(3);
+        session.on(Action::Next);
+        session.on(Action::Type('5'));
+        session.on(Action::Commit);
+        let said = session.transcript(Language::ENGLISH);
+        let last = &said.last().expect("the conversation said nothing").text;
+        assert!(last.ends_with("Carol"), "{last}");
+        assert_eq!(session.recipient(), session.carol);
     }
 
     #[test]

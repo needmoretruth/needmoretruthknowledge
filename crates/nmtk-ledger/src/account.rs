@@ -139,6 +139,16 @@ impl AccountLedger {
                 Rejection::NonceMismatch { expected: sender.nonce, found: tx.nonce },
             ));
         }
+        // The last number a counter can hold is never spent. Applying a transfer there would have
+        // to leave the counter where it is — it cannot go up — and then the same signed transfer
+        // would match it again and again: a replay the nonce exists to stop. Ethereum draws the
+        // same line (EIP-2681).
+        if sender.nonce == u64::MAX {
+            return Err((
+                CheckStep::Freshness,
+                Rejection::NonceMismatch { expected: sender.nonce, found: tx.nonce },
+            ));
+        }
 
         if sender.balance < tx.amount {
             return Err((
@@ -278,5 +288,33 @@ impl Ledger for AccountLedger {
             parallel_to_one_recipient: false,
             has_shared_state: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Key;
+
+    /// A counter that cannot go up cannot tell a transfer from its replay, so the last value a
+    /// nonce can hold must refuse rather than let the same signed transfer in forever.
+    #[test]
+    fn a_nonce_at_the_end_of_its_range_refuses_rather_than_replaying() {
+        let alice = Key::from_seed(b"alice");
+        let bob = Key::from_seed(b"bob").address();
+        let mut ledger = AccountLedger::new();
+        ledger.accounts.insert(alice.address(), AccountEntry { balance: 100, nonce: u64::MAX });
+        let tx = ledger
+            .build_transfer(&TransferRequest::new(alice, bob, 10))
+            .expect("the transfer builds");
+        for _ in 0..2 {
+            let outcome = ledger.apply(&tx);
+            assert_eq!(
+                outcome.rejection().map(|(step, reason)| (step, reason.kind())),
+                Some((CheckStep::Freshness, RejectionKind::NonceMismatch))
+            );
+        }
+        assert_eq!(ledger.balance_of(&alice.address()), 100);
+        assert_eq!(ledger.balance_of(&bob), 0);
     }
 }

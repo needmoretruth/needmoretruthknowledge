@@ -455,3 +455,56 @@ fn resign(tx: &Transaction, key: Key) -> Transaction {
         }
     }
 }
+
+/// Three coins of ten, the way the ledger quest opens.
+fn tens() -> Scenario {
+    Scenario::new(&Genesis::new().holding(alice().address(), &[10, 10, 10]))
+}
+
+/// The object model used to check the owner before the version. A coin spent whole changes
+/// owner, so the second spend of it died as "not the owner" while the model's facts promised a
+/// stale version — true only when the first spend had split the coin and kept the change.
+#[test]
+fn a_whole_coin_spent_twice_is_refused_for_the_reason_the_facts_promise() {
+    let mut scenario = tens();
+    let before = scenario.facts();
+    let reports = scenario.double_spend(
+        &TransferRequest::new(alice(), bob().address(), 10),
+        &TransferRequest::new(alice(), carol().address(), 10),
+    );
+    for (model, report) in reports.iter() {
+        let facts = before.get(model);
+        assert!(report.stopped(), "{model:?} let the same coin be spent twice");
+        assert_eq!(Some(facts.double_spend_step), report.stopped_at(), "{model:?}");
+        assert_eq!(Some(facts.double_spend_kind), report.stopped_by(), "{model:?}");
+    }
+    assert_eq!(scenario.agreed_balance(&carol().address()), Some(0));
+}
+
+/// Paying exactly what two objects are worth folds the second into the first and hands the first
+/// over. It used to hand the first over at its own value, so ten of Alice's twenty vanished and
+/// Bob was paid half of what every other model paid him.
+#[test]
+fn paying_exactly_two_coins_worth_moves_all_of_it_in_every_model() {
+    let mut scenario = tens();
+    let outcomes = scenario.transfer(&TransferRequest::new(alice(), bob().address(), 20));
+    for (model, outcome) in outcomes.iter() {
+        assert!(outcome.accepted(), "{model:?}: {:?}", outcome.rejection());
+    }
+    assert_eq!(scenario.agreed_balance(&bob().address()), Some(20));
+    assert_eq!(scenario.agreed_balance(&alice().address()), Some(10));
+    for model in Model::ALL {
+        let ledger = scenario.ledger(model);
+        let held = ledger.balance_of(&alice().address()) + ledger.balance_of(&bob().address());
+        assert_eq!(held, 30, "{model:?} lost or minted money");
+    }
+    // One object folded into another: one fewer thing, and nothing new made.
+    assert_eq!(outcomes.object.entry_delta(), -1);
+
+    // And the whole of it can be spent on: Bob's one object is worth twenty.
+    let onward = scenario.transfer(&TransferRequest::new(bob(), carol().address(), 20));
+    for (model, outcome) in onward.iter() {
+        assert!(outcome.accepted(), "{model:?}: {:?}", outcome.rejection());
+    }
+    assert_eq!(scenario.agreed_balance(&carol().address()), Some(20));
+}

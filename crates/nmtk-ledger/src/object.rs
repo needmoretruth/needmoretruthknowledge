@@ -253,6 +253,22 @@ impl ObjectLedger {
             TransferTarget::Owner(_) => None,
         };
 
+        // The version is the whole defence, and it is looked at before the owner. A transaction
+        // names each object at an exact version, and a version the object has moved past is not
+        // there to be read any more — so there is no owner to check it against. Checking the owner
+        // first made the answer depend on what the first spend did: a coin split with change kept
+        // its owner and died here as stale, while a whole coin handed over died as "not the
+        // owner", and the model's own facts, which promise the stale version, were wrong for
+        // exactly the double spend a reader is most likely to try.
+        for (input, entry) in &held {
+            if input.version != entry.version {
+                return Err((
+                    CheckStep::Freshness,
+                    Rejection::StaleObjectVersion { expected: entry.version, found: input.version },
+                ));
+            }
+        }
+
         let signer = tx.signature.signer();
         for (_, entry) in &held {
             match entry.ownership {
@@ -263,17 +279,6 @@ impl ObjectLedger {
         }
         if !tx.signature.covers(&tx.signing_message()) {
             return Err((CheckStep::Authorization, Rejection::BadSignature));
-        }
-
-        // The version is the whole defence. A second spend of the same object was built against
-        // the version the first one left behind.
-        for (input, entry) in &held {
-            if input.version != entry.version {
-                return Err((
-                    CheckStep::Freshness,
-                    Rejection::StaleObjectVersion { expected: entry.version, found: input.version },
-                ));
-            }
         }
 
         let mut total: Amount = 0;
@@ -435,8 +440,12 @@ impl Ledger for ObjectLedger {
                         },
                     );
                 } else if let Some(entry) = self.objects.get_mut(&first) {
-                    // The whole object changes hands. Its id survives; only the owner and the
-                    // version move. No entry is created and none is destroyed.
+                    // The whole value changes hands. The first object's id survives and carries
+                    // all of it: when several objects were spent, the others were folded into it
+                    // above, so its value becomes the total rather than staying what it alone was
+                    // worth. Leaving it alone destroyed every input after the first — Alice paying
+                    // Bob twenty out of two coins of ten handed him one coin of ten.
+                    entry.value = tx.amount;
                     entry.ownership = Ownership::Owned(to);
                     entry.version = entry.version.saturating_add(1);
                 }
