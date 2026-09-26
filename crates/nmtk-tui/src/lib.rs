@@ -47,22 +47,46 @@ pub fn run() -> io::Result<()> {
     let mut app = App::new(catalogue());
     let mut screen = terminal::take()?;
     let result = event_loop(&mut screen, &mut app, &stop);
-    // The terminal first, so the reader has their shell back while the quest's threads wind
-    // down; then the quest, whose drop stops them.
-    let restored = terminal::give_back();
-    drop(app);
+    let result = wind_down(app, result, terminal::give_back);
+    // Said once the screen is the reader's again, so it can be read.
     for message in terminal::deferred_panics() {
         eprintln!("{message}");
     }
+    result
+}
+
+/// Ends the program in the one order that is safe: the terminal first, so the reader has their
+/// shell back while the quest's threads wind down, and then the quest, whose drop stops them.
+///
+/// Every way out comes through here — `q`, Ctrl+C, a signal, an error — because the event loop
+/// only ever asks to stop and never closes the quest itself. Stopping the quest's threads first
+/// kept the terminal raw on the alternate screen for as long as they took, and a second signal
+/// in that window ends the process on the spot, leaving the reader at a shell that does not echo.
+fn wind_down(
+    app: App,
+    result: io::Result<()>,
+    give_back: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let restored = give_back();
+    drop(app);
     result?;
     restored
 }
 
+/// Whether a signal from outside has asked the program to stop. When it has, the app is asked to
+/// quit the way Ctrl+C asks it, and the error to end with comes back.
+fn stopped_by_signal(app: &mut App, stop: &AtomicBool) -> Option<io::Error> {
+    if !stop.load(Ordering::SeqCst) {
+        return None;
+    }
+    app.shut_down();
+    Some(io::Error::new(io::ErrorKind::Interrupted, "stopped by a signal"))
+}
+
 fn event_loop(screen: &mut terminal::Screen, app: &mut App, stop: &AtomicBool) -> io::Result<()> {
     while !app.quit {
-        if stop.load(Ordering::SeqCst) {
-            app.shut_down();
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped by a signal"));
+        if let Some(error) = stopped_by_signal(app, stop) {
+            return Err(error);
         }
         // The open quest reads its workers' latest state here, on this thread, before drawing.
         if let Some(quest) = &mut app.open {
@@ -205,9 +229,13 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
                     say("q", Msg::KeyBack),
                     say("?", Msg::KeyHelp),
                 ],
-                (true, None) => {
-                    vec![say("q", Msg::KeyBack), say("Tab", Msg::KeyStage), say("?", Msg::KeyHelp)]
-                }
+                // The closing sentence says Shift+Tab walks back, so the bar offers the same key.
+                // It offered "Tab next stage" here, twice, on a stage with nothing after it.
+                (true, None) => vec![
+                    say("q", Msg::KeyBack),
+                    say("Shift+Tab", Msg::KeyStageBack),
+                    say("?", Msg::KeyHelp),
+                ],
                 (false, None) => {
                     vec![
                         say("Enter", Msg::KeyContinue),
@@ -229,7 +257,14 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
                     quest.session.keys(language).into_iter().map(|(k, l)| (k, l.to_string())),
                 );
             }
-            keys.push(say("Tab", Msg::KeyStage));
+            // Tab stops at the last stage, so there it is not offered as a way on.
+            let last = app
+                .open
+                .as_ref()
+                .is_some_and(|quest| quest.session.stage() + 1 >= quest.stages.len());
+            if !last {
+                keys.push(say("Tab", Msg::KeyStage));
+            }
             keys.push(say("PgUp", Msg::KeyScroll));
             keys.push(say("r", Msg::KeyReset));
             keys
@@ -775,6 +810,8 @@ mod tests {
     struct Seen {
         closed: AtomicUsize,
         opened_with: Mutex<Vec<MachineProfile>>,
+        /// Whether the probe says Enter runs something, the way a stage with knobs does.
+        names_go: std::sync::atomic::AtomicBool,
     }
 
     struct Probe(Arc<Seen>, &'static str);
@@ -863,6 +900,9 @@ mod tests {
         fn keys(&self, _: Language) -> Vec<(&'static str, &'static str)> {
             Vec::new()
         }
+        fn go_name(&self, _: Language) -> Option<&'static str> {
+            self.seen.names_go.load(AtomicOrdering::SeqCst).then_some("run it")
+        }
         fn close(&mut self) {
             self.seen.closed.fetch_add(1, AtomicOrdering::SeqCst);
         }
@@ -906,8 +946,11 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.quit && app.open.is_none());
-        assert_eq!(closed(), 3, "Ctrl+C did not close the quest");
+        assert!(app.quit, "Ctrl+C did not ask the program to end");
+        // Closed by the drop that follows giving the terminal back, not by the key itself.
+        assert_eq!(closed(), 2, "Ctrl+C closed the quest before the terminal was given back");
+        drop(app);
+        assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 3, "Ctrl+C never closed the quest");
 
         let (mut app, seen) = probed(Settings::default());
         press(&mut app, KeyCode::Enter);
@@ -915,13 +958,223 @@ mod tests {
         assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1, "dropping the app leaked it");
     }
 
+    /// A signal and Ctrl+C used to join the quest's threads while the terminal was still raw on
+    /// the alternate screen, and a second signal during that join ended the process right there.
+    /// The terminal has to be given back before the quest is closed, on every deliberate way out.
     #[test]
-    fn a_signal_from_outside_closes_the_quest_and_quits() {
+    fn a_signal_or_ctrl_c_gives_the_terminal_back_before_closing_the_quest() {
+        type Exit = fn(&mut App, &AtomicBool) -> io::Result<()>;
+        let by_signal: Exit = |app, stop| {
+            stop.store(true, Ordering::SeqCst);
+            stopped_by_signal(app, stop).map_or(Ok(()), Err)
+        };
+        let by_ctrl_c: Exit = |app, stop| {
+            app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            stopped_by_signal(app, stop).map_or(Ok(()), Err)
+        };
+        for (how, exit, interrupted) in [("signal", by_signal, true), ("Ctrl+C", by_ctrl_c, false)]
+        {
+            let (mut app, seen) = probed(Settings::default());
+            press(&mut app, KeyCode::Enter);
+            assert!(app.open.is_some());
+            let stop = AtomicBool::new(false);
+            let result = exit(&mut app, &stop);
+            assert!(app.quit, "{how} did not ask the program to end");
+            assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 0, "{how} closed the quest early");
+
+            let closed_at_give_back = Arc::new(AtomicUsize::new(usize::MAX));
+            let give_back = {
+                let (seen, at) = (seen.clone(), closed_at_give_back.clone());
+                move || {
+                    at.store(seen.closed.load(AtomicOrdering::SeqCst), AtomicOrdering::SeqCst);
+                    Ok(())
+                }
+            };
+            let ended = wind_down(app, result, give_back);
+            assert_eq!(
+                closed_at_give_back.load(AtomicOrdering::SeqCst),
+                0,
+                "{how}: the quest was closed before the terminal was given back"
+            );
+            assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1, "{how}: never closed");
+            // The exit code and the message on a signal read this, and they are unchanged.
+            assert_eq!(
+                ended.err().map(|error| error.kind()),
+                interrupted.then_some(io::ErrorKind::Interrupted),
+                "{how} ended the wrong way"
+            );
+        }
+    }
+
+    /// Checks the line under the conversation against what Enter really does, and says what was
+    /// looked at: whether the quest named Enter, and where its run was.
+    fn prompt_matches_enter(app: &App, language: Language, at: &str) -> (bool, RunState) {
+        let quest = app.open.as_ref().expect("a quest is open");
+        let session = &quest.session;
+        let beat = quest::closing_beat(quest, language);
+        let again =
+            [t(Msg::ConversationRunAgain, language), t(Msg::ConversationRunAgainHere, language)];
+        let named = session.go_name(language).is_some();
+        if named {
+            let beat =
+                beat.unwrap_or_else(|| panic!("{at}: Enter runs it again, and nothing says so"));
+            assert_eq!(beat.voice, nmtk_kq::session::Voice::Ask, "{at}: {beat:?}");
+            let last = session.stage() + 1 >= quest.stages.len();
+            assert_eq!(beat.text, again[usize::from(last)], "{at}: the prompt misleads");
+        } else if let Some(beat) = beat {
+            assert!(!again.contains(&beat.text.as_str()), "{at}: {beat:?} with nothing to run");
+        }
+        (named, session.run_state())
+    }
+
+    /// At the end of a stage with knobs Enter runs the work again, and the quest takes the key, so
+    /// the shell never walks on. The line under the conversation said "Press Enter to carry on",
+    /// and a reader pressing it went round the same run while waiting to be carried on.
+    ///
+    /// Walked through every stage of every quest on the shelf, turning a value wherever there is
+    /// one, so the stages whose runs go on for minutes are seen with their work still going.
+    #[test]
+    fn the_prompt_on_a_stage_with_knobs_says_what_enter_does_and_that_tab_walks_on() {
+        let language = Language::ENGLISH;
+        let titles: Vec<&str> =
+            app_in(language).visible().iter().map(|q| q.title(language)).collect();
+        let mut named_while_running = Vec::new();
+        let mut named_when_still = Vec::new();
+        for title in titles {
+            let mut app = opened_named(language, title);
+            let stages = app.open.as_ref().expect("a quest is open").stages.len();
+            for stage in 0..stages {
+                let at = format!("{title}, stage {}", stage + 1);
+                // Carried on the way a reader does, until the stage is over, or until it is
+                // waiting on a run longer than a test should.
+                let mut waiting_since = std::time::Instant::now();
+                for _ in 0..400 {
+                    let quest = app.open.as_mut().expect("a quest is open");
+                    quest.session.tick();
+                    let (at_end, can, running) = (
+                        quest.session.at_end(),
+                        quest.session.can_advance(),
+                        quest.session.run_state() == RunState::Running,
+                    );
+                    let (named, state) = prompt_matches_enter(&app, language, &at);
+                    if named {
+                        let seen = if state == RunState::Running {
+                            &mut named_while_running
+                        } else {
+                            &mut named_when_still
+                        };
+                        seen.push(at.clone());
+                    }
+                    if at_end && !running {
+                        break;
+                    }
+                    if can && !at_end {
+                        press(&mut app, KeyCode::Enter);
+                        waiting_since = std::time::Instant::now();
+                    } else if waiting_since.elapsed() > Duration::from_secs(2) {
+                        break;
+                    } else {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                // Turning a value is what makes Enter run it again in the middle of a run.
+                let tunable = !app.open.as_ref().expect("open").session.knobs().is_empty();
+                if tunable {
+                    press(&mut app, KeyCode::Right);
+                    let (named, state) = prompt_matches_enter(&app, language, &at);
+                    if named && state == RunState::Running {
+                        named_while_running.push(at.clone());
+                    }
+                }
+                press(&mut app, KeyCode::Tab);
+            }
+        }
+        println!("named while running: {named_while_running:?}");
+        println!("named when still: {named_when_still:?}");
+        assert!(!named_while_running.is_empty(), "no stage was seen naming Enter mid-run");
+        assert!(
+            named_when_still.iter().any(|at| at.starts_with("Ledger models")),
+            "the ledger quest's tuning stage never reached its end: {named_when_still:?}"
+        );
+    }
+
+    /// The same on screen, in both languages: the prompt at the end of the ledger quest's tuning
+    /// stage, and the key bar beside it.
+    #[test]
+    fn the_end_of_a_tuning_stage_shows_what_enter_does_in_both_languages() {
+        for language in Language::ALL {
+            let mut app = opened_named(*language, t(Msg::MenuLedgers, *language));
+            // The fourth stage is the one with values to turn.
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Tab);
+            }
+            for _ in 0..40 {
+                press(&mut app, KeyCode::Enter);
+                if app.open.as_ref().expect("open").session.at_end() {
+                    break;
+                }
+            }
+            let session = &app.open.as_ref().expect("open").session;
+            assert!(session.at_end() && session.go_name(*language).is_some());
+            for (width, height) in [(80u16, 24u16), (100, 30)] {
+                shot(&mut app, width, height);
+                let text = shot(&mut app, width, height);
+                println!("\n===== the end of the tuning stage ({language}, {width}) =====\n{text}");
+                // The conversation alone, read as one run of text, so a sentence wrapped across
+                // lines is still one sentence.
+                let (talk, _) = nmtk_kq::theme::split(width);
+                let conversation: String = text
+                    .lines()
+                    .map(|line| line.chars().take(usize::from(talk)).collect::<String>())
+                    .collect::<String>()
+                    .replace([' ', '│'], "");
+                let again = t(Msg::ConversationRunAgain, *language).replace(' ', "");
+                assert!(conversation.contains(&again), "the prompt is not on screen:\n{text}");
+                let carry = t(Msg::ConversationWaiting, *language).replace(' ', "");
+                assert!(!conversation.contains(&carry), "Enter is said to carry on:\n{text}");
+                let bar = text.lines().last().unwrap_or_default().replace(' ', "");
+                let named = session_go_name(&app, *language).replace(' ', "");
+                assert!(bar.contains(&format!("Enter{named}")), "the key bar disagrees: {bar}");
+            }
+        }
+    }
+
+    fn session_go_name(app: &App, language: Language) -> String {
+        let session = &app.open.as_ref().expect("open").session;
+        session.go_name(language).unwrap_or_default().to_string()
+    }
+
+    /// On a last stage there is no stage for Tab to walk on to, so the prompt does not offer one;
+    /// and a stage that names nothing keeps the ordinary prompt.
+    #[test]
+    fn the_prompt_offers_tab_only_where_there_is_a_next_stage() {
         let (mut app, seen) = probed(Settings::default());
         press(&mut app, KeyCode::Enter);
-        app.shut_down();
-        assert!(app.quit && app.open.is_none());
+        let beat = |app: &App| {
+            quest::closing_beat(app.open.as_ref().expect("open"), Language::ENGLISH)
+                .map(|beat| beat.text)
+        };
+        let english = |message| t(message, Language::ENGLISH).to_string();
+        assert_eq!(beat(&app), Some(english(Msg::ConversationWaitingWhileRunning)));
+        seen.names_go.store(true, AtomicOrdering::SeqCst);
+        assert_eq!(beat(&app), Some(english(Msg::ConversationRunAgain)));
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.open.as_ref().expect("open").session.stage(), 2);
+        assert_eq!(beat(&app), Some(english(Msg::ConversationRunAgainHere)));
+        let text = shot(&mut app, 80, 24);
+        let bar = text.lines().last().unwrap_or_default();
+        assert!(bar.contains("Enter run it"), "{bar}");
+        assert!(!bar.contains("Tab next stage"), "the last stage offers a next one: {bar}");
+    }
+
+    /// A failure to give the terminal back is still reported, after the quest has been closed.
+    #[test]
+    fn a_terminal_that_will_not_come_back_is_reported_and_the_quest_still_closes() {
+        let (mut app, seen) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        let ended = wind_down(app, Ok(()), || Err(io::Error::other("no terminal")));
         assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(ended.err().map(|error| error.kind()), Some(io::ErrorKind::Other));
     }
 
     /// The thread count in settings used to reach no quest at all: each was opened with the bare
@@ -1138,6 +1391,39 @@ mod tests {
                 assert!(flat.contains("1/"), "the stage strip is missing:\n{text}");
                 let bar = text.lines().last().unwrap_or_default().replace(' ', "");
                 assert!(bar.contains(&say(Msg::KeyBack)), "the way out is missing: {bar}");
+            }
+        }
+    }
+
+    /// A launch that found part of the settings file unreadable says so on the shelf, whole, at
+    /// the smallest screen and in both languages, down to where the file as it was has gone.
+    #[test]
+    fn a_damaged_settings_file_is_mentioned_whole_on_the_shelf() {
+        use nmtk_core::settings::Damage;
+        for damage in [Damage::KeptAs("settings.toml.bad".into()), Damage::NotKept] {
+            for language in Language::ALL {
+                let mut app = app_in(*language);
+                app.status = Some(app::damage_notice(&damage));
+                let text = shot(&mut app, 80, 24);
+                println!("\n===== {damage:?} ({language}) =====\n{text}");
+                let said = t(app::damage_notice(&damage), *language).replace(' ', "");
+                let bottom: String = text
+                    .lines()
+                    .rev()
+                    .skip(1)
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<String>()
+                    .replace(' ', "");
+                assert_eq!(bottom, said, "the notice is not said whole:\n{text}");
+                // The shelf is still there above it.
+                let version = format!("v{}", app.visible()[app.list_index].meta().version);
+                assert!(text.contains(&version), "the notice pushed the shelf away:\n{text}");
+                // The next key clears it, as every answer on this screen is cleared.
+                press(&mut app, KeyCode::Down);
+                assert_eq!(app.status, None);
             }
         }
     }

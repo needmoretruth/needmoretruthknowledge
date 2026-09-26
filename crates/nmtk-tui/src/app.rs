@@ -114,9 +114,10 @@ pub struct App {
 impl App {
     /// The app the program runs: settings read from disk, and written back as they change.
     pub fn new(catalogue: Catalogue) -> Self {
-        let (settings, first_run) = Settings::load_saying_whether_it_is_the_first_time();
-        let mut app = Self::detached(catalogue, settings, MachineProfile::detect());
-        app.screen = if first_run { Screen::Welcome } else { Screen::Quests };
+        let loaded = Settings::load_reporting();
+        let mut app = Self::detached(catalogue, loaded.settings, MachineProfile::detect());
+        app.screen = if loaded.first_launch { Screen::Welcome } else { Screen::Quests };
+        app.status = loaded.damage.as_ref().map(damage_notice);
         app.persist = true;
         app
     }
@@ -496,9 +497,13 @@ impl App {
         self.open = None;
     }
 
-    /// Stops everything and asks the program to end: Ctrl+C, or a signal from outside.
+    /// Asks the program to end: Ctrl+C, or a signal from outside.
+    ///
+    /// The open quest is left open on purpose. It is closed when the app is dropped, which the
+    /// program does only after it has given the terminal back: closing it here joined its threads
+    /// with the terminal still raw on the alternate screen, and a second signal while they wound
+    /// down ended the process there.
     pub fn shut_down(&mut self) {
-        self.close_quest();
         self.quit = true;
     }
 
@@ -590,7 +595,8 @@ impl App {
         match SettingItem::ALL[self.settings_index.min(SettingItem::ALL.len() - 1)] {
             SettingItem::Language => self.step_language(step),
             SettingItem::Threads => self.step_threads(step),
-            SettingItem::Colour => self.settings.colour = !self.settings.colour,
+            // A choice the reader makes here is theirs, and outranks NO_COLOR from now on.
+            SettingItem::Colour => self.settings.choose_colour(!self.settings.colour),
         }
         // A key that changed nothing says nothing. "Saved." after a left arrow already at the
         // leftmost value tells the reader something happened when nothing did.
@@ -639,6 +645,18 @@ fn action_for(code: KeyCode, typing: bool, tunable: bool, stages: &[StageSpec]) 
             (wanted < stages.len()).then_some(Action::Stage(wanted))
         }
         _ => None,
+    }
+}
+
+/// What the shelf says on a launch that found part of the settings file unreadable.
+///
+/// The recovered settings are in use and the next save writes only those, so the reader is told
+/// once, where the file as they left it has gone. A setting that quietly went back to its default
+/// reads as nmtk forgetting it.
+pub fn damage_notice(damage: &nmtk_core::settings::Damage) -> Msg {
+    match damage {
+        nmtk_core::settings::Damage::KeptAs(_) => Msg::SettingsDamagedKept,
+        nmtk_core::settings::Damage::NotKept => Msg::SettingsDamagedNotKept,
     }
 }
 

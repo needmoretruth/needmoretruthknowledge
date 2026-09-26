@@ -124,6 +124,10 @@ messages! {
     ConversationWaiting { en: "Press Enter to carry on.", ko: "Enter를 눌러 계속합니다." },
     ConversationWorking { en: "Working. The next line arrives when the machine does.", ko: "돌아가는 중입니다. 기계가 답하면 다음 줄이 나옵니다." },
     ConversationWaitingWhileRunning { en: "Press Enter to carry on. The run keeps going either way.", ko: "Enter를 눌러 계속합니다. 돌고 있는 실행은 그대로 이어집니다." },
+    /// Where a stage has values to turn, Enter runs the work again with them and does not walk on.
+    ConversationRunAgain { en: "Enter runs it again with the values on screen. Tab walks on to the next stage.", ko: "Enter를 누르면 화면에 있는 값으로 다시 실행합니다. 다음 단계로 넘어가려면 Tab을 누르세요." },
+    /// The same, on a last stage, where there is no next stage for Tab to walk to.
+    ConversationRunAgainHere { en: "Enter runs it again with the values on screen.", ko: "Enter를 누르면 화면에 있는 값으로 다시 실행합니다." },
     ConversationFinished { en: "That is the end of this quest. Press q for the list, or Shift+Tab to walk back through it.", ko: "이 퀘스트는 여기까지입니다. q를 누르면 목록으로 돌아가고, Shift+Tab으로 앞 단계를 다시 볼 수 있습니다." },
     // ---- Keys -----------------------------------------------------------------
     KeyMove { en: "move", ko: "이동" },
@@ -155,6 +159,10 @@ messages! {
     SettingsSaved { en: "Saved to your settings file.", ko: "설정 파일에 저장했습니다." },
     SettingsThreadsNextQuest { en: "Saved. The quest already open keeps its threads until it is opened again.", ko: "저장했습니다. 이미 열린 퀘스트는 다시 열 때부터 이 값을 씁니다." },
     SettingsNotSaved { en: "Could not save settings; this run keeps the change.", ko: "설정을 저장하지 못했습니다. 이번 실행에서는 바뀐 값이 유지됩니다." },
+    /// Said on the shelf when part of the settings file could not be read and a copy was kept.
+    SettingsDamagedKept { en: "Some of settings.toml could not be read, so those settings are back to their defaults. The file as it was is kept as settings.toml.bad.", ko: "settings.toml의 일부를 읽지 못해 그 설정은 기본값으로 돌아갔습니다. 원래 파일은 settings.toml.bad로 남겨 두었습니다." },
+    /// The same, when the copy could not be made.
+    SettingsDamagedNotKept { en: "Some of settings.toml could not be read, so those settings are back to their defaults. No copy could be kept, and the next save writes over it.", ko: "settings.toml의 일부를 읽지 못해 그 설정은 기본값으로 돌아갔습니다. 원래 파일을 따로 남겨 두지 못해, 다음에 저장할 때 덮어씁니다." },
     // ---- This machine ---------------------------------------------------------
     MachineTitle { en: "This machine", ko: "이 컴퓨터" },
     MachineCores { en: "Cores", ko: "코어" },

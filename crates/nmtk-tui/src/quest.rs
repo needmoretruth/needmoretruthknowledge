@@ -3,7 +3,7 @@
 use nmtk_core::Language;
 use nmtk_i18n::{Msg, t};
 use nmtk_kq::meta::{StageRole, StageSpec};
-use nmtk_kq::session::{Kq, RunState};
+use nmtk_kq::session::{Beat, Kq, RunState};
 use nmtk_kq::theme::{self, State, Theme};
 use nmtk_kq::{conversation, text};
 use ratatui::Frame;
@@ -38,29 +38,47 @@ pub fn render(
     frame.render_widget(block, talk_area);
 
     let mut beats = quest.session.transcript(language);
-    // The shell walks on at the end of a stage, so Enter still carries the reader forward there.
-    let walk_on = quest.session.at_end() && quest.session.stage() + 1 < quest.stages.len();
-    if quest.session.can_advance() || walk_on {
-        // A reader who is offered Enter while work is visibly running does not know whether
-        // pressing it cuts the run short, so they sit and wait. One of them waited ninety seconds.
-        let waiting = if quest.session.run_state() == RunState::Running {
-            Msg::ConversationWaitingWhileRunning
-        } else {
-            Msg::ConversationWaiting
-        };
-        beats.push(nmtk_kq::Beat::ask(t(waiting, language).to_string()));
-    } else if quest.session.run_state() == RunState::Running {
-        // A conversation that has stopped and says nothing reads as a program that has hung.
-        beats.push(nmtk_kq::Beat::event(t(Msg::ConversationWorking, language).to_string()));
-    } else if quest.session.at_end() {
-        // The last stage of the last quest used to end in silence with "Enter continue" still in
-        // the key bar, so the reader pressed it until they concluded the program was broken.
-        beats.push(nmtk_kq::Beat::say(t(Msg::ConversationFinished, language).to_string()));
-    }
+    beats.extend(closing_beat(quest, language));
     let furthest = conversation::render(frame, inner, theme, &beats, app.transcript_scroll);
 
     quest.session.render(frame, run_area, theme, language);
     furthest
+}
+
+/// The line the shell adds under the quest's own conversation: what Enter does now, what is being
+/// waited on, or that the quest is over.
+pub(crate) fn closing_beat(quest: &OpenQuest, language: Language) -> Option<Beat> {
+    let session = &quest.session;
+    let last_stage = session.stage() + 1 >= quest.stages.len();
+    // A stage with knobs, once its conversation is over or a value has been turned, runs the work
+    // again on Enter, and the quest handles that key, so the shell never walks on. "Press Enter to
+    // carry on" there sent the reader round the same run while they waited to be carried on.
+    if session.go_name(language).is_some() {
+        let again =
+            if last_stage { Msg::ConversationRunAgainHere } else { Msg::ConversationRunAgain };
+        return Some(Beat::ask(t(again, language)));
+    }
+    // The shell walks on at the end of a stage, so Enter still carries the reader forward there.
+    let walk_on = session.at_end() && !last_stage;
+    if session.can_advance() || walk_on {
+        // A reader who is offered Enter while work is visibly running does not know whether
+        // pressing it cuts the run short, so they sit and wait. One of them waited ninety seconds.
+        let waiting = if session.run_state() == RunState::Running {
+            Msg::ConversationWaitingWhileRunning
+        } else {
+            Msg::ConversationWaiting
+        };
+        Some(Beat::ask(t(waiting, language)))
+    } else if session.run_state() == RunState::Running {
+        // A conversation that has stopped and says nothing reads as a program that has hung.
+        Some(Beat::event(t(Msg::ConversationWorking, language)))
+    } else if session.at_end() {
+        // The last stage of the last quest used to end in silence with "Enter continue" still in
+        // the key bar, so the reader pressed it until they concluded the program was broken.
+        Some(Beat::say(t(Msg::ConversationFinished, language)))
+    } else {
+        None
+    }
 }
 
 /// Where the reader is: one dot per stage with this one filled, then its number and name.

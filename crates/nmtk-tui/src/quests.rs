@@ -30,16 +30,21 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     // An answer to a keypress goes under both panels, where there is always a line for it. Inside
     // the quest's own panel it landed below whatever that panel had already filled, and was never
     // seen.
-    let [body, answer] = Layout::vertical([Constraint::Min(6), Constraint::Length(1)]).areas(body);
-    if let Some(status) = app.status {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {}", t(status, language)),
-                theme.muted(),
-            ))),
-            answer,
-        );
-    }
+    // The answer wraps rather than running off the edge: the notice about a damaged settings file
+    // ends on where the file went, which is the part a cut line would lose.
+    let answer_lines: Vec<Line> = match app.status {
+        Some(status) => {
+            nmtk_kq::text::wrap(t(status, language), area.width.saturating_sub(2).into())
+                .into_iter()
+                .map(|part| Line::from(Span::styled(format!(" {part}"), theme.muted())))
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let answer_rows = answer_lines.len().max(1) as u16;
+    let [body, answer] =
+        Layout::vertical([Constraint::Min(6), Constraint::Length(answer_rows)]).areas(body);
+    frame.render_widget(Paragraph::new(answer_lines), answer);
 
     let [list_area, detail_area] =
         Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).areas(body);
