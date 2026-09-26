@@ -809,7 +809,10 @@ impl KqSession for Session {
                 self.typed = None;
                 // A value changed since the last send asks for the send to be done again with
                 // what is on screen. The sentences after a send are about that send.
-                if self.values_moved() && self.rerun() == Reaction::Handled {
+                // Unless the next step is a send of its own: the values on screen are for that one,
+                // and going back to redo the send before it rewrote a sentence already read.
+                let next_is_a_send = matches!(self.script().get(self.revealed + 1), Some(Run(_)));
+                if self.values_moved() && !next_is_a_send && self.rerun() == Reaction::Handled {
                     return Reaction::Handled;
                 }
                 let script = self.script();

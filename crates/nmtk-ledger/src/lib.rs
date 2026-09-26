@@ -212,6 +212,10 @@ pub enum Rejection {
         /// The nonce the transaction carried.
         found: u64,
     },
+    /// The account's counter has reached the last number it can hold. It was never used, and it
+    /// never can be: applying a transfer there would leave the counter where it is, and the same
+    /// signed transfer would then match it again and again.
+    NonceExhausted,
     /// There is not enough to send.
     InsufficientBalance {
         /// What the sender holds.
@@ -278,6 +282,8 @@ pub enum RejectionKind {
     AccountNotFound,
     /// See [`Rejection::NonceMismatch`].
     NonceMismatch,
+    /// See [`Rejection::NonceExhausted`].
+    NonceExhausted,
     /// See [`Rejection::InsufficientBalance`].
     InsufficientBalance,
     /// See [`Rejection::ObjectNotFound`].
@@ -311,6 +317,7 @@ impl Rejection {
             Rejection::AmountOverflow => RejectionKind::AmountOverflow,
             Rejection::AccountNotFound(_) => RejectionKind::AccountNotFound,
             Rejection::NonceMismatch { .. } => RejectionKind::NonceMismatch,
+            Rejection::NonceExhausted => RejectionKind::NonceExhausted,
             Rejection::InsufficientBalance { .. } => RejectionKind::InsufficientBalance,
             Rejection::ObjectNotFound(_) => RejectionKind::ObjectNotFound,
             Rejection::NotSharedObject(_) => RejectionKind::NotSharedObject,

@@ -144,10 +144,7 @@ impl AccountLedger {
         // would match it again and again: a replay the nonce exists to stop. Ethereum draws the
         // same line (EIP-2681).
         if sender.nonce == u64::MAX {
-            return Err((
-                CheckStep::Freshness,
-                Rejection::NonceMismatch { expected: sender.nonce, found: tx.nonce },
-            ));
+            return Err((CheckStep::Freshness, Rejection::NonceExhausted));
         }
 
         if sender.balance < tx.amount {
@@ -311,7 +308,7 @@ mod tests {
             let outcome = ledger.apply(&tx);
             assert_eq!(
                 outcome.rejection().map(|(step, reason)| (step, reason.kind())),
-                Some((CheckStep::Freshness, RejectionKind::NonceMismatch))
+                Some((CheckStep::Freshness, RejectionKind::NonceExhausted))
             );
         }
         assert_eq!(ledger.balance_of(&alice.address()), 100);
