@@ -738,8 +738,12 @@ mod tests {
         // The window opens once both miners are really hashing, as in the 51/49 test below, so
         // it measures the split rather than which threads happened to start first.
         let start = wait_until_all_are_hashing(&handle, 10_000, Duration::from_secs(30));
-        thread::sleep(Duration::from_secs(2));
-        let end = handle.snapshot();
+        // Three seconds at least, and then as long as it takes to hold a few million hashes. With
+        // the whole test suite running beside it, four threads share the machine with a hundred
+        // others, and two seconds of that was sometimes too little hashing for the split to show
+        // through the scheduler's unevenness: once, one thread came out ahead of three.
+        thread::sleep(Duration::from_secs(3));
+        let end = wait_for_hashes(&handle, start.total_hashes + 3_000_000, Duration::from_secs(30));
         handle.stop();
         let big = &end.miners[0];
         let small = &end.miners[1];
@@ -747,7 +751,7 @@ mod tests {
         assert!((small.effective_share - 0.25).abs() < 1e-9);
         let bigger = big.hashes.saturating_sub(start.miners[0].hashes);
         let smaller = small.hashes.saturating_sub(start.miners[1].hashes);
-        assert!(bigger + smaller > 0, "nothing was hashed in two seconds");
+        assert!(bigger + smaller > 0, "nothing was hashed in the window");
         assert!(bigger > smaller, "three threads did {bigger} hashes, one did {smaller}");
         assert!(big.average_hashrate > 0.0);
     }
