@@ -32,7 +32,7 @@ nmtk_i18n::messages! {
     WhatSeven { en: "The node checks a proof instead of the payment, and the amounts and the addresses never go on the chain at all.", ko: "노드는 결제 대신 증명을 검사하고, 금액과 주소는 아예 체인에 올라가지 않습니다." },
 
     // ---- Stage 2: the four systems ---------------------------------------------------
-    FourOne { en: "Four systems run here, in the order the field arrived at them.", ko: "여기서 네 가지 방식이 돕니다. 이 분야가 실제로 거쳐 온 순서 그대로입니다." },
+    FourOne { en: "Four systems run here, in the order the field arrived at them.", ko: "여기서 네 가지 방식이 돌아갑니다. 이 분야가 실제로 거쳐 온 순서 그대로입니다." },
     FourTwo { en: "Each fixes something the one before it could not, and each asks you to trust something different.", ko: "각각은 앞의 것이 풀지 못한 것을 풀고, 각각 다른 것을 믿으라고 요구합니다." },
     // Said in two stages, because either can be entered first and both lean on the two words.
     Roles { en: "Two people take part: the prover, who knows the secret, and the verifier, who has to be convinced.", ko: "두 사람이 참여합니다. 비밀을 아는 증명자, 그리고 납득해야 하는 검증자입니다." },
@@ -82,6 +82,10 @@ nmtk_i18n::messages! {
     BreakAsk { en: "Press Enter to run all of them.", ko: "Enter를 누르면 전부 돌아갑니다." },
     BreakGotThrough { en: "got through", ko: "통과" },
     BreakRecall { en: "Recall the order: the prover sends a commitment R first, and the challenge c must be one nobody could know before R existed.", ko: "순서를 떠올려 보세요. 증명자가 커밋먼트 R을 먼저 보내고, 챌린지 c는 R이 생기기 전에는 아무도 알 수 없는 수여야 합니다." },
+    // The seed the reader sets fixes the verifier's coin as well, so this program's challenge can be
+    // known in advance by anyone holding the seed. Said here, beside the sentence that says nobody
+    // could know it, because a real verifier's coin is never known in advance.
+    BreakReplayable { en: "Here one number you can set fixes every random number, c too, so a run can be replayed. A real verifier keeps c secret until R has arrived.", ko: "여기서는 직접 정할 수 있는 수 하나가 c까지 모든 무작위 수를 정하므로, 같은 실행을 다시 볼 수 있습니다. 진짜 검증자는 R이 올 때까지 c를 아무에게도 알리지 않습니다." },
     BreakWeakHash { en: "One is a Fiat-Shamir challenge made by a hash, a fingerprint of its input, taken over the statement but not over R.", ko: "하나는 챌린지를 해시, 곧 입력의 지문으로 만들되 주장만 넣고 R은 빼먹은 피아트-샤미르입니다." },
     BreakWeakHashTwo { en: "That lets an attacker choose its answer first and then solve for a commitment that fits it.", ko: "그러면 공격자가 답을 먼저 고르고, 거기에 맞는 커밋먼트를 나중에 구할 수 있습니다." },
     BreakWaste { en: "The other is the holder of a trusted setup's leftover randomness, opening a commitment at a value it does not hold.", ko: "다른 하나는 신뢰 설정에서 남은 난수를 쥔 사람이, 커밋먼트를 그 안에 없는 값으로 여는 것입니다." },

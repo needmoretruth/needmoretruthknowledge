@@ -20,7 +20,7 @@ use nmtk_zk::{
     halo2, sigma,
 };
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -216,6 +216,24 @@ impl Record {
         self.tried += outcome.forgery.attempts.len();
         self.through += outcome.forgery.attempts.iter().filter(|a| a.accepted).count();
     }
+
+    /// Folds another stage's record into this one.
+    fn merge(&mut self, other: &Record) {
+        if other.runs == 0 {
+            return;
+        }
+        if self.runs == 0 {
+            *self = *other;
+            return;
+        }
+        self.runs += other.runs;
+        self.quickest_prove = self.quickest_prove.min(other.quickest_prove);
+        self.slowest_prove = self.slowest_prove.max(other.slowest_prove);
+        self.smallest_proof = self.smallest_proof.min(other.smallest_proof);
+        self.largest_proof = self.largest_proof.max(other.largest_proof);
+        self.tried += other.tried;
+        self.through += other.through;
+    }
 }
 
 /// One move in a stage's conversation.
@@ -352,6 +370,7 @@ const BREAK: &[Step] = &[
     // The two words the next beats turn on, said again here because this stage can be the first
     // one a reader opens.
     Say(Msg::BreakRecall),
+    Say(Msg::BreakReplayable),
     Say(Msg::BreakWeakHash),
     Say(Msg::BreakWeakHashTwo),
     Say(Msg::BreakWaste),
@@ -456,8 +475,16 @@ pub struct Session {
     message: usize,
     /// Which system the recap is showing the four sides of.
     focus: Stage,
-    /// What every run in the quest measured, for the closing stage.
-    record: Record,
+    /// What every run in the quest measured, for the closing stage, kept per stage.
+    ///
+    /// `r` on the attack stage used to wipe one record for the whole quest, taking the tuning
+    /// stage's sixty-four-bit circuits with it. Each stage now keeps its own, `r` clears the one
+    /// on screen, and the recap reads them all.
+    records: Vec<Record>,
+    /// The stage that started the run going now, which is where what it measures is filed.
+    run_stage: usize,
+    /// The stage whose run the outcomes on the panel came from.
+    outcomes_stage: Option<usize>,
 }
 
 impl Session {
@@ -501,7 +528,9 @@ impl Session {
             running_with: None,
             message: 0,
             focus: Stage::Halo2,
-            record: Record::default(),
+            records: vec![Record::default(); SCRIPTS.len()],
+            run_stage: 0,
+            outcomes_stage: None,
         }
     }
 
@@ -538,12 +567,25 @@ impl Session {
         let seed = self.count(KNOB_SEED);
         let bits = self.count(KNOB_BITS) as u32;
         self.runner = Some(Runner::start(stages, seed, bits, self.machine));
+        self.run_stage = self.stage;
+        self.outcomes_stage = Some(self.stage);
         self.state = RunState::Running;
     }
 
     fn stop(&mut self) {
         if let Some(runner) = &mut self.runner {
             runner.stop();
+            // A system that finished after the last tick is a measurement like any other. It was
+            // dropped with the runner, so a reader who pressed Tab a moment after a run ended
+            // never saw it reach the recap.
+            let mut fresh = Vec::new();
+            let _ = runner.drain(&mut fresh);
+            if let Some(record) = self.records.get_mut(self.run_stage) {
+                for outcome in &fresh {
+                    record.add(outcome);
+                }
+            }
+            self.outcomes.append(&mut fresh);
         }
         self.runner = None;
     }
@@ -564,8 +606,21 @@ impl Session {
     /// Throws away what the runs measured. Pressing `r` is the one thing that does this.
     fn forget_results(&mut self) {
         self.stop_and_forget_the_telling();
-        self.outcomes.clear();
-        self.record = Record::default();
+        if self.outcomes_stage == Some(self.stage) {
+            self.outcomes.clear();
+            self.outcomes_stage = None;
+        }
+        if let Some(record) = self.records.get_mut(self.stage) {
+            *record = Record::default();
+        }
+    }
+
+    /// Everything every stage measured, for the closing sentences.
+    fn record(&self) -> Record {
+        self.records.iter().fold(Record::default(), |mut all, record| {
+            all.merge(record);
+            all
+        })
     }
 
     /// A sentence about what this machine measured.
@@ -575,7 +630,7 @@ impl Session {
     fn tell(&self, topic: Topic, language: Language) -> String {
         match topic {
             Topic::Spread => {
-                let record = &self.record;
+                let record = &self.record();
                 if record.runs == 0 {
                     return Msg::YoursNothing.text(language).to_string();
                 }
@@ -595,7 +650,7 @@ impl Session {
                 )
             }
             Topic::Attacks => {
-                let record = &self.record;
+                let record = &self.record();
                 if record.runs == 0 {
                     return Msg::YoursNothing.text(language).to_string();
                 }
@@ -871,7 +926,13 @@ impl Session {
     }
 
     /// Every attack that was made, with the verifier's answer to each.
-    fn attack_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    fn attack_lines(
+        &self,
+        width: usize,
+        height: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
         if self.outcomes.is_empty() {
             // A panel that says "running" while nothing runs is the reason a reader waits two
             // minutes for a screen that was only ever waiting for them.
@@ -917,9 +978,7 @@ impl Session {
             }
         }
 
-        lines.push(Line::from(""));
-        lines.extend(self.waste_lines(width, language, theme));
-        lines.push(Line::from(Span::styled(
+        let summary = Line::from(Span::styled(
             format!(
                 "{} {}  ·  {} {}",
                 Msg::WordTried.text(language),
@@ -928,16 +987,145 @@ impl Session {
                 accepted
             ),
             theme.muted(),
-        )));
+        ));
+        let (waste, note) = self.waste_lines(width, language, theme);
+        // The note says in a sentence what the conversation beside it has just said, so it is the
+        // first thing to go when the panel is short, and the gaps are the second. The attacks, the
+        // opening and the count are what the stage is about, and they stay.
+        let gap = || Line::from("");
+        let mut with_note = lines.clone();
+        with_note.push(gap());
+        with_note.extend(waste.iter().cloned());
+        if !note.is_empty() {
+            with_note.push(gap());
+            with_note.extend(note);
+            with_note.push(gap());
+        }
+        with_note.push(summary.clone());
+        if with_note.len() <= height {
+            return with_note;
+        }
+        let mut spaced = lines.clone();
+        spaced.push(gap());
+        spaced.extend(waste.iter().cloned());
+        if !waste.is_empty() {
+            spaced.push(gap());
+        }
+        spaced.push(summary.clone());
+        if spaced.len() <= height {
+            return spaced;
+        }
+        lines.extend(waste);
+        lines.push(summary);
+        lines
+    }
+
+    /// Everything this stage's panel draws, fitted to `height` rows.
+    ///
+    /// Every stage builds its lines here, so every stage is fitted the same way: a panel that
+    /// does not fit loses whole rows from its end and says so, rather than a `Paragraph` cutting
+    /// it off without a word. At 80x24 the tuning stage showed two of the circuit's seven rows —
+    /// the rows its last three sentences explain — and nothing said the rest were there.
+    fn panel_lines(
+        &self,
+        width: usize,
+        height: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let lines = match self.stage {
+            STAGE_RUN => self.table(&Stage::ALL, width, language, theme),
+            STAGE_MESSAGES => self.message_lines(width, language, theme),
+            STAGE_TUNE => self.tune_lines(width, height, language, theme),
+            STAGE_BREAK => self.attack_lines(width, height, language, theme),
+            STAGE_SIDES => self.recap_lines(width, height, language, theme),
+            _ => {
+                let mut lines = Vec::new();
+                for stage in Stage::ALL {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("{}  ", stage.index() + 1),
+                            theme.state(State::Chosen),
+                        ),
+                        Span::styled(
+                            phrases::stage(stage).text(language).to_string(),
+                            theme.heading(),
+                        ),
+                    ]));
+                    for text in
+                        wrap(phrases::stage_brief(stage).text(language), width.saturating_sub(3))
+                    {
+                        lines.push(Line::from(Span::styled(format!("   {text}"), theme.plain())));
+                    }
+                    lines.push(Line::from(""));
+                }
+                // The gap after the last system is only a gap.
+                if lines.last().is_some_and(|line| line.spans.is_empty()) {
+                    lines.pop();
+                }
+                lines
+            }
+        };
+        trimmed(lines, width, height, language, theme)
+    }
+
+    /// The tuning stage: the knobs, the table, and the circuit halo2 built.
+    ///
+    /// Where the three do not fit with a blank line between them, the gaps go first and the
+    /// circuit's rows sit two to a line, which is what lets every one of them stay at 80x24.
+    fn tune_lines(
+        &self,
+        width: usize,
+        height: usize,
+        language: Language,
+        theme: Theme,
+    ) -> Vec<Line<'static>> {
+        let mut head = self.knob_lines(width, language, theme);
+        let stages = self.wanted();
+        head.push(Line::from(""));
+        head.extend(self.trust_lines(&stages, width, language, theme));
+        let table = self.table(&stages, width, language, theme);
+        let rows = self.circuit_rows(language);
+        let heading =
+            Line::from(Span::styled(Msg::ShapeTitle.text(language).to_string(), theme.heading()));
+
+        let roomy = {
+            let mut lines = head.clone();
+            lines.push(Line::from(""));
+            lines.extend(table.iter().cloned());
+            if !rows.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(heading.clone());
+                lines.extend(widgets::stat_lines(&rows, width, theme));
+            }
+            lines
+        };
+        if roomy.len() <= height {
+            return roomy;
+        }
+        let mut lines = head;
+        lines.extend(table);
+        if !rows.is_empty() {
+            lines.push(heading);
+            lines.extend(paired_stats(&rows, width, theme));
+        }
         lines
     }
 
     /// The acceptance that is the reason people ask whether a ceremony was honest.
-    fn waste_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    ///
+    /// The rows and the note are handed back apart, so a short panel can keep the one and not the
+    /// other.
+    fn waste_lines(
+        &self,
+        width: usize,
+        language: Language,
+        theme: Theme,
+    ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
         let Some(StageDetail::TrustedSetup(run)) =
             self.outcome(Stage::TrustedSetup).map(|outcome| &outcome.detail)
         else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let label_column = label_width(
             &[Msg::WasteHolds, Msg::WasteOpened, Msg::WasteVerifier],
@@ -969,12 +1157,11 @@ impl Session {
             format!("{} {}", state.mark(), verdict.text(language)),
             theme.state(state),
         ));
-        lines.push(Line::from(""));
-        for text in wrap(Msg::WasteNote.text(language), width) {
-            lines.push(Line::from(Span::styled(text, theme.plain())));
-        }
-        lines.push(Line::from(""));
-        lines
+        let note = wrap(Msg::WasteNote.text(language), width)
+            .into_iter()
+            .map(|text| Line::from(Span::styled(text, theme.plain())))
+            .collect();
+        (lines, note)
     }
 
     /// The knobs, with the chosen one marked.
@@ -1185,6 +1372,60 @@ impl Session {
         }
         lines
     }
+}
+
+/// `lines` cut to `height` rows, ending in a line that says rows were left out when any were.
+///
+/// Rows go from the end, whole, and the notice is counted before they go, so it is never the
+/// thing that is cut.
+fn trimmed(
+    mut lines: Vec<Line<'static>>,
+    width: usize,
+    height: usize,
+    language: Language,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    if height == 0 || lines.len() <= height {
+        return lines;
+    }
+    let notice = wrap(Msg::PanelTrimmed.text(language), width);
+    lines.truncate(height.saturating_sub(notice.len()));
+    while lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+    {
+        lines.pop();
+    }
+    lines.extend(notice.into_iter().map(|part| Line::from(Span::styled(part, theme.muted()))));
+    lines.truncate(height);
+    lines
+}
+
+/// Label-and-value rows two to a line where two fit side by side, one to a line where they do
+/// not. Each row stays whole: a pair is only made of rows that both fit.
+fn paired_stats(rows: &[(&str, String)], width: usize, theme: Theme) -> Vec<Line<'static>> {
+    const BETWEEN: &str = "  ·  ";
+    let cell = |(label, value): &(&str, String)| {
+        vec![
+            Span::styled(format!("{label} "), theme.muted()),
+            Span::styled(value.clone(), theme.plain()),
+        ]
+    };
+    let size = |(label, value): &(&str, String)| text::width(label) + 1 + text::width(value);
+    let mut lines = Vec::new();
+    let mut rows = rows.iter().peekable();
+    while let Some(first) = rows.next() {
+        let mut spans = cell(first);
+        if let Some(second) = rows.peek()
+            && size(first) + text::width(BETWEEN) + size(second) <= width
+        {
+            spans.push(Span::styled(BETWEEN, theme.muted()));
+            spans.extend(cell(second));
+            rows.next();
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// The four parties, in the order the recap draws them. Their names share one column.
@@ -1443,6 +1684,11 @@ impl Session {
         }
     }
 
+    /// Whether the next step of this stage's conversation starts a run.
+    fn next_is_a_run(&self) -> bool {
+        matches!(self.script().get(self.revealed + 1), Some(Run(_)))
+    }
+
     /// Runs this stage's work again with the values now on screen, in place of the run before it,
     /// so the sentences that read the result are about the run that just happened.
     fn rerun(&mut self) -> Reaction {
@@ -1643,7 +1889,12 @@ impl KqSession for Session {
                 // A knob turned since this stage's run started asks for the run to be done again
                 // with what is on screen. That comes before carrying the conversation on: the
                 // sentences after a run are about that run, and they would be about the old one.
-                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                //
+                // Unless the next step is a run of its own. There the values on screen are for that
+                // run — "now give the attacker 51% and press Enter" — and going back to redo the
+                // run before it wiped the 30% attack out of the conversation and ran 51% twice.
+                if self.knobs_moved() && !self.next_is_a_run() && self.rerun() == Reaction::Handled
+                {
                     return Reaction::Handled;
                 }
                 if let Some(Await(until)) = self.script().get(self.revealed)
@@ -1732,8 +1983,10 @@ impl KqSession for Session {
         if let Some(runner) = &self.runner {
             let mut fresh = Vec::new();
             let (finished, failure) = runner.drain(&mut fresh);
-            for outcome in &fresh {
-                self.record.add(outcome);
+            if let Some(record) = self.records.get_mut(self.run_stage) {
+                for outcome in &fresh {
+                    record.add(outcome);
+                }
             }
             self.outcomes.append(&mut fresh);
             if let Some(failure) = failure {
@@ -1810,84 +2063,8 @@ impl KqSession for Session {
             return;
         }
 
-        match self.stage {
-            STAGE_RUN => {
-                frame.render_widget(
-                    Paragraph::new(self.table(&Stage::ALL, width, language, theme)),
-                    inner,
-                );
-            }
-            STAGE_MESSAGES => {
-                frame.render_widget(
-                    Paragraph::new(self.message_lines(width, language, theme)),
-                    inner,
-                );
-            }
-            STAGE_TUNE => {
-                let mut knobs = self.knob_lines(width, language, theme);
-                let stages = self.wanted();
-                knobs.push(Line::from(""));
-                knobs.extend(self.trust_lines(&stages, width, language, theme));
-                let table = self.table(&stages, width, language, theme);
-                let [knob_area, table_area, shape_area] = Layout::vertical([
-                    Constraint::Length(knobs.len() as u16 + 1),
-                    Constraint::Length(table.len() as u16 + 1),
-                    Constraint::Min(1),
-                ])
-                .areas(inner);
-                frame.render_widget(Paragraph::new(knobs), knob_area);
-                frame.render_widget(Paragraph::new(table), table_area);
-
-                let rows = self.circuit_rows(language);
-                if !rows.is_empty() {
-                    let [heading_area, stats_area] =
-                        Layout::vertical([Constraint::Length(1), Constraint::Min(1)])
-                            .areas(shape_area);
-                    frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            Msg::ShapeTitle.text(language).to_string(),
-                            theme.heading(),
-                        ))),
-                        heading_area,
-                    );
-                    widgets::stats(frame, stats_area, theme, &rows);
-                }
-            }
-            STAGE_BREAK => {
-                frame.render_widget(
-                    Paragraph::new(self.attack_lines(width, language, theme)),
-                    inner,
-                );
-            }
-            STAGE_SIDES => {
-                frame.render_widget(
-                    Paragraph::new(self.recap_lines(width, height, language, theme)),
-                    inner,
-                );
-            }
-            _ => {
-                let mut lines = Vec::new();
-                for stage in Stage::ALL {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{}  ", stage.index() + 1),
-                            theme.state(State::Chosen),
-                        ),
-                        Span::styled(
-                            phrases::stage(stage).text(language).to_string(),
-                            theme.heading(),
-                        ),
-                    ]));
-                    for text in
-                        wrap(phrases::stage_brief(stage).text(language), width.saturating_sub(3))
-                    {
-                        lines.push(Line::from(Span::styled(format!("   {text}"), theme.plain())));
-                    }
-                    lines.push(Line::from(""));
-                }
-                frame.render_widget(Paragraph::new(lines), inner);
-            }
-        }
+        frame
+            .render_widget(Paragraph::new(self.panel_lines(width, height, language, theme)), inner);
     }
 
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)> {
@@ -2113,7 +2290,7 @@ mod tests {
         for total in [MIN_WIDTH, 100] {
             let width = panel_width(total, theme);
             for language in [Language::ENGLISH, Language::KOREAN] {
-                for line in session.attack_lines(width, language, theme) {
+                for line in session.attack_lines(width, usize::MAX, language, theme) {
                     let line_text = drawn(&line);
                     assert!(
                         text::width(&line_text) <= width,
@@ -2208,7 +2385,11 @@ mod tests {
         KqSession::go_to(&mut session, last);
         assert_eq!(session.outcomes.len(), measured, "the stage change lost the measurements");
 
-        // `r` is the one key that forgets them.
+        // `r` there forgets only what that stage ran, and these came from the first stage.
+        KqSession::on(&mut session, Action::Reset);
+        assert_eq!(session.outcomes.len(), measured, "r on another stage took them");
+        // `r` on the stage that ran them is the one key that forgets them.
+        KqSession::go_to(&mut session, 0);
         KqSession::on(&mut session, Action::Reset);
         assert!(session.outcomes.is_empty(), "r left the old measurements behind");
     }
@@ -2260,8 +2441,11 @@ mod tests {
         let theme = Theme::new(true);
         let width = panel_width(MIN_WIDTH, theme);
         for language in [Language::ENGLISH, Language::KOREAN] {
-            let lines: Vec<String> =
-                session.attack_lines(width, language, theme).iter().map(drawn).collect();
+            let lines: Vec<String> = session
+                .attack_lines(width, usize::MAX, language, theme)
+                .iter()
+                .map(drawn)
+                .collect();
             let panel = lines.join("\n");
             assert!(!panel.contains('\u{2026}'), "a label was cut in {language}:\n{panel}");
             for label in [Msg::WasteHolds, Msg::WasteOpened, Msg::WasteVerifier] {
@@ -2545,7 +2729,7 @@ mod tests {
     #[test]
     fn the_recap_reads_the_whole_quest_and_not_the_last_run() {
         let mut session = finished();
-        let first = session.record;
+        let first = session.record();
         assert_eq!(first.runs, 3);
         assert_eq!(first.tried, 5);
         // A second, smaller run: Sigma alone.
@@ -2555,19 +2739,143 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(session.outcomes.len(), 1, "the last run is one system");
-        assert_eq!(session.record.runs, 4);
-        assert_eq!(session.record.tried, 6);
+        assert_eq!(session.record().runs, 4);
+        assert_eq!(session.record().tried, 6);
         let attacks = session.tell(Topic::Attacks, Language::ENGLISH);
         assert!(attacks.starts_with("tried 6  ·  accepted 2"), "{attacks:?}");
         let spread = session.tell(Topic::Spread, Language::ENGLISH);
         assert!(spread.contains("40 B → 96 B"), "{spread:?}");
         assert!(spread.contains("systems run 4"), "{spread:?}");
 
-        // Walking between stages keeps the record; `r` is what forgets it.
+        // Walking between stages keeps the record, and `r` forgets only what the stage on screen
+        // measured: these runs were made on the first stage.
         KqSession::go_to(&mut session, STAGE_SIDES);
-        assert_eq!(session.record.runs, 4);
+        assert_eq!(session.record().runs, 4);
         KqSession::on(&mut session, Action::Reset);
-        assert_eq!(session.record, Record::default());
+        assert_eq!(session.record().runs, 4, "`r` on another stage took the first stage's runs");
+        KqSession::go_to(&mut session, 0);
+        KqSession::on(&mut session, Action::Reset);
+        assert_eq!(session.record(), Record::default());
+    }
+
+    /// `r` on the attack stage wiped one record for the whole quest, taking the tuning stage's
+    /// runs with it. Each stage keeps its own now, and the recap reads them all.
+    #[test]
+    fn r_on_one_stage_keeps_what_the_other_stages_measured() {
+        let mut session = Session::new(&machine());
+        let run = |session: &mut Session, stage: usize| {
+            KqSession::go_to(session, stage);
+            session.start(vec![Stage::Sigma, Stage::FiatShamir]);
+            while session.state != RunState::Done {
+                KqSession::tick(session);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        run(&mut session, STAGE_TUNE);
+        run(&mut session, STAGE_BREAK);
+        assert_eq!(session.record().runs, 4);
+        KqSession::on(&mut session, Action::Reset);
+        assert_eq!(
+            session.record().runs,
+            2,
+            "the tuning stage's runs went with the attack stage's"
+        );
+        assert_eq!(session.records[STAGE_TUNE].runs, 2);
+        // Tab forgets nothing.
+        KqSession::go_to(&mut session, STAGE_SIDES);
+        assert_eq!(session.record().runs, 2);
+        session.close();
+    }
+
+    /// A system that finished after the last tick was dropped with the runner, so pressing Tab a
+    /// moment after a run ended kept it out of the recap.
+    #[test]
+    fn a_run_that_finished_between_ticks_still_reaches_the_record() {
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        session.start(vec![Stage::Sigma]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !session.runner.as_ref().is_some_and(|runner| hold(&runner.shared).finished) {
+            assert!(std::time::Instant::now() < deadline, "the run never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // No tick: the reader walks on straight away.
+        KqSession::go_to(&mut session, STAGE_BREAK);
+        assert_eq!(session.record().runs, 1, "the finished system never reached the record");
+        assert_eq!(session.records[STAGE_TUNE].runs, 1, "it was filed under the wrong stage");
+        session.close();
+    }
+
+    /// No Korean line reads 돕니다: it is 돌다 (to run) and 돕다 (to help) at once, and a reader
+    /// meets the second first.
+    #[test]
+    fn no_korean_line_says_helps_where_it_means_runs() {
+        for message in Msg::ALL {
+            let korean = message.text(Language::KOREAN);
+            assert!(!korean.contains("돕니다"), "{message:?} reads as helping: {korean}");
+        }
+    }
+
+    /// The seed the reader sets fixes the verifier's coin too, and the stage that says nobody
+    /// could know c in advance says so beside it.
+    #[test]
+    fn the_break_stage_admits_the_seed_fixes_the_challenge_too() {
+        let recall = BREAK.iter().position(|step| matches!(step, Say(Msg::BreakRecall)));
+        let replay = BREAK.iter().position(|step| matches!(step, Say(Msg::BreakReplayable)));
+        assert_eq!(replay, recall.map(|at| at + 1), "the admission does not follow the claim");
+    }
+
+    /// Every stage fits its panel, at the smallest screen and a larger one, in every language:
+    /// whatever does not fit goes whole and the panel says so, and nothing is cut off silently.
+    /// At 80x24 the tuning stage showed two of the circuit's seven rows and the attack stage lost
+    /// its closing lines, and neither said anything had gone.
+    #[test]
+    fn no_panel_loses_rows_without_saying_so() {
+        use nmtk_kq::theme::MIN_HEIGHT;
+        let theme = Theme::new(true);
+        let mut session = Session::new(&machine());
+        for stage in 0..SCRIPTS.len() {
+            KqSession::go_to(&mut session, stage);
+            run_through(&mut session);
+            for (total, rows) in [(MIN_WIDTH, MIN_HEIGHT), (100, 30)] {
+                let width = panel_width(total, theme);
+                // The panel's inside: the screen less the title bar, the key bar, the stage strip
+                // and the panel's own two borders.
+                let height = usize::from(rows) - 5;
+                for language in Language::ALL {
+                    let lines = session.panel_lines(width, height, *language, theme);
+                    assert!(lines.len() <= height, "stage {stage} at {total}x{rows} overflows");
+                    // The panel as it is with room to spare. Its last line is what a panel cut
+                    // off at the bottom loses first, so it has to be on screen — laid out
+                    // however the fitted panel lays it out — or the notice has to be.
+                    let full = session.panel_lines(width, usize::MAX, *language, theme);
+                    let bare = |text: &str| {
+                        text.chars().filter(|c| !c.is_whitespace()).collect::<String>()
+                    };
+                    let said: String = lines.iter().map(drawn).collect::<Vec<_>>().join(" ");
+                    let notice = bare(Msg::PanelTrimmed.text(*language));
+                    let last = full.iter().rev().map(drawn).find(|line| !line.trim().is_empty());
+                    if let Some(last) = last {
+                        assert!(
+                            bare(&said).contains(&bare(&last)) || bare(&said).contains(&notice),
+                            "stage {stage} at {total}x{rows} in {language} lost {last:?} silently"
+                        );
+                    }
+                    if stage == STAGE_TUNE && total == MIN_WIDTH {
+                        // Every row the stage's last sentences explain is on screen.
+                        for label in
+                            [Msg::ShapeRows, Msg::ShapeAdvice, Msg::ShapeGates, Msg::ShapeDegree]
+                        {
+                            assert!(
+                                said.contains(label.text(*language)),
+                                "{label:?} is not on the tuning panel at 80x24 in {language}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        session.close();
     }
 
     /// One unit per number column: the size column read `96 B` above `1.44 KiB`.
