@@ -2,33 +2,50 @@
 
 [한국어](INSTALL.ko.md)
 
-Paste this into a terminal. It installs everything nmtk needs and starts it.
+Paste this into a terminal on Fedora or Ubuntu. It installs what nmtk needs and starts it.
 
 ```sh
 git clone https://github.com/needmoretruth/needmoretruthknowledge.git && cd needmoretruthknowledge && ./install.sh
 ```
 
-That is the whole thing. You will not be asked anything.
+That is the whole thing. You will not be asked anything, with one exception: if your system has no
+C compiler, `sudo` may ask for your password once.
 
 ## What that line does
 
 1. Copies this repository into a folder called `needmoretruthknowledge`.
-2. Checks whether you have Rust 1.98 or newer. If you do not, it installs it through `rustup` —
-   into `~/.rustup` and `~/.cargo`, and nowhere else.
-3. Builds nmtk. About a minute the first time, using every core you have.
-4. Puts the program at `~/.local/bin/nmtk`.
-5. Starts it.
+2. Checks for a C linker (`cc`), which Rust needs. If there is none, it installs one:
+   `build-essential` through `apt-get` on Ubuntu and Debian, `gcc` through `dnf` on Fedora.
+   This is the only step that needs root, and the only thing it installs outside your home folder.
+3. Makes sure you have Rust 1.98.1, the version this repository is built with. If you have
+   `rustup`, it fetches that version through it. If you have no Rust at all, it installs `rustup`
+   and Rust 1.98.1 into `~/.rustup` and `~/.cargo`, and nowhere else. It downloads with `curl`,
+   or `wget` if there is no `curl`.
+4. Builds nmtk. About a minute the first time, using every core you have.
+5. Puts the program at `~/.local/bin/nmtk`.
+6. Starts it — but only when it runs in a terminal. Piped or in CI, it prints how to start nmtk
+   instead.
 
 Afterwards, `nmtk` starts it again. If your shell says `command not found`, `~/.local/bin` is not on
 your `PATH`; the installer prints the one line that fixes that.
+
+Running it again is safe. It skips what is already there.
+
+## Options
+
+| | |
+|---|---|
+| `./install.sh --no-run` | build and install, but do not start nmtk |
+| `NMTK_NO_RUN=1 ./install.sh` | the same, as an environment variable |
+| `./install.sh --help` | print what the script does, and stop |
 
 ## Supported systems
 
 | | |
 |---|---|
-| **Fedora** | works, nothing else to install |
-| **Ubuntu** | works, nothing else to install |
-| Other Linux | should work — nmtk links nothing outside Rust |
+| **Fedora** | works; installs `gcc` if it is missing |
+| **Ubuntu** | works; installs `build-essential` if it is missing |
+| Other Linux | should work if you already have `cc` — nmtk links nothing outside Rust |
 | macOS, Windows | not yet |
 
 You need a terminal at least **80 columns by 24 rows**, and a font with Korean glyphs if you want to
@@ -39,32 +56,54 @@ read it in Korean (most terminal fonts have them; Fedora and Ubuntu ship them by
 ```sh
 git clone https://github.com/needmoretruth/needmoretruthknowledge.git
 cd needmoretruthknowledge
-cargo build --release
+cargo build --release --locked
 ./target/release/nmtk
 ```
 
 Or to put it on your `PATH` with cargo's own installer:
 
 ```sh
-cargo install --path crates/nmtk
+cargo install --locked --path crates/nmtk
 nmtk
 ```
 
 ## When something goes wrong
 
-**`curl: command not found`** — install it: `sudo dnf install curl` on Fedora,
-`sudo apt install curl` on Ubuntu.
+**`error: linker 'cc' not found`** — Rust needs a linker. The installer tries to add one; if it
+could not, run `sudo dnf install -y gcc` on Fedora, or
+`sudo apt-get update && sudo apt-get install -y build-essential` on Ubuntu. Then run `./install.sh`
+again.
 
-**`error: linker 'cc' not found`** — Rust needs a linker:
-`sudo dnf install gcc` on Fedora, `sudo apt install build-essential` on Ubuntu.
+**`installing it needs root. There is no sudo here`** — log in as root, run the command the
+installer printed, then run `./install.sh` again as yourself.
+
+**`Installing a C linker (cc) did not work`** — `sudo` refused, or it was run without a terminal and
+could not ask for a password. Run the command the installer printed yourself.
+
+**`Could not download rustup`** — there is no network, or neither `curl` nor `wget` works. Check your
+connection. If you have neither, install `curl` the same way as `gcc` above.
+
+**The build fails and says it needs a newer `rustc`** — this repository pins Rust 1.98.1 in
+`rust-toolchain.toml`. `rustup` reads that file; a Rust from your package manager does not. Install
+`rustup` from [rustup.rs](https://rustup.rs), or run `rustup update` if you already have it. Then run
+`./install.sh` again.
+
+**`cargo: command not found` after installing** — rustup puts cargo in `~/.cargo/bin`, and only a new
+shell sees it there. Open a new terminal, or run `. ~/.cargo/env`.
+
+**`nmtk: command not found`** — `~/.local/bin` is not on your `PATH`. Run the `echo 'export PATH=…'`
+line the installer printed, then open a new terminal. Or start it by its full name:
+`~/.local/bin/nmtk`.
 
 **The build is killed part way through** — the machine ran out of memory. Build with one job at a
-time: `cargo build --release -j 1`.
+time: `cargo build --release --locked -j 1`.
 
 **The screen is a mess of boxes or question marks** — your terminal font has no box-drawing or
 Korean glyphs. Any of DejaVu Sans Mono, Noto Sans Mono or JetBrains Mono will do.
 
-**`This screen needs 80x24`** — make the window bigger, or reduce the font size.
+**`This terminal is 60x20. nmtk needs 80x24`** or **`This screen needs 80x24`** — make the window
+bigger, or reduce the font size. The installer only warns; nmtk shows that message until the
+window is big enough, then carries on.
 
 ## Removing it
 
@@ -74,7 +113,10 @@ rm -rf ~/.config/nmtk                # your settings
 rm -rf /path/to/needmoretruthknowledge   # the source
 ```
 
-Rust, if the installer put it there for you, lives in `~/.rustup` and `~/.cargo` and is removed with
-`rustup self uninstall`.
+If you set `XDG_CONFIG_HOME`, your settings are in `$XDG_CONFIG_HOME/nmtk` instead.
 
-nmtk writes nothing else anywhere, and it never touched the network.
+Rust, if the installer put it there for you, lives in `~/.rustup` and `~/.cargo` and is removed with
+`rustup self uninstall`. The C linker, if it was installed, is an ordinary system package; leave it,
+or remove it with `dnf` or `apt-get` as usual.
+
+nmtk writes nothing else anywhere, and it never touches the network.

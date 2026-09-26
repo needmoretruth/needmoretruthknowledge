@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.98.1"
+
+jobs:
+  rust:
+    name: fmt, clippy, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Show toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        # Tests must never read or write the runner's own settings.
+        env:
+          XDG_CONFIG_HOME: ${{ runner.temp }}/config
+        # Every crate's tests run even when one crate fails, so one red crate cannot hide another.
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Release build
+        run: cargo build --release --locked
+
+  install-script:
+    name: shellcheck install.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck
+        run: shellcheck --shell=sh install.sh
+
+      - name: Parse with dash
+        run: dash -n install.sh
