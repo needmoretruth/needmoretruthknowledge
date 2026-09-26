@@ -36,9 +36,9 @@ impl Kq for Ledgers {
     fn meta(&self) -> KqMeta {
         KqMeta {
             id: KqId("ledgers.transaction-models"),
-            version: Version::new(0, 5, 0),
+            version: Version::new(0, 5, 1),
             released: Stamp::new(2026, 9, 12, 10, 20, 48),
-            updated: Stamp::new(2026, 9, 26, 18, 56, 53),
+            updated: Stamp::new(2026, 9, 26, 20, 48, 30),
             category: Category::Ledgers,
             subcategory: "transaction-models",
             difficulty: Difficulty::Easy,
