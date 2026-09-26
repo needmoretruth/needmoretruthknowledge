@@ -64,6 +64,15 @@ pub struct AttackConfig {
     pub give_up_after: Option<Duration>,
     /// Fixes where each miner starts searching.
     pub seed: u64,
+    /// At most this many threads hash at any one moment, or `None` for every thread flat out.
+    ///
+    /// A share is expressed in threads, and a share like 51% takes more threads than a small
+    /// budget has: 13 against 12. Run flat out, those twenty-five threads took every core on the
+    /// machine however few it had been given. Within a budget they take turns (see
+    /// [`crate::engine::Turns`]): every thread hashes for the same share of the time, so the
+    /// attacker's share of the hashing is still its share of the threads, and the machine does no
+    /// more work than it was allowed.
+    pub cpu_budget: Option<usize>,
     /// The coin that gets spent twice.
     pub coin: CoinId,
     /// Who the merchant is, in the payment the public chain confirms.
@@ -90,6 +99,7 @@ impl AttackConfig {
             give_up_after_public_blocks: 24,
             give_up_after: Some(Duration::from_secs(120)),
             seed: 0,
+            cpu_budget: None,
             coin: CoinId(1),
             victim: 1,
             attacker_payee: 2,
@@ -108,6 +118,12 @@ impl AttackConfig {
     /// The same attack with the merchant waiting a different number of blocks.
     pub fn with_confirmations(mut self, confirmations: u64) -> AttackConfig {
         self.confirmations_required = confirmations;
+        self
+    }
+
+    /// The same attack using no more than `budget` threads' worth of the machine at once.
+    pub fn with_cpu_budget(mut self, budget: usize) -> AttackConfig {
+        self.cpu_budget = Some(budget);
         self
     }
 
@@ -165,8 +181,15 @@ pub struct AttackSnapshot {
     pub attacker: MinerSnapshot,
     /// Everybody else's.
     pub honest: MinerSnapshot,
-    /// The share of the threads the attacker holds.
+    /// The share of the threads the attacker holds, which is its share of the hashing.
     pub attacker_share: f64,
+    /// How many threads hash at any one moment.
+    ///
+    /// Fewer than the two sides' threads added up means they are taking turns within a budget.
+    /// The share is unchanged by that — every thread hashes for the same share of the time — but
+    /// the hash rates in [`AttackSnapshot::attacker`] and [`AttackSnapshot::honest`] are then what
+    /// each side did while taking turns, not what this machine could do flat out.
+    pub threads_at_once: usize,
     /// The height of the chain everyone can see.
     pub public_height: u64,
     /// Its tip.
@@ -251,6 +274,10 @@ impl AttackHandle {
         if let Some(coordinator) = self.coordinator.take() {
             let _ = coordinator.join();
         }
+        // The coordinator is what tells the workers the attack is over. One that never started,
+        // or that panicked on its way, never says so, and waiting on the workers after that
+        // waited for ever on threads hashing a race nobody was judging.
+        self.engine.stop.store(true, Ordering::Relaxed);
         if let Some(workers) = self.workers.take() {
             for worker in workers {
                 let _ = worker.join();
@@ -286,53 +313,9 @@ impl Drop for AttackHandle {
 /// Starts an attack. Both sides begin hashing immediately; the attacker's threads wait until the
 /// payment goes out.
 pub fn start_attack(config: AttackConfig) -> Result<AttackHandle, ConfigError> {
-    let specs = vec![
-        MinerSpec { id: HONEST, share: Share::Threads(config.honest_threads) },
-        MinerSpec { id: ATTACKER, share: Share::Threads(config.attacker_threads) },
-    ];
-    let budget = config.honest_threads.saturating_add(config.attacker_threads);
-    let threads = split_threads(&specs, budget)?;
-    let target = Target::from_compact(config.bits)?;
-    let time = config.start_time.unwrap_or_else(crate::mining::unix_now);
-    let public = Chain::new(config.bits, time, NOBODY)?;
-
-    let mut rng = SmallRng::seed_from_u64(config.seed);
-    let slots: Vec<Arc<MinerSlot>> = specs
-        .iter()
-        .zip(&threads)
-        .map(|(spec, count)| Arc::new(MinerSlot::new(spec.id, *count, rng.random())))
-        .collect();
-    let engine = Arc::new(Engine::new(slots));
-
-    let mut coordinator = AttackCoordinator {
-        public,
-        private: None,
-        engine: Arc::clone(&engine),
-        config: config.clone(),
-        threads: threads.clone(),
-        started: Instant::now(),
-        paused_total: Duration::ZERO,
-        paused_since: None,
-        last_block_at: Duration::ZERO,
-        phase: AttackPhase::Warmup,
-        outcome: None,
-        fork_height: None,
-        payment: None,
-        double_spend: None,
-        payment_height: None,
-        victim_released: false,
-        confirmations_at_release: None,
-        confirmations_when_reverted: None,
-        blocks_reverted: 0,
-        reverted_blocks: Vec::new(),
-        max_deficit: 0,
-        broadcast_at: None,
-        attack_duration: None,
-        recent: VecDeque::new(),
-        shared: Arc::new(Mutex::new(empty_snapshot(&config, &threads, target))),
-    };
-    coordinator.retarget_honest();
+    let (coordinator, engine) = AttackCoordinator::new(config)?;
     let shared = Arc::clone(&coordinator.shared);
+    let mut coordinator = coordinator;
 
     let (sender, receiver) = mpsc::channel::<Found>();
     let workers = spawn_workers(&engine, &sender);
@@ -344,6 +327,67 @@ pub fn start_attack(config: AttackConfig) -> Result<AttackHandle, ConfigError> {
         .ok();
 
     Ok(AttackHandle { engine, shared, workers: Some(workers), coordinator: handle })
+}
+
+impl AttackCoordinator {
+    /// Everything the attack needs, set up and handed its first job, with no thread started.
+    fn new(config: AttackConfig) -> Result<(AttackCoordinator, Arc<Engine>), ConfigError> {
+        let specs = vec![
+            MinerSpec { id: HONEST, share: Share::Threads(config.honest_threads) },
+            MinerSpec { id: ATTACKER, share: Share::Threads(config.attacker_threads) },
+        ];
+        let budget = config.honest_threads.saturating_add(config.attacker_threads);
+        let threads = split_threads(&specs, budget)?;
+        let target = Target::from_compact(config.bits)?;
+        let time = config.start_time.unwrap_or_else(crate::mining::unix_now);
+        let public = Chain::new(config.bits, time, NOBODY)?;
+
+        let mut rng = SmallRng::seed_from_u64(config.seed);
+        let slots: Vec<Arc<MinerSlot>> = specs
+            .iter()
+            .zip(&threads)
+            .map(|(spec, count)| Arc::new(MinerSlot::new(spec.id, *count, rng.random())))
+            .collect();
+        let engine = Arc::new(match config.cpu_budget {
+            Some(budget) => Engine::within(slots, budget),
+            None => Engine::new(slots),
+        });
+
+        let mut coordinator = AttackCoordinator {
+            public,
+            private: None,
+            engine: Arc::clone(&engine),
+            config: config.clone(),
+            threads: threads.clone(),
+            started: Instant::now(),
+            paused_total: Duration::ZERO,
+            paused_since: None,
+            last_block_at: Duration::ZERO,
+            phase: AttackPhase::Warmup,
+            outcome: None,
+            fork_height: None,
+            payment: None,
+            double_spend: None,
+            payment_height: None,
+            victim_released: false,
+            confirmations_at_release: None,
+            confirmations_when_reverted: None,
+            blocks_reverted: 0,
+            reverted_blocks: Vec::new(),
+            max_deficit: 0,
+            broadcast_at: None,
+            attack_duration: None,
+            recent: VecDeque::new(),
+            shared: Arc::new(Mutex::new(empty_snapshot(
+                &config,
+                &threads,
+                target,
+                engine.threads_at_once(),
+            ))),
+        };
+        coordinator.retarget_honest();
+        Ok((coordinator, engine))
+    }
 }
 
 struct BlockRecord {
@@ -468,17 +512,15 @@ impl AttackCoordinator {
                     self.phase = AttackPhase::Racing;
                 }
             }
-            AttackPhase::Racing => {
-                let ahead = match self.private.as_ref() {
-                    Some(private) => private.total_work() > self.public.total_work(),
-                    None => false,
-                };
-                if ahead {
-                    self.publish_the_private_chain(elapsed);
-                    return;
-                }
-            }
-            AttackPhase::Finished => return,
+            AttackPhase::Racing | AttackPhase::Finished => {}
+        }
+
+        // Checked the moment the goods are handed over as well as on every tick after. An
+        // attacker already ahead when the merchant lets go publishes then and there; checking
+        // only on the next pass let the give-up rule below end, as a loss, a race already won.
+        if self.phase == AttackPhase::Racing && self.private_is_ahead() {
+            self.publish_the_private_chain(elapsed);
+            return;
         }
 
         if self.should_give_up(elapsed) {
@@ -561,6 +603,16 @@ impl AttackCoordinator {
         self.engine.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Whether the private chain carries more work than the public one.
+    ///
+    /// Both chains are mined at one difficulty, so more work is more blocks. Heights are compared
+    /// rather than work totals because a block's work is counted in 128 bits and a hard enough
+    /// target does not fit: both totals then read as the same largest number, and an attacker
+    /// with every block there was to find was never ahead.
+    fn private_is_ahead(&self) -> bool {
+        self.private.as_ref().is_some_and(|private| private.height() > self.public.height())
+    }
+
     fn victim_confirmations(&self) -> u64 {
         match (&self.payment, self.payment_height) {
             (Some(payment), Some(_)) => self.public.confirmations(&payment.txid()).unwrap_or(0),
@@ -578,7 +630,14 @@ impl AttackCoordinator {
     fn retarget_honest(&mut self) {
         let txs = match (&self.payment, self.phase) {
             // The payment is only waiting to be mined between going out and landing in a block.
-            (Some(payment), AttackPhase::AwaitingPayment) => vec![payment.clone()],
+            // The block that carries it is handled before the phase moves on, so the phase alone
+            // handed out one more job with the payment in it: every block found on that job was
+            // refused for confirming the payment twice, and the honest side lost the work.
+            (Some(payment), AttackPhase::AwaitingPayment)
+                if self.public.tx_height(&payment.txid()).is_none() =>
+            {
+                vec![payment.clone()]
+            }
             _ => Vec::new(),
         };
         let template = BlockTemplate {
@@ -686,6 +745,7 @@ impl AttackCoordinator {
             attacker: miner_at(1),
             honest: miner_at(0),
             attacker_share: shares.get(1).copied().unwrap_or(0.0),
+            threads_at_once: self.engine.threads_at_once(),
             public_height: self.public.height(),
             public_tip: self.public.tip_hash(),
             private_height,
@@ -735,7 +795,12 @@ fn summary_of(block: &Block, found_after: Duration, since_previous: Duration) ->
     }
 }
 
-fn empty_snapshot(config: &AttackConfig, threads: &[usize], target: Target) -> AttackSnapshot {
+fn empty_snapshot(
+    config: &AttackConfig,
+    threads: &[usize],
+    target: Target,
+    threads_at_once: usize,
+) -> AttackSnapshot {
     let shares = effective_shares(threads);
     let miner = |index: usize, id: MinerId| MinerSnapshot {
         id,
@@ -759,6 +824,7 @@ fn empty_snapshot(config: &AttackConfig, threads: &[usize], target: Target) -> A
         attacker: miner(1, ATTACKER),
         honest: miner(0, HONEST),
         attacker_share: shares.get(1).copied().unwrap_or(0.0),
+        threads_at_once,
         public_height: 0,
         public_tip: Hash256::ZERO,
         private_height: 0,
@@ -805,23 +871,38 @@ mod tests {
         assert_eq!(snapshot.public_height, snapshot.private_height);
         assert!(snapshot.public_height > snapshot.fork_height.unwrap_or(0) + 2);
         assert!(snapshot.attack_duration.is_some());
-        assert!(snapshot.attacker.hashes > snapshot.honest.hashes);
+        // The chain everyone follows now is the attacker's work. Comparing raw hash counts said
+        // the same thing less reliably: the attacker sits idle until the payment goes out, and on
+        // a machine busy with something else nine threads do not get nine times the hashing.
+        assert!(
+            snapshot.attacker.blocks_in_chain > snapshot.honest.blocks_in_chain,
+            "the chain is not the attacker's: {snapshot:?}"
+        );
         assert!((snapshot.attacker_share - 0.9).abs() < 1e-9);
     }
 
     #[test]
     fn a_small_share_falls_behind_and_gives_up_with_the_payment_intact() {
-        let mut config = AttackConfig::new(practice_bits(14).expect("expressible"), 1, 9);
-        config.confirmations_required = 2;
+        // A race is chance as well as arithmetic. A tenth of the hashing wins a two-confirmation
+        // race about once in a hundred tries even when the shares are exact, which made this a
+        // test that failed about once in a hundred runs; six confirmations make it about once in
+        // ten thousand. And a block at 14 bits took less time than a busy machine takes to hand
+        // out the next job: after each of its blocks the nine threads waited while the one kept
+        // hashing, and on two loaded cores the attacker ended up with nearly two fifths of the
+        // hashing and won. At 20 bits the wait is small beside the hashing, and a tenth stays
+        // about a tenth.
+        let mut config = AttackConfig::new(practice_bits(20).expect("expressible"), 1, 9);
+        config.confirmations_required = 6;
         config.warmup_blocks = 1;
         config.give_up_after_public_blocks = 12;
         config.give_up_after = Some(Duration::from_secs(90));
+        let required = config.confirmations_required;
         let snapshot = start_attack(config).expect("valid config").join();
 
         assert_eq!(snapshot.outcome, Some(AttackOutcome::GaveUp), "{snapshot:?}");
         assert_eq!(snapshot.blocks_reverted, 0);
         assert!(!snapshot.double_spend_confirmed);
-        assert!(snapshot.victim_confirmations >= 2, "the payment lost its confirmations");
+        assert!(snapshot.victim_confirmations >= required, "the payment lost its confirmations");
         assert!(snapshot.lead < 0, "the attacker was not behind at the end");
         assert!(snapshot.max_deficit >= 1);
         assert!(snapshot.honest.hashes > snapshot.attacker.hashes);
@@ -837,6 +918,75 @@ mod tests {
         assert_eq!(snapshot.confirmations_at_release, Some(3));
         // Three confirmations means three blocks had to go, the payment's and the two on top.
         assert!(snapshot.blocks_reverted >= 3, "only {} blocks went", snapshot.blocks_reverted);
+    }
+
+    /// Mines the job a miner currently holds, on this thread, and hands the block in.
+    fn mine_current_job(coordinator: &mut AttackCoordinator, miner: MinerId, salt: u64) {
+        let slot = coordinator
+            .engine
+            .slots
+            .iter()
+            .find(|slot| slot.id == miner)
+            .cloned()
+            .expect("both miners have a slot");
+        let job = slot.job().expect("the miner has a job");
+        let target = coordinator.public.target();
+        let (block, _) = crate::engine::mine_serial(job.template(), target, salt, 100_000_000)
+            .expect("an 8-bit target is found in a few hundred hashes");
+        coordinator.handle(Found { miner, block });
+        coordinator.advance();
+    }
+
+    fn quiet_coordinator(config: AttackConfig) -> AttackCoordinator {
+        // No thread is started: every block is mined by the test, in the order it chooses.
+        let (coordinator, _) = AttackCoordinator::new(config).expect("valid config");
+        coordinator
+    }
+
+    #[test]
+    fn the_payment_is_not_handed_out_again_once_a_block_carries_it() {
+        let mut config = AttackConfig::new(practice_bits(8).expect("expressible"), 1, 1);
+        config.warmup_blocks = 0;
+        let mut coordinator = quiet_coordinator(config);
+        coordinator.advance();
+        assert_eq!(coordinator.phase, AttackPhase::AwaitingPayment);
+        let honest = Arc::clone(&coordinator.engine.slots[0]);
+        let payment = coordinator.payment.clone().expect("the payment went out");
+        assert_eq!(honest.job().expect("a job").template().txs, vec![payment.clone()]);
+
+        // The block carrying it arrives. The job handed out in answer must not carry it again:
+        // every block found on that job would confirm the payment twice and be refused.
+        let job = honest.job().expect("a job");
+        let (block, _) =
+            crate::engine::mine_serial(job.template(), coordinator.public.target(), 0, 100_000_000)
+                .expect("found");
+        coordinator.handle(Found { miner: HONEST, block });
+        assert_eq!(coordinator.public.tx_height(&payment.txid()), Some(1));
+        let next = honest.job().expect("a job");
+        assert!(next.template().txs.is_empty(), "the payment was handed out a second time");
+    }
+
+    #[test]
+    fn an_attacker_already_ahead_when_the_goods_go_publishes_rather_than_giving_up() {
+        let mut config = AttackConfig::new(practice_bits(8).expect("expressible"), 1, 1);
+        config.warmup_blocks = 0;
+        config.confirmations_required = 2;
+        // The give-up line falls on the very block that hands the goods over.
+        config.give_up_after_public_blocks = 2;
+        config.give_up_after = None;
+        let mut coordinator = quiet_coordinator(config);
+        coordinator.advance();
+        for salt in 0..3 {
+            mine_current_job(&mut coordinator, ATTACKER, salt * 1_000);
+        }
+        mine_current_job(&mut coordinator, HONEST, 0);
+        assert_eq!(coordinator.phase, AttackPhase::Confirming);
+        // Two confirmations, three private blocks against two public ones: ahead at the moment
+        // the merchant lets go, which is the moment the attack is for.
+        mine_current_job(&mut coordinator, HONEST, 5_000);
+        assert_eq!(coordinator.outcome, Some(AttackOutcome::Succeeded));
+        assert!(coordinator.victim_released);
+        assert!(coordinator.double_spend_confirmed());
     }
 
     #[test]

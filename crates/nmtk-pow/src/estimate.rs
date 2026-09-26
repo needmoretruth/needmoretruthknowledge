@@ -54,8 +54,13 @@ pub fn expected_time_to_block(hashes_per_second: f64, target: Target) -> BlockTi
 /// about 63%, not 100%.
 pub fn probability_of_block_within(hashes_per_second: f64, target: Target, seconds: f64) -> f64 {
     let estimate = expected_time_to_block(hashes_per_second, target);
-    if !seconds.is_finite() || seconds <= 0.0 || !estimate.expected_seconds.is_finite() {
+    // Waiting for ever, with anything hashing at all, finds a block for certain. This used to be
+    // lumped in with nonsense input and answered with no chance at all.
+    if seconds.is_nan() || seconds <= 0.0 || !estimate.expected_seconds.is_finite() {
         return 0.0;
+    }
+    if seconds.is_infinite() {
+        return 1.0;
     }
     1.0 - (-seconds / estimate.expected_seconds).exp()
 }
@@ -124,6 +129,16 @@ mod tests {
         );
         let real = expected_time_to_block(2_000_000.0, Target::difficulty_one());
         assert!(real.expected_seconds > 1_000.0);
+    }
+
+    #[test]
+    fn waiting_for_ever_is_a_certainty_and_waiting_for_nothing_is_no_chance() {
+        let target = Target::difficulty_one();
+        assert_eq!(probability_of_block_within(1_000.0, target, f64::INFINITY), 1.0);
+        assert_eq!(probability_of_block_within(1_000.0, target, f64::NAN), 0.0);
+        assert_eq!(probability_of_block_within(1_000.0, target, 0.0), 0.0);
+        // Nothing hashing stays no chance, however long the wait.
+        assert_eq!(probability_of_block_within(0.0, target, f64::INFINITY), 0.0);
     }
 
     #[test]

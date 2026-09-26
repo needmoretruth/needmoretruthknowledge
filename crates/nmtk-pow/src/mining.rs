@@ -275,6 +275,17 @@ impl MiningHandle {
         self.shutdown();
     }
 
+    /// Brings every thread home and hands back the run as it finally stood.
+    ///
+    /// A snapshot taken before [`MiningHandle::stop`] can be a block short: the coordinator
+    /// publishes every fiftieth of a second, and a block that landed in between is in the chain
+    /// and in no snapshot anyone read. A caller keeping a tally of what a run did takes it from
+    /// here, after the last thread has stopped and the coordinator has said its last word.
+    pub fn finish(mut self) -> MiningSnapshot {
+        self.shutdown();
+        self.snapshot()
+    }
+
     fn shutdown(&mut self) {
         self.engine.stop.store(true, Ordering::Relaxed);
         if let Some(workers) = self.workers.take() {
@@ -296,38 +307,7 @@ impl Drop for MiningHandle {
 
 /// Starts a run: divides the threads, builds the chain, and sets everyone hashing.
 pub fn start_mining(config: MiningConfig) -> Result<MiningHandle, ConfigError> {
-    let threads = split_threads(&config.miners, config.threads)?;
-    let target = Target::from_compact(config.bits)?;
-    let time = config.start_time.unwrap_or_else(unix_now);
-    let chain = Chain::new(config.bits, time, NOBODY)?;
-
-    // The seed decides where each miner starts searching, so a seeded run repeats itself.
-    let mut rng = SmallRng::seed_from_u64(config.seed);
-    let slots: Vec<Arc<MinerSlot>> = config
-        .miners
-        .iter()
-        .zip(&threads)
-        .map(|(spec, count)| Arc::new(MinerSlot::new(spec.id, *count, rng.random())))
-        .collect();
-    let engine = Arc::new(Engine::new(slots));
-
-    let mut coordinator = Coordinator {
-        chain,
-        engine: Arc::clone(&engine),
-        config: config.clone(),
-        threads: threads.clone(),
-        started: Instant::now(),
-        paused_total: Duration::ZERO,
-        paused_since: None,
-        last_block_at: Duration::ZERO,
-        recent: VecDeque::new(),
-        blocks_found: 0,
-        stale_blocks: 0,
-        reorgs: 0,
-        last_reorg: None,
-        shared: Arc::new(Mutex::new(empty_snapshot(&config, &threads, target))),
-    };
-    coordinator.retarget();
+    let (mut coordinator, engine) = Coordinator::new(config)?;
     let shared = Arc::clone(&coordinator.shared);
 
     let (sender, receiver) = mpsc::channel::<Found>();
@@ -397,6 +377,43 @@ struct Coordinator {
 }
 
 impl Coordinator {
+    /// Everything a run needs, set up and handed its first jobs, with no thread started.
+    fn new(config: MiningConfig) -> Result<(Coordinator, Arc<Engine>), ConfigError> {
+        let threads = split_threads(&config.miners, config.threads)?;
+        let target = Target::from_compact(config.bits)?;
+        let time = config.start_time.unwrap_or_else(unix_now);
+        let chain = Chain::new(config.bits, time, NOBODY)?;
+
+        // The seed decides where each miner starts searching, so a seeded run repeats itself.
+        let mut rng = SmallRng::seed_from_u64(config.seed);
+        let slots: Vec<Arc<MinerSlot>> = config
+            .miners
+            .iter()
+            .zip(&threads)
+            .map(|(spec, count)| Arc::new(MinerSlot::new(spec.id, *count, rng.random())))
+            .collect();
+        let engine = Arc::new(Engine::new(slots));
+
+        let mut coordinator = Coordinator {
+            chain,
+            engine: Arc::clone(&engine),
+            config: config.clone(),
+            threads: threads.clone(),
+            started: Instant::now(),
+            paused_total: Duration::ZERO,
+            paused_since: None,
+            last_block_at: Duration::ZERO,
+            recent: VecDeque::new(),
+            blocks_found: 0,
+            stale_blocks: 0,
+            reorgs: 0,
+            last_reorg: None,
+            shared: Arc::new(Mutex::new(empty_snapshot(&config, &threads, target))),
+        };
+        coordinator.retarget();
+        Ok((coordinator, engine))
+    }
+
     fn run(&mut self, receiver: &mpsc::Receiver<Found>) {
         let mut previous_hashes = vec![0u64; self.engine.slots.len()];
         let mut last_sample = Instant::now();
@@ -420,6 +437,16 @@ impl Coordinator {
                 last_publish = Instant::now();
             }
         }
+        // The last word waits for the last worker. A block handed in after the pass above had
+        // looked was already counted by the miner that found it, and publishing without it put a
+        // block in `blocks_found` that never reached the chain. Every worker holds a sender, so
+        // `recv` hands over whatever is still on its way and then reports the channel closed —
+        // which is the moment the last thread has stopped hashing, so the hash counts are final
+        // too.
+        while let Ok(found) = receiver.recv() {
+            self.handle(found);
+        }
+        self.track_pause();
         self.publish(true);
     }
 
@@ -627,6 +654,7 @@ fn empty_snapshot(config: &MiningConfig, threads: &[usize], target: Target) -> M
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::CHUNK;
     use crate::target::practice_bits;
 
     /// Waits for a run to reach a height, and gives up rather than hanging a test forever.
@@ -697,24 +725,30 @@ mod tests {
 
     #[test]
     fn the_miner_with_more_threads_does_more_of_the_hashing() {
+        // A target hard enough that a block in the window is unlikely. The counts then measure
+        // hashing and nothing else: after a block, the finder's threads wait for the next job
+        // while everyone else hashes on, so over the few tens of milliseconds six easy blocks
+        // took, a coordinator starved by a busy machine decided the count, not the threads.
         let config = MiningConfig::new(
-            practice_bits(16).expect("expressible"),
+            practice_bits(30).expect("expressible"),
             vec![MinerSpec::threads(0, 3), MinerSpec::threads(1, 1)],
             4,
         );
         let handle = start_mining(config).expect("valid config");
-        let snapshot = wait_for_height(&handle, 6, Duration::from_secs(30));
+        // The window opens once both miners are really hashing, as in the 51/49 test below, so
+        // it measures the split rather than which threads happened to start first.
+        let start = wait_until_all_are_hashing(&handle, 10_000, Duration::from_secs(30));
+        thread::sleep(Duration::from_secs(2));
+        let end = handle.snapshot();
         handle.stop();
-        let big = &snapshot.miners[0];
-        let small = &snapshot.miners[1];
+        let big = &end.miners[0];
+        let small = &end.miners[1];
         assert!((big.effective_share - 0.75).abs() < 1e-9);
         assert!((small.effective_share - 0.25).abs() < 1e-9);
-        assert!(
-            big.hashes > small.hashes,
-            "three threads did {} hashes, one did {}",
-            big.hashes,
-            small.hashes
-        );
+        let bigger = big.hashes.saturating_sub(start.miners[0].hashes);
+        let smaller = small.hashes.saturating_sub(start.miners[1].hashes);
+        assert!(bigger + smaller > 0, "nothing was hashed in two seconds");
+        assert!(bigger > smaller, "three threads did {bigger} hashes, one did {smaller}");
         assert!(big.average_hashrate > 0.0);
     }
 
@@ -769,19 +803,35 @@ mod tests {
         let working = wait_for_hashes(&handle, 1, Duration::from_secs(20));
         assert!(working.total_hashes > 0, "the threads never hashed anything to pause");
         handle.pause();
-        // Long enough for anything still in flight to land before the two readings are compared.
-        thread::sleep(Duration::from_millis(200));
-        let paused = handle.snapshot();
-        thread::sleep(Duration::from_millis(250));
-        let still_paused = handle.snapshot();
-        assert_eq!(paused.total_hashes, still_paused.total_hashes, "hashing went on while paused");
-        assert!(still_paused.paused);
+        // What pausing promises: every thread finishes the chunk it is in the middle of, and
+        // then hashes nothing more. So from here the count grows by at most one chunk a thread,
+        // however long the machine keeps a thread off its core before that chunk lands. The test
+        // used to wait for a quiet 200 ms and then demand a still 250 ms more, which is a promise
+        // about the scheduler: on two to four busy cores a paused thread descheduled mid-chunk
+        // landed its last 256 hashes after the window, and the test blamed pausing.
+        let at_pause = handle.engine.total_hashes();
+        let one_chunk_each = handle.engine.slots[0].threads as u64 * u64::from(CHUNK);
+        // Long enough for a thread that ignored the pause to do thousands of chunks.
+        thread::sleep(Duration::from_millis(300));
+        let paused = handle.engine.total_hashes();
+        assert!(
+            paused - at_pause <= one_chunk_each,
+            "{} hashes after the pause, more than the {one_chunk_each} in flight",
+            paused - at_pause
+        );
+        // The screen learns about it from the snapshot, which follows within a publish or two.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !handle.snapshot().paused && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.snapshot().paused, "the snapshot never said it was paused");
 
         handle.resume();
-        let resumed =
-            wait_for_hashes(&handle, still_paused.total_hashes + 1, Duration::from_secs(20));
+        // More than any chunk still in flight could account for: real work started again.
+        let wanted = at_pause + one_chunk_each + 1;
+        let resumed = wait_for_hashes(&handle, wanted, Duration::from_secs(20));
         handle.stop();
-        assert!(resumed.total_hashes > still_paused.total_hashes, "resuming did not restart work");
+        assert!(resumed.total_hashes >= wanted, "resuming did not restart work");
         assert!(!resumed.paused);
     }
 
@@ -796,6 +846,89 @@ mod tests {
             start_mining(config),
             Err(ConfigError::ThreadBudgetTooSmall { needed: 2, budget: 1 })
         ));
+    }
+
+    #[test]
+    fn finishing_a_run_hands_back_its_last_word_with_every_thread_stopped() {
+        let config = MiningConfig::new(
+            practice_bits(12).expect("expressible"),
+            vec![MinerSpec::percent(0, 100.0)],
+            2,
+        );
+        let handle = start_mining(config).expect("valid config");
+        let seen = wait_for_height(&handle, 2, Duration::from_secs(20));
+        let last = handle.finish();
+        assert!(last.finished, "the snapshot was taken before the run had stopped");
+        assert!(last.height >= seen.height, "the last word knows less than an earlier one");
+        assert!(last.total_hashes >= seen.total_hashes);
+        // One miner's threads build on blocks the chain has, so every block they counted is one
+        // the chain was handed — as a block on it or as a branch beside it.
+        let counted: u64 = last.miners.iter().map(|miner| miner.blocks_found).sum();
+        assert_eq!(counted, last.blocks_found, "a block was counted and never handed in: {last:?}");
+    }
+
+    /// A worker counts a block and then sends it. When the run stops in between, the block was in
+    /// the miner's count and nowhere else: the coordinator saw the stop, left without reading the
+    /// channel, and published a last word one block short of what its own miners reported.
+    #[test]
+    fn a_block_handed_in_as_the_run_stops_is_in_the_last_word() {
+        let config = MiningConfig::new(
+            practice_bits(8).expect("expressible"),
+            vec![MinerSpec::percent(0, 100.0)],
+            1,
+        )
+        .with_seed(3);
+        // No thread is started: the test is the worker, and hands in one block.
+        let (mut coordinator, engine) = Coordinator::new(config).expect("valid config");
+        let slot = Arc::clone(&engine.slots[0]);
+        let job = slot.job().expect("the first job was handed out");
+        let (block, hashes) =
+            crate::engine::mine_serial(job.template(), coordinator.chain.target(), 0, 100_000_000)
+                .expect("an 8-bit target is found in a few hundred hashes");
+        slot.hashes.fetch_add(hashes, Ordering::Relaxed);
+        slot.blocks.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel::<Found>();
+        sender.send(Found { miner: slot.id, block }).expect("the channel is open");
+        // The stop arrives before the coordinator has looked, and the worker goes home.
+        engine.stop.store(true, Ordering::Relaxed);
+        drop(sender);
+        coordinator.run(&receiver);
+
+        let last = match coordinator.shared.lock() {
+            Ok(snapshot) => snapshot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert!(last.finished);
+        assert_eq!(last.miners[0].blocks_found, 1);
+        assert_eq!(last.height, 1, "the block the miner counted never reached the chain");
+        assert_eq!(last.blocks_found, 1);
+        assert_eq!(last.recent_blocks.len(), 1);
+        assert_eq!(last.total_hashes, hashes);
+    }
+
+    #[test]
+    fn many_threads_on_one_miner_do_not_waste_their_work_on_heights_already_taken() {
+        // Nine threads on an easy target. Each one used to finish four thousand hashes before
+        // looking up, so a block found by one was followed by two or three more for the same
+        // height from the others — and a side with nine threads built its chain barely faster
+        // than a side with one. What reaches the chain is most of what was found.
+        let config = MiningConfig::new(
+            practice_bits(14).expect("expressible"),
+            vec![MinerSpec::threads(0, 9)],
+            9,
+        );
+        let handle = start_mining(config).expect("valid config");
+        let snapshot = wait_for_height(&handle, 40, Duration::from_secs(60));
+        handle.stop();
+        assert!(snapshot.height >= 40, "only reached height {}", snapshot.height);
+        let found = snapshot.blocks_found.max(1) as f64;
+        let kept = snapshot.height as f64 / found;
+        assert!(
+            kept > 0.6,
+            "{} blocks found for a chain {} high: the threads kept mining taken heights",
+            snapshot.blocks_found,
+            snapshot.height
+        );
     }
 
     #[test]

@@ -76,9 +76,27 @@ const STAGE_ATTACK: usize = 4;
 #[cfg(test)]
 const STAGE_RECAP: usize = 5;
 
-/// The most events one stage will report before it stops reporting them. Blocks keep arriving
-/// while a reader reads, and a conversation that grows without end is a log, not a conversation.
+/// The most blocks and remarks one run will report before it stops reporting them. Blocks keep
+/// arriving while a reader reads, and a conversation that grows without end is a log, not a
+/// conversation.
+///
+/// Only the flood is capped. The cap used to count everything, so on a stage that had already
+/// reported its two dozen blocks a typed number that landed somewhere else, a refusal, or the
+/// ending of the attack went unsaid — which reads as a broken key, or a run that never ended.
+/// And it is counted per run, not per stage: a stage that runs twice says the second run too.
 const EVENT_CAP: usize = 24;
+
+/// How many attacks the recap names one by one before it counts the rest.
+const ATTACKS_RECALLED: usize = 2;
+
+/// How close the attacker's share of threads has to come to the share that was asked for.
+///
+/// Threads are whole things, and on a small machine the nearest whole split can be a long way
+/// off — or on the wrong side of half. See [`attack_split`].
+const SHARE_TOLERANCE: f64 = 0.01;
+
+/// The most threads an attack is given to express a share the machine's own threads cannot.
+const MAX_ATTACK_THREADS: usize = 100;
 
 /// One move in a stage's conversation.
 #[derive(Debug, Clone, Copy)]
@@ -101,7 +119,7 @@ enum Step {
 /// The share is the reader's to set, and an Ask is a suggestion rather than a gate. A fixed
 /// sentence after the run stated the outcome of the suggested share: "above half it catches up"
 /// was printed under an attacker holding 27% of the machine, which had won by luck.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Topic {
     /// How the attack that just finished ended, and at what share.
     Attack,
@@ -148,6 +166,9 @@ const PUZZLE: &[Step] = &[
     Say(Msg::PuzzleTwo),
     Say(Msg::PuzzleWhatAHashIs),
     Say(Msg::PuzzleHashOneWay),
+    // The header is named before its size is given in bytes, and bytes are explained before the
+    // target is counted in bits. The other way round used "80 bytes of the block header" two
+    // sentences before saying what a byte or a header was.
     Say(Msg::PuzzleThree),
     Say(Msg::PuzzleByte),
     Say(Msg::PuzzleBits),
@@ -160,6 +181,12 @@ const PUZZLE: &[Step] = &[
 
 /// The machine does it, and the conversation waits for the blocks.
 const MINE_STAGE: &[Step] = &[
+    // A stage can be walked into directly, so the words the run is about to use — miner, hash,
+    // block, chain, thread — are said here, not only on the stage before, and before the panel
+    // draws any of them: the recall first, so the opening panel can already say what a block
+    // costs in hashes.
+    Say(Msg::MineRecall),
+    Say(Msg::MineChain),
     Say(Msg::MineOne),
     Ask(Msg::MineAsk),
     Run(Mine),
@@ -179,10 +206,14 @@ const MINE_STAGE: &[Step] = &[
 ];
 
 /// The reader's own numbers, twice, each answered by a real run.
+///
+/// The difficulty is said first because its value is the one on the panel from the first
+/// moment, and the miners and threads next, before the values that count them are drawn.
 const TUNE_STAGE: &[Step] = &[
+    Say(Msg::TuneBits),
+    Say(Msg::TuneWords),
     Say(Msg::TuneOne),
     Say(Msg::TuneKeys),
-    Say(Msg::TuneBits),
     Ask(Msg::TuneAskBits),
     Run(Mine),
     Await(Until::Blocks(1)),
@@ -199,6 +230,8 @@ const TUNE_STAGE: &[Step] = &[
 /// The attack, lost at 30% and won at 51%.
 const ATTACK_STAGE: &[Step] = &[
     Say(Msg::AttackOne),
+    // Chain and node, before the sentences that lean on them.
+    Say(Msg::AttackChain),
     Say(Msg::AttackTwo),
     Say(Msg::AttackThree),
     Say(Msg::AttackFour),
@@ -268,13 +301,49 @@ enum Happening {
     NotANumber,
 }
 
-/// One happening, filed against the step the reader was on when it happened.
 /// One attack that ended, kept after its run is gone.
 #[derive(Debug, Clone, Copy)]
 struct Attempt {
+    /// Which stage ran it, so `r` there forgets it and `r` anywhere else does not.
+    stage: usize,
     share: f64,
     won: bool,
     reverted: u64,
+}
+
+/// One mining run, kept after its threads are gone.
+#[derive(Debug, Clone, Copy)]
+struct MinedRun {
+    /// Which run this is, so the run going now writes into its own entry and no other.
+    id: u64,
+    /// Which stage ran it, so `r` there forgets it and `r` anywhere else does not.
+    stage: usize,
+    /// The difficulty and the miner count it ran with.
+    ///
+    /// "You changed the numbers" used to be checked against the numbers on entering the recap,
+    /// which are the numbers the recap was entered with — so it always said they were never
+    /// changed. What the reader did is what they ran.
+    bits: u32,
+    miners: u64,
+    /// Blocks it put on the chain: kept up to date while it runs, and settled from the run's own
+    /// last word when it stops, so a block that landed after the last tick still counts.
+    ///
+    /// These used to be counted one by one as the conversation noticed them, from a snapshot
+    /// that only carries the newest few dozen blocks. At the easiest difficulty a fast machine
+    /// finds hundreds a second, so most of them were never noticed and the recap undercounted.
+    blocks: u64,
+    /// The fastest it went, every miner together.
+    fastest: f64,
+    /// The share the first miner asked for and the share it really got.
+    split: Option<SplitRow>,
+}
+
+impl MinedRun {
+    /// Reads a snapshot of this run into the record.
+    fn read(&mut self, snapshot: &MiningSnapshot) {
+        self.blocks = snapshot.blocks_in_chain;
+        self.fastest = self.fastest.max(snapshot.total_hashrate);
+    }
 }
 
 /// What this reader did, gathered across the whole quest rather than the last run.
@@ -282,11 +351,47 @@ struct Attempt {
 /// The recap used to read the snapshot that happened to be lying around, which was whichever run
 /// finished last — so a reader who mined thirty-seven blocks and then ran a four-block experiment
 /// was told they had mined four.
+///
+/// Every entry carries the stage that made it. `r` forgets the stage's own and nothing else,
+/// which is the rule the ledger quest keeps too: the record used to forget nothing at all, so a
+/// stage the reader had reset went on being recapped.
 #[derive(Debug, Clone, Default)]
 struct Done {
-    blocks: u64,
-    fastest: f64,
+    runs: Vec<MinedRun>,
     attacks: Vec<Attempt>,
+}
+
+impl Done {
+    /// Blocks every run put on a chain.
+    fn blocks(&self) -> u64 {
+        self.runs.iter().map(|run| run.blocks).sum()
+    }
+
+    /// The fastest any run went.
+    fn fastest(&self) -> f64 {
+        self.runs.iter().map(|run| run.fastest).fold(0.0, f64::max)
+    }
+
+    /// The difficulty and miner count of the first run.
+    fn first_run(&self) -> Option<(u32, u64)> {
+        self.runs.first().map(|run| (run.bits, run.miners))
+    }
+
+    /// The difficulty and miner count of the latest run.
+    fn last_run(&self) -> Option<(u32, u64)> {
+        self.runs.last().map(|run| (run.bits, run.miners))
+    }
+
+    /// The first miner's split in the latest run that had one.
+    fn last_split(&self) -> Option<SplitRow> {
+        self.runs.iter().rev().find_map(|run| run.split)
+    }
+
+    /// Throws away what one stage produced.
+    fn forget(&mut self, stage: usize) {
+        self.runs.retain(|run| run.stage != stage);
+        self.attacks.retain(|attempt| attempt.stage != stage);
+    }
 }
 
 struct Logged {
@@ -325,6 +430,16 @@ pub struct Session {
     /// The miner count as it stood when the tuning stage opened, for the same reason.
     miners_on_entry: u64,
     mining_snapshot: Option<MiningSnapshot>,
+    /// The stage whose run [`Session::mining_snapshot`] came from, so `r` pressed elsewhere
+    /// leaves it alone.
+    mining_stage: Option<usize>,
+    /// Blocks and remarks said about the run going now. The cap on them is per run: counted per
+    /// stage, a first run on the tuning stage used all two dozen and the second run — the one that
+    /// shows a third miner finding blocks — announced none.
+    flood_this_run: usize,
+    /// The record entry of the mining run going now, and how many runs have been started.
+    live_run: Option<u64>,
+    runs_started: u64,
     attack: Option<AttackHandle>,
     attack_snapshot: Option<AttackSnapshot>,
     rates: Vec<f64>,
@@ -337,6 +452,12 @@ pub struct Session {
     done: Done,
     /// Which step started the run that is going, so what the run produces is filed against it.
     run_step: usize,
+    /// The difficulty each mining step ran at, so a sentence about a run reads that run.
+    ///
+    /// A Tell is said again every time the conversation is drawn. Reading the knob instead made
+    /// "every bit doubles the work" turn into "the difficulty is where it was" the moment the
+    /// reader moved the knob back after the run.
+    run_bits: Vec<(usize, u32)>,
     /// The attempt each attack step produced.
     ///
     /// A sentence about the first attack has to keep being about the first attack after the
@@ -425,6 +546,10 @@ impl Session {
             bits_on_entry: zero_bits as u32,
             miners_on_entry: 2,
             mining_snapshot: None,
+            mining_stage: None,
+            flood_this_run: 0,
+            live_run: None,
+            runs_started: 0,
             attack: None,
             attack_snapshot: None,
             rates: Vec::new(),
@@ -433,6 +558,7 @@ impl Session {
             running_with: None,
             done: Done::default(),
             run_step: 0,
+            run_bits: Vec::new(),
             attempts: Vec::new(),
         };
         session.sync_share_knobs();
@@ -489,10 +615,19 @@ impl Session {
         self.chosen = self.chosen.min(last);
     }
 
+    /// How many of this stage's knobs the conversation has earned so far, counted from the first.
+    ///
+    /// A knob's label is a word like any other, and a value the reader can turn before anything
+    /// has said what it is is a value turned blind. The tuning stage opens on the sentence about
+    /// the difficulty, which is the first knob; the miners and threads follow the sentence that
+    /// says what those are. The attack's share is plain words, and its confirmations wait for the
+    /// sentence that explains them.
     fn knob_count(&self) -> usize {
         match self.stage {
-            STAGE_TUNE => self.tune_knobs.len(),
-            STAGE_ATTACK => self.break_knobs.len(),
+            STAGE_TUNE if self.said(Msg::TuneWords) => self.tune_knobs.len(),
+            STAGE_TUNE if self.said(Msg::TuneBits) => self.tune_knobs.len().min(1),
+            STAGE_ATTACK if self.said(Msg::AttackTwo) => self.break_knobs.len(),
+            STAGE_ATTACK => self.break_knobs.len().min(1),
             _ => 0,
         }
     }
@@ -515,6 +650,9 @@ impl Session {
     /// Hands the chosen knob to `change`, then keeps the share knobs in step with the miner count.
     fn change_chosen(&mut self, change: impl FnOnce(&mut Knob)) -> Reaction {
         let index = self.chosen;
+        if index >= self.knob_count() {
+            return Reaction::Ignored;
+        }
         let knobs = match self.stage {
             STAGE_TUNE => &mut self.tune_knobs,
             STAGE_ATTACK => &mut self.break_knobs,
@@ -546,6 +684,7 @@ impl Session {
         // The run about to start replaces the last one's numbers, and a start that is refused
         // leaves none behind: a wait for blocks must never be answered by a run already over.
         self.mining_snapshot = None;
+        self.mining_stage = None;
         self.rates.clear();
         let bits = match practice_bits(self.zero_bits()) {
             Ok(bits) => bits,
@@ -559,7 +698,23 @@ impl Session {
         self.stop_attack();
         match start_mining(config) {
             Ok(handle) => {
-                self.mining_snapshot = Some(handle.snapshot());
+                let snapshot = handle.snapshot();
+                // Into the record the moment it starts, filed under the stage that started it:
+                // this entry is the live run until it stops, and the one `r` here forgets.
+                let id = self.runs_started;
+                self.runs_started += 1;
+                self.live_run = Some(id);
+                self.done.runs.push(MinedRun {
+                    id,
+                    stage: self.stage,
+                    bits: self.zero_bits(),
+                    miners: snapshot.miners.len() as u64,
+                    blocks: 0,
+                    fastest: 0.0,
+                    split: split_of(&snapshot).first().copied(),
+                });
+                self.mining_snapshot = Some(snapshot);
+                self.mining_stage = Some(self.stage);
                 self.mining = Some(handle);
                 self.refused = None;
                 self.state = RunState::Running;
@@ -586,8 +741,12 @@ impl Session {
             }
         };
         let (attacker, honest) = self.attack_threads();
-        let config =
-            AttackConfig::new(bits, attacker, honest).with_confirmations(self.confirmations());
+        // The share takes as many threads as it needs — 13 against 12 for 51% — and the machine
+        // takes no more than the reader gave it: the threads take turns within the budget, and
+        // every one of them hashes for the same share of the time, so the share holds.
+        let config = AttackConfig::new(bits, attacker, honest)
+            .with_confirmations(self.confirmations())
+            .with_cpu_budget(self.thread_budget());
         self.stop_mining();
         match start_attack(config) {
             Ok(handle) => {
@@ -605,17 +764,32 @@ impl Session {
 
     /// The threads each side of the attack gets. Both sides need at least one.
     fn attack_threads(&self) -> (usize, usize) {
-        let total = self.thread_budget().max(2);
-        let wanted = (total as f64 * self.attacker_share()).round() as usize;
-        let attacker = wanted.clamp(1, total - 1);
-        (attacker, total - attacker)
+        attack_split(self.attacker_share(), self.thread_budget())
     }
 
     fn stop_mining(&mut self) {
         if let Some(handle) = self.mining.take() {
-            handle.stop();
+            // The run's last word, taken after its threads have stopped, is what goes into the
+            // record: a block that landed after the last tick still counts.
+            let last = handle.finish();
+            if let Some(run) = self.live_record() {
+                run.read(&last);
+            }
+            self.live_run = None;
+            self.mining_snapshot = Some(last);
             self.state = RunState::Idle;
         }
+    }
+
+    /// The record entry of the mining run going now, if it is still in the record.
+    fn live_record(&mut self) -> Option<&mut MinedRun> {
+        let id = self.live_run?;
+        self.done.runs.iter_mut().find(|run| run.id == id)
+    }
+
+    /// Every block this reader has put on a chain, in every run of the quest so far.
+    fn mined_blocks(&self) -> u64 {
+        self.done.blocks()
     }
 
     fn stop_attack(&mut self) {
@@ -639,6 +813,7 @@ impl Session {
     /// produced.
     fn forget_run(&mut self) {
         self.reported_blocks = 0;
+        self.flood_this_run = 0;
         self.said_blocks.clear();
         self.said_deficit = 0;
         self.last_remark_at = Duration::ZERO;
@@ -648,18 +823,25 @@ impl Session {
         self.refused = None;
     }
 
-    /// Throws away the numbers the stage showing now produced, and only those. Pressing `r` is
-    /// the one thing that does this: every other way out of a stage keeps them.
+    /// Throws away the numbers the stage showing now produced, and only those — in the record the
+    /// recap reads and on the panel. Pressing `r` is the one thing that does this: every other way
+    /// out of a stage keeps them.
+    ///
+    /// Anything still running has to be stopped first. Stopping a run writes its last word into
+    /// the record and onto the panel, so forgetting before it let the very run `r` was pressed to
+    /// throw away straight back in, under a status line that said nothing had started.
     ///
     /// The knobs keep their values either way: a reader who set a number wants it kept.
     fn forget_results(&mut self) {
-        match self.stage {
-            STAGE_MINE | STAGE_TUNE => {
-                self.mining_snapshot = None;
-                self.rates.clear();
-            }
-            STAGE_ATTACK => self.attack_snapshot = None,
-            _ => {}
+        let stage = self.stage;
+        self.done.forget(stage);
+        if self.mining_stage == Some(stage) {
+            self.mining_snapshot = None;
+            self.mining_stage = None;
+            self.rates.clear();
+        }
+        if stage == STAGE_ATTACK {
+            self.attack_snapshot = None;
         }
     }
 
@@ -751,10 +933,92 @@ impl Session {
         ])
     }
 
-    fn brief_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
+    /// The opening stage's panel: one list, the copies of it, and the rule that picks one.
+    ///
+    /// It used to draw the puzzle — a header with a nonce in it, SHA-256, a target — beside a
+    /// conversation about strangers agreeing on a list, which had said none of those words. This
+    /// draws what the conversation is saying, a sentence at a time: the copies, then the one that
+    /// lies, then the rule, then what the work is.
+    fn why_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let width = area.width as usize;
-        let mut diagram =
-            wrapped("", Msg::PuzzleHeader.text(language), width, theme.plain(), theme.plain());
+        let heading = |message: Msg| {
+            wrapped("", message.text(language), width, theme.heading(), theme.heading())
+        };
+        let mut lines = heading(Msg::WhyCopies);
+        let computer = Msg::WhyComputer.text(language);
+        let names: Vec<String> = (1..=3).map(|number| format!("{computer} {number}")).collect();
+        let name_cells = names.iter().map(|name| cells(name)).max().unwrap_or(0) + 2;
+        // Any of them can lie: from the second sentence on, the third copy says something else.
+        let lying = self.said(Msg::WhyTwo);
+        for (index, name) in names.iter().enumerate() {
+            let (mark, style, entry) = if lying && index == names.len() - 1 {
+                (State::Bad.mark(), theme.bad(), Msg::WhyLie)
+            } else {
+                (" ", theme.plain(), Msg::WhyPaid)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{mark} "), theme.bad()),
+                Span::styled(column(name, name_cells), theme.muted()),
+                Span::styled(entry.text(language), style),
+            ]));
+        }
+        lines.extend(wrapped(
+            "  ",
+            Msg::WhyMore.text(language),
+            width,
+            theme.muted(),
+            theme.muted(),
+        ));
+        if self.said(Msg::WhyThree) {
+            lines.push(Line::from(""));
+            lines.extend(heading(Msg::WhyRuleHeading));
+            let trust = format!("{} ", State::Bad.mark());
+            lines.extend(wrapped(
+                &trust,
+                Msg::WhyRuleTrust.text(language),
+                width,
+                theme.bad(),
+                theme.muted(),
+            ));
+            let work = format!("{} ", State::Good.mark());
+            lines.extend(wrapped(
+                &work,
+                Msg::WhyRuleWork.text(language),
+                width,
+                theme.good(),
+                theme.plain(),
+            ));
+        }
+        if self.said(Msg::WhyFour) {
+            lines.push(Line::from(""));
+            let rows = [(Msg::WhyWork.text(language), Msg::WhyWorkIs.text(language).to_string())];
+            lines.extend(stat_lines(&rows, width, theme));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// The puzzle, drawn as the conversation explains it.
+    ///
+    /// The header is a header once the sentence about headers has been said, one of 80 bytes
+    /// once bytes have, and one with a nonce in it once the nonce has a name; the loop back is
+    /// guessing another number until then. What a block costs arrives with the sentence that
+    /// points at it.
+    fn puzzle_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
+        let width = area.width as usize;
+        if !self.said(Msg::PuzzleThree) {
+            let note =
+                wrapped("", Msg::PuzzleComing.text(language), width, theme.muted(), theme.muted());
+            frame.render_widget(Paragraph::new(note), area);
+            return;
+        }
+        let header = if self.said(Msg::PuzzleFive) {
+            Msg::PuzzleHeader
+        } else if self.said(Msg::PuzzleByte) {
+            Msg::PuzzleHeaderBytes
+        } else {
+            Msg::PuzzleHeaderPlain
+        };
+        let mut diagram = wrapped("", header.text(language), width, theme.plain(), theme.plain());
         for step in [Msg::PuzzleHash, Msg::PuzzleCompare] {
             diagram.extend(wrapped(
                 "  ↓  ",
@@ -764,9 +1028,21 @@ impl Session {
                 theme.plain(),
             ));
         }
-        for (answer, style) in [(Msg::PuzzleNo, theme.muted()), (Msg::PuzzleYes, theme.good())] {
+        let again = if self.said(Msg::PuzzleFive) {
+            Some(Msg::PuzzleNo)
+        } else if self.said(Msg::PuzzleFour) {
+            Some(Msg::PuzzleNoGuess)
+        } else {
+            None
+        };
+        let answers = again.map(|no| (no, theme.muted())).into_iter();
+        for (answer, style) in answers.chain([(Msg::PuzzleYes, theme.good())]) {
             let (mark, rest) = branch(answer.text(language));
             diagram.extend(wrapped(&format!("     {mark}"), rest, width, theme.plain(), style));
+        }
+        if !self.said(Msg::PuzzleSix) {
+            frame.render_widget(Paragraph::new(diagram), area);
+            return;
         }
         diagram.push(Line::from(""));
         diagram.extend(wrapped(
@@ -789,7 +1065,11 @@ impl Session {
 
     fn run_panel(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let width = area.width as usize;
-        let Some(snapshot) = &self.mining_snapshot else {
+        // A run an earlier visit left behind waits until the conversation reaches the run again,
+        // which starts a new one: drawn at the first sentence, its chain and its hash rate came
+        // before either had been said.
+        let showing = self.mining_snapshot.as_ref().filter(|_| self.reached_run());
+        let Some(snapshot) = showing else {
             let mut lines =
                 vec![Line::from(Span::styled(Msg::StatusIdle.text(language), theme.muted()))];
             if let Some(message) = self.refused {
@@ -800,29 +1080,48 @@ impl Session {
                 Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)])
                     .areas(area);
             frame.render_widget(Paragraph::new(lines), top);
-            frame.render_widget(
-                Paragraph::new(stat_lines(&self.cost_rows(language), width, theme)),
-                rows,
-            );
+            if self.said(Msg::MineRecall) {
+                frame.render_widget(
+                    Paragraph::new(stat_lines(&self.cost_rows(language), width, theme)),
+                    rows,
+                );
+            }
             return;
         };
 
-        let mut rows: Vec<(&str, String)> = vec![
-            (Msg::LabelHashRate.text(language), format::hashrate(snapshot.total_hashrate)),
-            (Msg::LabelHashes.text(language), format::count(snapshot.total_hashes)),
-            (Msg::LabelBlocksFound.text(language), format::count(snapshot.blocks_found)),
-            (Msg::LabelChainHeight.text(language), format::count(snapshot.height)),
-            (
-                Msg::LabelHashesPerBlock.text(language),
-                format::count(snapshot.expected_hashes_per_block as u64),
-            ),
-        ];
+        // Each row arrives with the sentence that says its words. The rate waits for the one
+        // saying what MH/s is; the chain for the one saying what a chain is.
+        let chain = self.said(Msg::MineChain);
+        let mut rows: Vec<(&str, String)> = Vec::new();
+        if self.said(Msg::MineRate) {
+            rows.push((
+                Msg::LabelHashRate.text(language),
+                format::hashrate(snapshot.total_hashrate),
+            ));
+        }
+        rows.push((Msg::LabelHashes.text(language), format::count(snapshot.total_hashes)));
+        rows.push((Msg::LabelBlocksFound.text(language), format::count(snapshot.blocks_found)));
+        if chain {
+            rows.push((Msg::LabelChainHeight.text(language), format::count(snapshot.height)));
+        }
+        rows.push((
+            Msg::LabelHashesPerBlock.text(language),
+            format::count(snapshot.expected_hashes_per_block as u64),
+        ));
         // Only when it has happened. A row that reads zero for the whole run is a question the
         // screen asks the reader and never answers.
-        if snapshot.stale_blocks > 0 {
+        if chain && snapshot.stale_blocks > 0 {
             rows.push((Msg::LabelStale.text(language), format::count(snapshot.stale_blocks)));
         }
-        let comparison = self.comparison_rows(snapshot.total_hashrate, language);
+        // One block takes, half take under, the 2009 network, and this machine against it: the
+        // four sentences about difficulty 1 each bring their own line.
+        let comparison: Vec<(&str, String)> = self
+            .comparison_rows(snapshot.total_hashrate, language)
+            .into_iter()
+            .zip([Msg::MineNine, Msg::MineNine, Msg::MineTen, Msg::MineEleven])
+            .filter(|(_, told)| self.said(*told))
+            .map(|(row, _)| row)
+            .collect();
 
         // Built as one run of lines rather than a fixed grid of rows: a value that has to go
         // under its label, or a sentence that has to become two, takes a row from the block list
@@ -830,22 +1129,26 @@ impl Session {
         let mut head = vec![self.status_line(snapshot.elapsed, language, theme), Line::from("")];
         head.extend(stat_lines(&rows, width, theme));
         head.push(Line::from(""));
-        head.extend(wrapped(
-            "",
-            Msg::HeadingComparison.text(language),
-            width,
-            theme.heading(),
-            theme.heading(),
-        ));
-        head.extend(stat_lines(&comparison, width, theme));
-        head.extend(wrapped(
-            "",
-            Msg::ComparisonDerived.text(language),
-            width,
-            theme.muted(),
-            theme.muted(),
-        ));
-        head.push(Line::from(""));
+        if self.said(Msg::MineEight) {
+            head.extend(wrapped(
+                "",
+                Msg::HeadingComparison.text(language),
+                width,
+                theme.heading(),
+                theme.heading(),
+            ));
+            head.extend(stat_lines(&comparison, width, theme));
+            if self.said(Msg::MineTen) {
+                head.extend(wrapped(
+                    "",
+                    Msg::ComparisonDerived.text(language),
+                    width,
+                    theme.muted(),
+                    theme.muted(),
+                ));
+            }
+            head.push(Line::from(""));
+        }
         head.extend(wrapped(
             "",
             Msg::HeadingRecentBlocks.text(language),
@@ -866,15 +1169,18 @@ impl Session {
         if area.height == 0 {
             return;
         }
-        let lines: Vec<Line<'static>> = blocks
-            .iter()
-            .rev()
-            .take(area.height as usize)
+        let shown: Vec<&BlockSummary> = blocks.iter().rev().take(area.height as usize).collect();
+        // Measured from the heights on screen. A fixed five cells cut "10,000" to "10,0…" once a
+        // fast machine at an easy difficulty had been mining for a minute.
+        let height_cells =
+            shown.iter().map(|block| cells(&format::count(block.height))).max().unwrap_or(0) + 1;
+        let lines: Vec<Line<'static>> = shown
+            .into_iter()
             .map(|block| {
                 let state = if block.in_best_chain { State::Good } else { State::Bad };
                 Line::from(vec![
                     Span::styled(format!("{} ", state.mark()), theme.state(state)),
-                    Span::styled(column(&format::count(block.height), 5), theme.plain()),
+                    Span::styled(column(&format::count(block.height), height_cells), theme.plain()),
                     Span::styled(column(&format::duration(block.since_previous), 8), theme.muted()),
                     Span::styled(short_hash(block.hash), theme.muted()),
                 ])
@@ -898,7 +1204,9 @@ impl Session {
         frame.render_widget(Paragraph::new(knob_lines), knobs);
         // The conversation tells the reader to read the cost line here, so the cost line is here.
         // It used to be on the stage before this one, where the difficulty could not be moved.
-        if let Some((label, value)) = self.cost_rows(language).into_iter().next() {
+        if self.said(Msg::TuneBits)
+            && let Some((label, value)) = self.cost_rows(language).into_iter().next()
+        {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(format!("{label}  "), theme.muted()),
@@ -906,6 +1214,16 @@ impl Session {
                 ])),
                 gap,
             );
+        }
+        let footer_lines = match self.refused {
+            Some(message) => wrapped("", message.text(language), width, theme.bad(), theme.bad()),
+            None => Vec::new(),
+        };
+        // Miners and threads, in a table headed by both words, wait for the sentence saying what
+        // they are.
+        if !self.said(Msg::TuneWords) {
+            frame.render_widget(Paragraph::new(footer_lines), footer);
+            return;
         }
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -970,12 +1288,7 @@ impl Session {
                 table,
             ),
         }
-
-        let mut lines = Vec::new();
-        if let Some(message) = self.refused {
-            lines.extend(wrapped("", message.text(language), width, theme.bad(), theme.bad()));
-        }
-        frame.render_widget(Paragraph::new(lines), footer);
+        frame.render_widget(Paragraph::new(footer_lines), footer);
     }
 
     fn tune_knob_lines(
@@ -984,7 +1297,7 @@ impl Session {
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let labels: Vec<Msg> = (0..self.tune_knobs.len())
+        let labels: Vec<Msg> = (0..self.knobs().len())
             .map(|index| match index {
                 KNOB_DIFFICULTY => Msg::KnobDifficulty,
                 KNOB_MINERS => Msg::KnobMiners,
@@ -993,7 +1306,7 @@ impl Session {
             })
             .collect();
         let column_width = label_column(&labels, width, language);
-        self.tune_knobs
+        self.knobs()
             .iter()
             .enumerate()
             .flat_map(|(index, knob)| {
@@ -1022,8 +1335,9 @@ impl Session {
         theme: Theme,
     ) -> Vec<Line<'static>> {
         let labels = [Msg::KnobAttackerShare, Msg::KnobConfirmations];
-        let column_width = label_column(&labels, width, language);
-        self.break_knobs
+        let shown = self.knobs().len().min(labels.len());
+        let column_width = label_column(&labels[..shown], width, language);
+        self.knobs()
             .iter()
             .enumerate()
             .flat_map(|(index, knob)| {
@@ -1053,7 +1367,10 @@ impl Session {
         let _ = gap;
         frame.render_widget(Paragraph::new(knob_lines), knobs);
 
-        let Some(snapshot) = &self.attack_snapshot else {
+        // An attack an earlier visit left behind waits until the conversation reaches the attack:
+        // drawn at the first sentence, its chains and confirmations came before either was said.
+        let showing = self.attack_snapshot.as_ref().filter(|_| self.reached_run());
+        let Some(snapshot) = showing else {
             let (attacker, honest) = self.attack_threads();
             let mut lines =
                 vec![Line::from(Span::styled(Msg::StatusIdle.text(language), theme.muted()))];
@@ -1061,42 +1378,31 @@ impl Session {
                 lines.extend(wrapped("", message.text(language), width, theme.bad(), theme.bad()));
                 lines.push(Line::from(""));
             }
-            let rows = vec![
-                (
-                    Msg::LabelDifficulty.text(language),
-                    format!("{} {}", self.zero_bits(), Msg::UnitZeroBits.text(language)),
-                ),
-                (Msg::LabelThreadSplit.text(language), format!("{attacker} / {honest}")),
-            ];
+            // The share the threads will really hold, which is what decides the race: 51% asked
+            // is 13 threads of 25. How many threads that takes is the engine's business — they
+            // take turns within the reader's budget — and this stage never says what a thread
+            // is, so the screen says the share and not the count.
+            let held = attacker as f64 / (attacker + honest) as f64;
+            let rows = vec![(Msg::LabelShareHeld.text(language), format::percent(held))];
             lines.extend(stat_lines(&rows, width, theme));
-            lines.extend(self.split_caption(width, language, theme));
             frame.render_widget(Paragraph::new(lines), body);
             return;
         };
 
-        // While it runs, the phase says what is happening; once it is over, the ending says it.
-        let phase = match snapshot.outcome {
-            Some(_) => Line::from(""),
-            None => Line::from(Span::styled(
+        // While it runs, the phase says what is happening; once it is over, the ending says it,
+        // and the row the phase took goes to the ending. At 80x24 that row is the difference
+        // between the ending being on the screen and being cut off the bottom of it.
+        let mut lines = vec![self.status_line(snapshot.elapsed, language, theme)];
+        if snapshot.outcome.is_none() {
+            lines.push(Line::from(Span::styled(
                 phrases::phase(snapshot.phase).text(language),
                 theme.muted(),
-            )),
-        };
-        let mut lines =
-            vec![self.status_line(snapshot.elapsed, language, theme), phase, Line::from("")];
+            )));
+        }
+        lines.push(Line::from(""));
         lines.extend(stat_lines(&self.attack_rows(snapshot, language), width, theme));
-        lines.extend(self.split_caption(width, language, theme));
         lines.extend(self.ending_lines(snapshot, width, language, theme));
         frame.render_widget(Paragraph::new(lines), body);
-    }
-
-    /// What the two numbers in the thread split mean.
-    ///
-    /// This is a caption, not a value, and it was drawn as a nameless row of the table: indented
-    /// by whatever the widest label happened to be, so it lost a different number of letters
-    /// depending on whether the attacker was ahead or behind. It is a sentence, so it wraps.
-    fn split_caption(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
-        wrapped("", Msg::ThreadsAttackerHonest.text(language), width, theme.muted(), theme.muted())
     }
 
     /// How it ended: green when the chain held, red when an attacker rewrote it.
@@ -1153,6 +1459,7 @@ impl Session {
                 ));
             }
             None => {
+                // The label says what is counted, so the value is only the number.
                 let gap = snapshot.lead.unsigned_abs();
                 rows.push((
                     if snapshot.lead >= 0 {
@@ -1160,14 +1467,11 @@ impl Session {
                     } else {
                         Msg::LabelBehindBy.text(language)
                     },
-                    blocks(gap, language),
+                    format::count(gap),
                 ));
             }
         }
-        rows.push((
-            Msg::LabelFurthestBehind.text(language),
-            blocks(snapshot.max_deficit, language),
-        ));
+        rows.push((Msg::LabelFurthestBehind.text(language), format::count(snapshot.max_deficit)));
         // What the attack is waiting for. A screen that shows a race with no finishing line asks
         // the reader to sit through two minutes without telling them it is two minutes.
         if snapshot.outcome.is_none() {
@@ -1187,10 +1491,7 @@ impl Session {
             .confirmations_when_reverted
             .or(snapshot.confirmations_at_release)
             .unwrap_or(snapshot.victim_confirmations);
-        rows.push((
-            Msg::LabelMerchantSaw.text(language),
-            plural(seen, Msg::UnitConfirmation, Msg::UnitConfirmations, language),
-        ));
+        rows.push((Msg::LabelMerchantSaw.text(language), format::count(seen)));
         rows.push((
             Msg::LabelGoods.text(language),
             if snapshot.victim_released {
@@ -1207,15 +1508,11 @@ impl Session {
                 None => Msg::Unavailable.text(language).to_string(),
             },
         ));
-        rows.push((
-            Msg::LabelThreadSplit.text(language),
-            format!(
-                "{} / {}  ({})",
-                snapshot.attacker.threads,
-                snapshot.honest.threads,
-                format::percent(snapshot.attacker_share)
-            ),
-        ));
+        // The share the run's threads really held. With more threads than the reader's budget
+        // they took turns, every one for the same share of the time, so this is also the share of
+        // the hashing — and the screen shows no hash rate, which under turns would be the rate
+        // of a machine held back to its budget rather than what it can do.
+        rows.push((Msg::LabelShareHeld.text(language), format::percent(snapshot.attacker_share)));
         rows
     }
 
@@ -1224,30 +1521,43 @@ impl Session {
         // The recap is about the quest, not about whichever run happened to finish last: it
         // reads the record every run wrote into, so a short experiment after a long run cannot
         // shrink what the reader mined.
-        let mined = self.done.blocks > 0;
-        let rate = self.done.fastest;
+        let mined = self.mined_blocks() > 0;
+        let rate = self.done.fastest();
         let real = Target::difficulty_one();
         let network = implied_network_hashrate(real, BITCOIN_TARGET_BLOCK_SECONDS);
 
-        // The split is the one the run really used, so it comes from the run.
-        let split =
-            self.mining_snapshot.as_ref().map(split_of).and_then(|rows| rows.first().copied());
+        // The split and the difficulty are the ones a run really used, so they come from the
+        // record of the runs — not from the knobs, which say what the next run would use.
+        let split = self.done.last_split();
         let attacks = &self.done.attacks;
+        // Each row arrives with the sentence that says its words: the difficulty with the one
+        // about zero bits, the reader's own numbers with the one that reads them, the miners'
+        // split with the one about the miners. A recap entered cold has said none of it yet.
+        let mining = self.told(Topic::Mined);
+        let tuned = self.told(Topic::Tuned) && split.is_some();
+        let attacked = self.told(Topic::AttacksRan);
 
-        let rows: Vec<(&'static str, String)> = vec![
+        let rows: Vec<(bool, &'static str, String)> = vec![
             (
+                true,
                 Msg::RecapDifficulty.text(language),
-                format!("{} {}", self.zero_bits(), Msg::UnitZeroBits.text(language)),
+                match self.done.last_run() {
+                    Some((bits, _)) => in_zero_bits(bits, language),
+                    None => unknown(),
+                },
             ),
             (
+                mining,
                 Msg::RecapHashRate.text(language),
                 if mined { format::hashrate(rate) } else { unknown() },
             ),
             (
+                mining,
                 Msg::RecapBlocks.text(language),
-                if mined { format::count(self.done.blocks) } else { unknown() },
+                if mined { format::count(self.mined_blocks()) } else { unknown() },
             ),
             (
+                mining,
                 Msg::RecapAtDifficultyOne.text(language),
                 if mined {
                     span(expected_time_to_block(rate, real).expected_seconds, language)
@@ -1255,8 +1565,9 @@ impl Session {
                     unknown()
                 },
             ),
-            (Msg::RecapNetwork.text(language), format::hashrate(network)),
+            (self.said(Msg::RecapTwo), Msg::RecapNetwork.text(language), format::hashrate(network)),
             (
+                tuned,
                 Msg::RecapSplit.text(language),
                 match split {
                     Some(row) => format!(
@@ -1268,10 +1579,12 @@ impl Session {
                 },
             ),
             (
+                attacked,
                 Msg::RecapAttacksRun.text(language),
                 if attacks.is_empty() { unknown() } else { format::count(attacks.len() as u64) },
             ),
             (
+                attacked,
                 Msg::RecapAttacksWon.text(language),
                 if attacks.is_empty() {
                     unknown()
@@ -1280,6 +1593,11 @@ impl Session {
                 },
             ),
         ];
+        let rows: Vec<(&'static str, String)> = rows
+            .into_iter()
+            .filter(|(shown, _, _)| *shown)
+            .map(|(_, name, value)| (name, value))
+            .collect();
 
         // Two cells for the number, then a label column wide enough for the longest label in
         // whichever language is on screen. A value the rest will not hold goes under its label.
@@ -1333,6 +1651,32 @@ impl Session {
         SCRIPTS[self.stage.min(SCRIPTS.len() - 1)]
     }
 
+    /// The steps of this stage the reader has been shown.
+    fn shown_steps(&self) -> impl Iterator<Item = &'static Step> {
+        self.script().iter().take(self.revealed + 1)
+    }
+
+    /// Whether this stage's conversation has said `message` yet.
+    ///
+    /// The panel reads this before it draws a word. Every word on screen is explained at or
+    /// before its first appearance, in the same stage: the opening stage used to draw a nonce,
+    /// SHA-256, a target and a header beside a conversation that had not yet said any of them,
+    /// and a reader who meets an unexplained word stops reading and starts guessing.
+    fn said(&self, message: Msg) -> bool {
+        self.shown_steps().any(|step| matches!(step, Say(said) | Ask(said) if *said == message))
+    }
+
+    /// Whether this stage's conversation has reached its sentence about `topic`.
+    fn told(&self, topic: Topic) -> bool {
+        self.shown_steps().any(|step| matches!(step, Tell(told) if *told == topic))
+    }
+
+    /// Whether this stage's conversation has reached the work it runs. Before then the panel
+    /// shows what the run is about to do, not the numbers an earlier visit left behind.
+    fn reached_run(&self) -> bool {
+        self.shown_steps().any(|step| matches!(step, Run(_)))
+    }
+
     /// Back to the first sentence of this stage, with nothing running and nothing said.
     ///
     /// What finished runs produced is kept, so a recap reached from here — by Tab, by a digit key,
@@ -1341,8 +1685,15 @@ impl Session {
         self.stop_runs();
         self.forget_run();
         self.revealed = 0;
+        // Back at the first sentence, fewer knobs have been named.
+        self.chosen = self.chosen.min(self.knob_count().saturating_sub(1));
         self.log.clear();
         self.attempts.clear();
+        self.run_bits.clear();
+        // The values the last run started with belong to that run. Kept across a restart they
+        // made a knob turned before this stage's first run read as "turned since the run", and
+        // the key bar offered to run it again when Enter would only carry the conversation on.
+        self.running_with = None;
     }
 
     /// A sentence about the attack that finished, read off that attack.
@@ -1360,7 +1711,13 @@ impl Session {
                 // The reader sets the difficulty, so the sentence reads the difficulty rather
                 // than the one the conversation suggested. Pressing Enter without moving it used
                 // to be answered with "blocks cost twice what they did".
-                let now = self.zero_bits();
+                let now = self
+                    .run_bits
+                    .iter()
+                    .filter(|(at, _)| *at <= step)
+                    .max_by_key(|(at, _)| *at)
+                    .map(|(_, bits)| *bits)
+                    .unwrap_or_else(|| self.zero_bits());
                 let message = match now.cmp(&self.bits_on_entry) {
                     std::cmp::Ordering::Equal => Msg::TuneBitsUnchanged,
                     std::cmp::Ordering::Greater => Msg::TuneBitsUp,
@@ -1373,39 +1730,44 @@ impl Session {
 
     /// What this reader mined, across every run rather than the last one.
     fn tell_mined(&self, language: Language) -> String {
-        if self.done.blocks == 0 {
+        if self.mined_blocks() == 0 {
             return Msg::RecapMinedNone.text(language).to_string();
         }
         format!(
             "{} {}. {} {}.",
             Msg::RecapMinedBlocks.text(language),
-            format::count(self.done.blocks),
+            format::count(self.mined_blocks()),
             Msg::RecapMinedFastest.text(language),
-            format::hashrate(self.done.fastest),
+            format::hashrate(self.done.fastest()),
         )
     }
 
-    /// Whether they moved the numbers themselves, and from what to what.
+    /// Whether they moved the numbers themselves, and from what to what: the first run they
+    /// mined against the last. Nothing at all when they have not mined, because the line before
+    /// has already said so.
     fn tell_tuned(&self, language: Language) -> String {
-        let bits = self.zero_bits();
-        let miners = self.miner_count() as u64;
-        if bits == self.bits_on_entry && miners == self.miners_on_entry {
+        let (Some((first_bits, first_miners)), Some((bits, miners))) =
+            (self.done.first_run(), self.done.last_run())
+        else {
+            return String::new();
+        };
+        if bits == first_bits && miners == first_miners {
             return Msg::RecapTunedNo.text(language).to_string();
         }
         let mut text = Msg::RecapTunedYes.text(language).to_string();
-        if bits != self.bits_on_entry {
+        if bits != first_bits {
             text.push_str(&format!(
                 "  ·  {} {} → {}",
                 Msg::KnobDifficulty.text(language),
-                self.bits_on_entry,
+                first_bits,
                 bits,
             ));
         }
-        if miners != self.miners_on_entry {
+        if miners != first_miners {
             text.push_str(&format!(
                 "  ·  {} {} → {}",
                 Msg::KnobMiners.text(language),
-                self.miners_on_entry,
+                first_miners,
                 miners,
             ));
         }
@@ -1418,7 +1780,14 @@ impl Session {
             return Msg::RecapAttackNone.text(language).to_string();
         }
         let mut text = Msg::RecapAttackRan.text(language).to_string();
-        for attempt in &self.done.attacks {
+        // The newest few, and a count of the rest. One clause per attack grew past what one beat
+        // can hold by the third attack, and a reader who runs the bench ten times ran ten.
+        let shown = self.done.attacks.len().min(ATTACKS_RECALLED);
+        let earlier = self.done.attacks.len() - shown;
+        if earlier > 0 {
+            text.push_str(&format!("  ·  {} {earlier}", Msg::RecapAttackEarlier.text(language)));
+        }
+        for attempt in &self.done.attacks[earlier..] {
             let outcome = if attempt.won {
                 phrases::short_outcome(AttackOutcome::Succeeded)
             } else {
@@ -1446,17 +1815,20 @@ impl Session {
         if attacks.is_empty() {
             return String::new();
         }
-        let won_below = attacks.iter().any(|a| a.won && a.share < 0.5);
-        let won_above = attacks.iter().any(|a| a.won && a.share >= 0.5);
-        let lost_above = attacks.iter().any(|a| !a.won && a.share >= 0.5);
+        let won_below = attacks.iter().any(|a| a.won && side(a.share) == Side::Below);
+        let won_above = attacks.iter().any(|a| a.won && side(a.share) == Side::Above);
+        let lost_above = attacks.iter().any(|a| !a.won && side(a.share) == Side::Above);
+        let at_half = attacks.iter().any(|a| side(a.share) == Side::Half);
         let message = if won_below {
             Msg::RecapAttackWonBelowHalf
-        } else if lost_above && won_above {
+        } else if lost_above {
             Msg::RecapAttackLostAboveHalf
         } else if won_above {
             Msg::RecapAttackWonAboveHalf
-        } else if lost_above {
-            Msg::RecapAttackLostAboveHalf
+        } else if at_half {
+            // Nothing above half ran, nothing below half won, and something ran at exactly half.
+            // "Every one of them fell behind" would be about attacks that were never below half.
+            Msg::RecapAttackEven
         } else {
             Msg::RecapAttackAllLost
         };
@@ -1474,11 +1846,14 @@ impl Session {
         let Some(attempt) = attempt else {
             return Msg::AttackNotYetRun.text(language).to_string();
         };
-        let message = match (attempt.share >= 0.5, attempt.won) {
-            (false, true) => Msg::AttackLuckyWin,
-            (false, false) => Msg::AttackLost,
-            (true, true) => Msg::AttackWon,
-            (true, false) => Msg::AttackRanOut,
+        // Exactly half is neither: "above half it catches up" is not true of a tie.
+        let message = match (side(attempt.share), attempt.won) {
+            (Side::Below, true) => Msg::AttackLuckyWin,
+            (Side::Below, false) => Msg::AttackLost,
+            (Side::Half, true) => Msg::AttackEvenWon,
+            (Side::Half, false) => Msg::AttackEvenLost,
+            (Side::Above, true) => Msg::AttackWon,
+            (Side::Above, false) => Msg::AttackRanOut,
         };
         message.text(language).to_string()
     }
@@ -1504,6 +1879,8 @@ impl Session {
             let settled = Settled::of(self.knobs());
             self.running_with = Some(settled);
             self.run_step = self.revealed;
+            // A new run, so a new allowance of blocks and remarks.
+            self.flood_this_run = 0;
             match deed {
                 Mine => {
                     self.reported_blocks = 0;
@@ -1514,8 +1891,15 @@ impl Session {
                         // having been told there was more than one.
                         let miners = snapshot.miners.len();
                         let threads = snapshot.miners.iter().map(|m| m.threads).sum();
-                        let bits = u64::from(self.zero_bits());
-                        self.say(Happening::MiningStarted { miners, threads, bits });
+                        let bits = self.zero_bits();
+                        let at = self.revealed;
+                        self.run_bits.retain(|(step, _)| *step != at);
+                        self.run_bits.push((at, bits));
+                        self.say(Happening::MiningStarted {
+                            miners,
+                            threads,
+                            bits: u64::from(bits),
+                        });
                     }
                 }
                 Attack => {
@@ -1523,8 +1907,10 @@ impl Session {
                     self.said_released = false;
                     self.said_ended = false;
                     self.start_the_attack();
-                    if self.attack.is_some() {
-                        let share = self.attacker_share();
+                    if let Some(snapshot) = &self.attack_snapshot {
+                        // The share the threads really hold, which is what the panel shows and
+                        // what decides the race — not the number typed into the knob.
+                        let share = snapshot.attacker_share;
                         let confirmations = self.confirmations();
                         self.say(Happening::AttackStarted { share, confirmations });
                     }
@@ -1570,9 +1956,11 @@ impl Session {
         if at == 0 {
             return Reaction::Ignored;
         }
+        // The run being replaced stays in the record: running the bench again is not `r`, and the
+        // recap is about every run the reader made. What it put on the panel goes when the new
+        // run starts.
         self.stop_runs();
         self.forget_run();
-        self.forget_results();
         self.log.retain(|logged| logged.step < at);
         self.revealed = at - 1;
         self.advance();
@@ -1581,9 +1969,13 @@ impl Session {
 
     /// Files one happening against the step the reader is on.
     fn say(&mut self, what: Happening) {
-        if self.log.len() < EVENT_CAP {
-            self.log.push(Logged { step: self.revealed, what });
+        if matches!(what, Happening::Block { .. } | Happening::FallingBehind { .. }) {
+            if self.flood_this_run >= EVENT_CAP {
+                return;
+            }
+            self.flood_this_run += 1;
         }
+        self.log.push(Logged { step: self.revealed, what });
     }
 
     /// Reads the running engines and turns anything new into beats.
@@ -1614,9 +2006,6 @@ impl Session {
         }
         for (height, gap, miner, on_the_chain) in blocks {
             self.reported_blocks = self.reported_blocks.max(height);
-            if on_the_chain {
-                self.done.blocks += 1;
-            }
             self.say(Happening::Block { height, gap, miner, on_the_chain });
         }
 
@@ -1671,7 +2060,12 @@ impl Session {
                 self.said_deficit = deficit;
                 self.say(Happening::FallingBehind { by: deficit, elapsed });
             }
-            let attempt = Attempt { share, won: outcome == AttackOutcome::Succeeded, reverted };
+            let attempt = Attempt {
+                stage: self.stage,
+                share,
+                won: outcome == AttackOutcome::Succeeded,
+                reverted,
+            };
             self.done.attacks.push(attempt);
             let at = self.run_step;
             self.attempts.retain(|(step, _)| *step != at);
@@ -1683,17 +2077,22 @@ impl Session {
     /// One happening, said in the reader's language.
     fn beat_for(&self, what: &Happening, language: Language) -> Beat {
         match what {
-            Happening::MiningStarted { miners, threads, bits } => Beat::event(format!(
-                "{}  ·  {} {}  ·  {} {}  ·  {} {} {}",
-                Msg::EventMiningStarted.text(language),
-                Msg::KnobMiners.text(language),
-                miners,
-                Msg::KnobThreads.text(language),
-                threads,
-                Msg::KnobDifficulty.text(language),
-                bits,
-                Msg::UnitZeroBits.text(language),
-            )),
+            Happening::MiningStarted { miners, threads, bits } => {
+                let mut text = format!(
+                    "{}  ·  {} {}  ·  {} {}",
+                    Msg::EventMiningStarted.text(language),
+                    Msg::KnobMiners.text(language),
+                    miners,
+                    Msg::KnobThreads.text(language),
+                    threads,
+                );
+                // The difficulty goes in where this stage has said what zero bits are. The mining
+                // stage never does, and a unit nobody has explained is a word to guess at.
+                if self.said(Msg::TuneBits) {
+                    text.push_str(&format!("  ·  {}", in_zero_bits(bits, language)));
+                }
+                Beat::event(text)
+            }
             Happening::Block { height, gap, miner, on_the_chain: true } => Beat::outcome(
                 State::Good,
                 format!(
@@ -1709,9 +2108,10 @@ impl Session {
             Happening::FallingBehind { by, elapsed } => Beat::outcome(
                 State::Working,
                 format!(
-                    "{}  ·  {}  ·  {}",
+                    "{}  ·  {}  ·  {} {}",
                     Msg::EventFallingBehind.text(language),
                     blocks(*by, language),
+                    Msg::EventElapsed.text(language),
                     span(elapsed.as_secs_f64(), language),
                 ),
             ),
@@ -1802,7 +2202,13 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
-                Tell(topic) => beats.push(Beat::say(self.tell(index, *topic, language))),
+                Tell(topic) => {
+                    // A Tell with nothing to read says nothing, rather than a blank beat.
+                    let told = self.tell(index, *topic, language);
+                    if !told.is_empty() {
+                        beats.push(Beat::say(told));
+                    }
+                }
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1825,9 +2231,10 @@ impl KqSession for Session {
     }
 
     fn knobs(&self) -> &[Knob] {
+        let shown = self.knob_count();
         match self.stage {
-            STAGE_TUNE => &self.tune_knobs,
-            STAGE_ATTACK => &self.break_knobs,
+            STAGE_TUNE => &self.tune_knobs[..shown.min(self.tune_knobs.len())],
+            STAGE_ATTACK => &self.break_knobs[..shown.min(self.break_knobs.len())],
             _ => &[],
         }
     }
@@ -1864,8 +2271,10 @@ impl KqSession for Session {
                 self.rerun()
             }
             Action::Reset => {
-                self.forget_results();
+                // Stop, then forget, as running it again does: stopping writes the run's last
+                // word back, so the other way round kept the run `r` was pressed to throw away.
                 self.restart();
+                self.forget_results();
                 Reaction::Handled
             }
             Action::PauseOrResume => {
@@ -1943,8 +2352,9 @@ impl KqSession for Session {
                 self.rates.remove(0);
             }
             self.rates.push(snapshot.total_hashrate);
-            if snapshot.total_hashrate > self.done.fastest {
-                self.done.fastest = snapshot.total_hashrate;
+            // The live run keeps its own entry in the record up to date.
+            if let Some(run) = self.live_record() {
+                run.read(&snapshot);
             }
             self.mining_snapshot = Some(snapshot);
         }
@@ -1975,7 +2385,8 @@ impl KqSession for Session {
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let title = match self.stage {
-            STAGE_WHY | STAGE_PUZZLE => Msg::PuzzleTitle,
+            STAGE_WHY => Msg::WhyTitle,
+            STAGE_PUZZLE => Msg::PuzzleTitle,
             STAGE_MINE => Msg::RunTitle,
             STAGE_TUNE => Msg::TuneTitle,
             STAGE_ATTACK => Msg::BreakTitle,
@@ -1986,10 +2397,13 @@ impl KqSession for Session {
         frame.render_widget(block, area);
 
         match self.stage {
-            STAGE_WHY | STAGE_PUZZLE => self.brief_panel(frame, inner, theme, language),
+            STAGE_WHY => self.why_panel(frame, inner, theme, language),
+            STAGE_PUZZLE => self.puzzle_panel(frame, inner, theme, language),
             STAGE_MINE => {
                 // A taller terminal gets the hash rate over time; 80x24 does not have the room.
-                if inner.height >= CURVE_NEEDS_ROWS && self.rates.len() > 1 {
+                // It is labelled with the hash rate, so it comes with the rate's own row.
+                let curve = self.rates.len() > 1 && self.reached_run() && self.said(Msg::MineRate);
+                if inner.height >= CURVE_NEEDS_ROWS && curve {
                     let [top, curve] =
                         Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(inner);
                     self.run_panel(frame, top, theme, language);
@@ -2036,6 +2450,63 @@ impl KqSession for Session {
     }
 }
 
+/// Which side of half a share of the hash power is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Below,
+    Half,
+    Above,
+}
+
+/// Which side of half `share` is on. A knob stepped in hundredths lands a hair off 0.5, so
+/// "exactly half" is within a millionth.
+fn side(share: f64) -> Side {
+    if (share - 0.5).abs() < 1e-6 {
+        Side::Half
+    } else if share < 0.5 {
+        Side::Below
+    } else {
+        Side::Above
+    }
+}
+
+/// Attacker and honest threads for a share of the hash power, from at least `budget` threads.
+///
+/// Rounding the share onto the machine's own threads was a lie on exactly the machines this
+/// quest is written for. Four threads cannot hold 51%: it rounded to two and two, and the "51%
+/// attack" was a tie. Two threads made every share 50%. Three made 30% into 33%.
+///
+/// So the split takes as many threads as it needs — the fewest, from the budget up — to come
+/// within a point of the share and stay on the same side of half. The operating system shares the
+/// cores out between them, and each side's hash rate lands on its share of the threads, which is
+/// what the engine's own tests measure.
+fn attack_split(share: f64, budget: usize) -> (usize, usize) {
+    let share = if share.is_finite() { share.clamp(0.0, 1.0) } else { 0.5 };
+    let split = |total: usize| {
+        let attacker = ((total as f64 * share).round() as usize).clamp(1, total - 1);
+        (attacker, total - attacker)
+    };
+    let smallest = budget.max(2);
+    let mut best = split(smallest);
+    let mut best_miss = f64::INFINITY;
+    for total in smallest..=MAX_ATTACK_THREADS.max(smallest) {
+        let (attacker, honest) = split(total);
+        let got = attacker as f64 / total as f64;
+        let miss = (got - share).abs();
+        if side(got) != side(share) {
+            continue;
+        }
+        if miss <= SHARE_TOLERANCE + 1e-9 {
+            return (attacker, honest);
+        }
+        if miss < best_miss {
+            best = (attacker, honest);
+            best_miss = miss;
+        }
+    }
+    best
+}
+
 /// How many cells the labels of a column of knobs need, never more than half the panel.
 fn label_column(labels: &[Msg], width: usize, language: Language) -> usize {
     labels
@@ -2062,8 +2533,9 @@ fn knob_line(
     theme: Theme,
 ) -> Vec<Line<'static>> {
     let marker = if chosen { State::Chosen.mark() } else { " " };
+    // Label first, value after: the unit is a word, and it goes before the number it counts.
     let value = match unit {
-        Some(unit) if knob.draft().is_none() => format!("{} {unit}", knob.display()),
+        Some(unit) if knob.draft().is_none() => format!("{unit} {}", knob.display()),
         _ => knob.display(),
     };
     let style = if chosen { theme.heading() } else { theme.muted() };
@@ -2161,14 +2633,18 @@ fn branch(text: &str) -> (&str, &str) {
     text.split_at(after)
 }
 
-/// A count of blocks, written so that one of them is not "1 blocks".
+/// A count of blocks, label first: `blocks 3`, which reads the same for one block as for ten and
+/// in a language with no plurals at all. "1 block" beside "3 blocks" asked every language to agree
+/// a plural, which Korean does not do.
 fn blocks(count: u64, language: Language) -> String {
-    plural(count, Msg::UnitBlock, Msg::UnitBlocks, language)
+    format!("{} {count}", Msg::UnitBlocks.text(language))
 }
 
-/// A count with the right one of two words after it.
-fn plural(count: u64, one: Msg, many: Msg, language: Language) -> String {
-    format!("{count} {}", if count == 1 { one } else { many }.text(language))
+/// A practice difficulty, label first for the same reason: `zero bits 25`, `0비트 수 25`. The
+/// Korean was "25 개의 0비트", a number agreeing a counter with its noun, which is the order the
+/// phrase table cannot give one language without giving it to all of them.
+fn in_zero_bits(bits: impl std::fmt::Display, language: Language) -> String {
+    format!("{} {bits}", Msg::UnitZeroBits.text(language))
 }
 
 /// A count of hashes, with its unit.
@@ -2214,6 +2690,32 @@ mod tests {
             total_memory_bytes: 0,
             available_memory_bytes: 0,
         })
+    }
+
+    /// Shows this stage's conversation up to `message`, without running anything.
+    fn reveal_to(session: &mut Session, message: Msg) {
+        session.revealed = session
+            .script()
+            .iter()
+            .position(|step| matches!(step, Say(said) | Ask(said) if *said == message))
+            .expect("the stage says it");
+    }
+
+    /// Shows the whole of this stage's conversation, without running anything, so the panel
+    /// draws everything it ever will.
+    fn reveal_all(session: &mut Session) {
+        session.revealed = session.script().len() - 1;
+    }
+
+    /// A mining run as the record keeps it.
+    fn mined(stage: usize, blocks: u64, fastest: f64, bits: u32, miners: u64) -> MinedRun {
+        let split = SplitRow { index: 0, threads: 2, requested: 0.6, effective: 2.0 / 3.0 };
+        MinedRun { id: u64::MAX, stage, bits, miners, blocks, fastest, split: Some(split) }
+    }
+
+    /// An attack as the record keeps it.
+    fn attempt(share: f64, won: bool, reverted: u64) -> Attempt {
+        Attempt { stage: STAGE_ATTACK, share, won, reverted }
     }
 
     /// An attack snapshot with nothing in it, for tests about the two fields that pick a sentence.
@@ -2262,7 +2764,17 @@ mod tests {
 
     /// The panel's own columns at `total`, each row right-trimmed, borders and padding removed.
     fn panel_rows(session: &Session, total: u16, language: Language) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(total, MIN_HEIGHT)).expect("backend");
+        panel_rows_at(session, total, MIN_HEIGHT, language)
+    }
+
+    /// The same, on a terminal `height` rows tall.
+    fn panel_rows_at(
+        session: &Session,
+        total: u16,
+        height: u16,
+        language: Language,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(total, height)).expect("backend");
         let (talk, run) = split(total);
         terminal
             .draw(|frame| {
@@ -2323,38 +2835,45 @@ mod tests {
         for total in [MIN_WIDTH, 100] {
             for language in Language::ALL {
                 for stage in 0..SCRIPTS.len() {
-                    let mut session = session();
-                    session.go_to(stage);
-                    if stage == STAGE_MINE || stage == STAGE_TUNE {
-                        session.start_run();
-                        session.tick();
-                    }
-                    if stage == STAGE_ATTACK {
-                        let mut ended = blank_attack();
-                        ended.outcome = Some(AttackOutcome::GaveUp);
-                        session.attack_snapshot = Some(ended);
-                    }
-                    let rows = panel_rows(&session, total, *language);
-                    let whole: Vec<String> = panel_rows(&session, ROOMY, *language)
-                        .iter()
-                        .flat_map(|row| {
-                            row.split_whitespace().map(str::to_string).collect::<Vec<_>>()
-                        })
-                        .collect();
-                    session.close();
-                    for row in &rows {
-                        assert!(
-                            nmtk_kq::text::width(row) <= panel_width(total),
-                            "stage {stage} at {total}: {row:?} is wider than the panel"
-                        );
-                        if nmtk_kq::text::width(row) < panel_width(total) {
-                            continue;
+                    // The panel as the stage opens and as it stands once everything has been
+                    // said: its words arrive with the conversation, so both have to fit.
+                    for whole_stage in [false, true] {
+                        let mut session = session_with_a_record();
+                        session.go_to(stage);
+                        if stage == STAGE_MINE || stage == STAGE_TUNE {
+                            session.start_run();
+                            session.tick();
                         }
-                        let Some(tail) = row.split_whitespace().last() else { continue };
-                        assert!(
-                            tail.ends_with('…') || whole.iter().any(|word| word == tail),
-                            "stage {stage} at {total}: {row:?} ends in the middle of {tail:?}"
-                        );
+                        if stage == STAGE_ATTACK {
+                            let mut ended = blank_attack();
+                            ended.outcome = Some(AttackOutcome::GaveUp);
+                            session.attack_snapshot = Some(ended);
+                        }
+                        if whole_stage {
+                            reveal_all(&mut session);
+                        }
+                        let rows = panel_rows(&session, total, *language);
+                        let whole: Vec<String> = panel_rows(&session, ROOMY, *language)
+                            .iter()
+                            .flat_map(|row| {
+                                row.split_whitespace().map(str::to_string).collect::<Vec<_>>()
+                            })
+                            .collect();
+                        session.close();
+                        for row in &rows {
+                            assert!(
+                                nmtk_kq::text::width(row) <= panel_width(total),
+                                "stage {stage} at {total}: {row:?} is wider than the panel"
+                            );
+                            if nmtk_kq::text::width(row) < panel_width(total) {
+                                continue;
+                            }
+                            let Some(tail) = row.split_whitespace().last() else { continue };
+                            assert!(
+                                tail.ends_with('…') || whole.iter().any(|word| word == tail),
+                                "stage {stage} at {total}: {row:?} ends in the middle of {tail:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -2374,10 +2893,11 @@ mod tests {
         running.go_to(STAGE_MINE);
         running.start_run();
         running.tick();
+        reveal_all(&mut running);
         let mining = said(&panel_rows(&running, MIN_WIDTH, Language::ENGLISH));
         running.close();
         assert!(
-            mining.contains("worked out from the protocol, not measured"),
+            mining.contains("worked out from Bitcoin's rules, not measured"),
             "the sentence saying the number was not measured is cut:\n{mining}"
         );
         assert!(
@@ -2388,14 +2908,18 @@ mod tests {
         let mut broken = session();
         broken.go_to(STAGE_ATTACK);
         broken.attack_snapshot = Some(blank_attack());
+        reveal_all(&mut broken);
         let attack = said(&panel_rows(&broken, MIN_WIDTH, Language::ENGLISH));
         broken.close();
         assert!(
-            attack.contains("attacker / everyone else"),
-            "the caption does not say who the second thread count belongs to:\n{attack}"
+            attack.contains("Attacker really holds 30.0%"),
+            "the share the threads really held is not on the screen:\n{attack}"
         );
 
-        let puzzle = said(&panel_rows(&session(), MIN_WIDTH, Language::ENGLISH));
+        let mut puzzled = session();
+        puzzled.go_to(STAGE_PUZZLE);
+        reveal_all(&mut puzzled);
+        let puzzle = said(&panel_rows(&puzzled, MIN_WIDTH, Language::ENGLISH));
         assert!(
             puzzle.contains("with a nonce in it"),
             "the header line of the diagram is cut:\n{puzzle}"
@@ -2410,14 +2934,25 @@ mod tests {
         );
     }
 
+    /// The opening stage talks about strangers agreeing on a list, and its panel used to be the
+    /// puzzle — a nonce, SHA-256, a target — before a word of it had been said. It draws the list.
     #[test]
-    fn the_brief_draws_the_puzzle_and_what_a_block_costs_at_eighty_by_twenty_four() {
-        let text = draw(&session());
-        assert!(text.contains("The puzzle"), "no panel title:\n{text}");
-        assert!(text.contains("SHA-256"), "the hash is not named:\n{text}");
-        // A block at difficulty 1 costs 2^256/(target+1) hashes, and that number — the one the
-        // engine works out from the target itself — is the whole point of the screen.
-        assert!(text.contains("4,295,032,833"), "difficulty 1 is not costed:\n{text}");
+    fn the_opening_stage_draws_the_list_it_talks_about_and_not_the_puzzle() {
+        let mut session = session();
+        let opening = draw(&session);
+        assert!(opening.contains("One list"), "no panel title:\n{opening}");
+        assert!(opening.contains("computer 3"), "the copies of the list are missing:\n{opening}");
+        for word in ["nonce", "SHA-256", "target", "header", "hash", "block"] {
+            assert!(!opening.contains(word), "{word} drawn before it is explained:\n{opening}");
+        }
+        // The copy that lies arrives with the sentence saying any of them can, and the rule with
+        // the sentence that gives it.
+        assert!(!opening.contains("Ann paid Dee"), "a liar before anyone can lie:\n{opening}");
+        walk(&mut session);
+        let told = draw(&session);
+        assert!(told.contains("x computer 3"), "the lying copy is not marked:\n{told}");
+        assert!(told.contains("whoever did the most work"), "the rule is missing:\n{told}");
+        assert!(told.contains("electricity"), "what the work is never arrives:\n{told}");
     }
 
     /// Presses Enter until the stage runs out of steps it can take without waiting.
@@ -2504,8 +3039,8 @@ mod tests {
         assert_eq!(runs.len(), 2, "the attack stage runs twice");
         // A win, then a loss above half. The sentence about the win used to be recomputed from
         // the losing run and printed "it still fell short" under the payment it had erased.
-        session.attempts.push((runs[0], Attempt { share: 0.55, won: true, reverted: 3 }));
-        session.attempts.push((runs[1], Attempt { share: 0.55, won: false, reverted: 0 }));
+        session.attempts.push((runs[0], attempt(0.55, true, 3)));
+        session.attempts.push((runs[1], attempt(0.55, false, 0)));
         session.revealed = ATTACK_STAGE.len() - 1;
         let first = session.tell_attack(runs[0] + 1, Language::ENGLISH);
         let second = session.tell_attack(runs[1] + 1, Language::ENGLISH);
@@ -2517,9 +3052,9 @@ mod tests {
     #[test]
     fn the_recap_counts_the_whole_quest_and_not_the_last_run() {
         let mut session = session();
-        session.done.blocks = 37;
-        session.done.fastest = 83_000_000.0;
-        session.done.attacks.push(Attempt { share: 0.55, won: true, reverted: 3 });
+        session.done.runs.push(mined(STAGE_MINE, 33, 83_000_000.0, 24, 2));
+        session.done.runs.push(mined(STAGE_TUNE, 4, 51_000_000.0, 25, 2));
+        session.done.attacks.push(attempt(0.55, true, 3));
         session.go_to(STAGE_RECAP);
         walk(&mut session);
         let text = conversation(&session);
@@ -2540,7 +3075,7 @@ mod tests {
     #[test]
     fn an_attack_above_half_that_ran_out_of_time_is_not_called_a_win() {
         let mut session = session();
-        session.done.attacks.push(Attempt { share: 0.55, won: false, reverted: 0 });
+        session.done.attacks.push(attempt(0.55, false, 0));
         session.go_to(STAGE_RECAP);
         walk(&mut session);
         let text = conversation(&session);
@@ -2618,6 +3153,7 @@ mod tests {
     fn the_puzzle_panel_costs_a_block_at_eighty_by_twenty_four() {
         let mut session = session();
         session.go_to(STAGE_PUZZLE);
+        walk(&mut session);
         let text = draw(&session);
         assert!(text.contains("The puzzle"), "no panel title:\n{text}");
         assert!(text.contains("SHA-256"), "the hash is not named:\n{text}");
@@ -2630,6 +3166,9 @@ mod tests {
     fn tune_shows_the_share_that_was_asked_for_beside_the_share_that_was_got() {
         let mut session = session();
         session.go_to(STAGE_TUNE);
+        // The table of miners and threads comes with the sentence saying what those are.
+        assert!(!draw(&session).contains("asked"), "miners and threads before they are said");
+        reveal_to(&mut session, Msg::TuneWords);
         let text = draw(&session);
         assert!(text.contains("asked") && text.contains("got"), "no split table:\n{text}");
         // Three threads cannot be split 60/40, so the two numbers have to differ on screen.
@@ -2639,21 +3178,31 @@ mod tests {
     }
 
     #[test]
-    fn the_attack_stage_says_how_the_threads_are_split_before_anything_starts() {
+    fn the_attack_stage_says_the_share_the_attacker_will_really_hold_before_anything_starts() {
         let mut session = session();
         session.go_to(STAGE_ATTACK);
-        // Three threads, 30% of them: one for the attacker and two for everybody else.
-        assert_eq!(session.attack_threads(), (1, 2));
+        // Three threads cannot hold 30%; ten can, three for the attacker and seven for everybody
+        // else.
+        assert_eq!(session.attack_threads(), (3, 7));
         let text = draw(&session);
         assert!(text.contains("Attacker's share"), "the knob is missing:\n{text}");
-        assert!(text.contains("30.0%"), "the share is missing:\n{text}");
-        assert!(text.contains("1 / 2"), "the thread split is missing:\n{text}");
+        assert!(text.contains("Attacker really holds  30.0%"), "the share is missing:\n{text}");
+        // 51% asked is 13 threads of 25, which is 52%, and the screen says so.
+        session.chosen = KNOB_ATTACKER;
+        for c in "51".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert_eq!(session.attack_threads(), (13, 12));
+        let text = draw(&session);
+        assert!(text.contains("Attacker really holds  52.0%"), "the share is missing:\n{text}");
     }
 
     #[test]
     fn the_recap_admits_what_has_not_been_run_instead_of_inventing_it() {
         let mut session = session();
         session.go_to(STAGE_RECAP);
+        walk(&mut session);
         let text = draw(&session);
         assert!(text.contains("What just happened"), "no panel title:\n{text}");
         assert!(text.contains("not run yet"), "an unrun stage was filled in:\n{text}");
@@ -2714,6 +3263,7 @@ mod tests {
     fn changing_the_miner_count_changes_how_many_shares_there_are_to_set() {
         let mut session = session();
         session.go_to(STAGE_TUNE);
+        reveal_to(&mut session, Msg::TuneWords);
         assert_eq!(session.knobs().len(), KNOB_SHARES_FROM + 2);
         session.chosen = KNOB_MINERS;
         session.on(Action::Nudge(1));
@@ -2739,6 +3289,7 @@ mod tests {
     fn asking_for_fewer_threads_than_miners_is_refused_in_words() {
         let mut session = session();
         session.go_to(STAGE_TUNE);
+        reveal_to(&mut session, Msg::TuneWords);
         session.chosen = KNOB_THREADS;
         for c in "1".chars() {
             session.on(Action::Type(c));
@@ -2865,7 +3416,7 @@ mod tests {
             (0.51, true, Msg::AttackWon),
             (0.51, false, Msg::AttackRanOut),
         ] {
-            session.attempts = vec![(0, Attempt { share, won, reverted: 0 })];
+            session.attempts = vec![(0, attempt(share, won, 0))];
             assert_eq!(
                 session.tell(1, Topic::Attack, english),
                 expected.text(english),
@@ -2892,28 +3443,353 @@ mod tests {
         run_until(&mut session, |session| {
             session.mining_snapshot.as_ref().is_some_and(|run| run.blocks_in_chain >= 1)
         });
+
+        session.go_to(STAGE_ATTACK);
+        // Walking on stopped the run, and its last word is what the record holds. Read before
+        // that, a block landing in between made the recap look wrong when it was right.
         let mined = format::count(
             session.mining_snapshot.as_ref().expect("a run to recap").blocks_in_chain,
         );
-
-        session.go_to(STAGE_ATTACK);
         walk(&mut session);
         run_until(&mut session, |session| {
             session.attack_snapshot.as_ref().is_some_and(|run| run.outcome.is_some())
         });
 
         session.go_to(STAGE_RECAP);
+        walk(&mut session);
         let text = draw(&session);
         session.close();
         // Six of the seven rows have nothing else to say when the results are gone, so this one
         // line is the whole defect.
         assert!(!text.contains("not run yet"), "the recap forgot the reader's own run:\n{text}");
-        assert!(text.contains("16 zero bits"), "the difficulty the reader set is gone:\n{text}");
+        assert!(text.contains("zero bits 16"), "the difficulty the reader set is gone:\n{text}");
         let counted = Msg::RecapBlocks.text(Language::ENGLISH);
         assert!(
             text.lines().any(|line| line.contains(counted) && line.contains(&mined)),
             "the recap counts blocks the reader did not mine:\n{text}"
         );
+    }
+
+    /// How many sentences a beat holds: a full stop, question or exclamation mark that ends the
+    /// text or is followed by a space. "4.3 billion" and "MH/s" are not sentence ends.
+    fn sentences(text: &str) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .iter()
+            .enumerate()
+            .filter(|(at, c)| {
+                matches!(c, '.' | '?' | '!')
+                    && chars.get(at + 1).is_none_or(|next| next.is_whitespace())
+            })
+            .count()
+            .max(1)
+    }
+
+    /// A session whose record holds a bit of everything, so every Tell has something to say.
+    fn session_with_a_record() -> Session {
+        let mut session = session();
+        session.done.runs.push(mined(STAGE_MINE, 1_000_000, 100_000_000.0, 24, 2));
+        session.done.runs.push(mined(STAGE_TUNE, 234_567, 123_456_789.0, 28, 4));
+        for (share, won) in [(0.30, false), (0.51, true), (0.5, false), (0.45, true), (0.99, false)]
+        {
+            session.done.attacks.push(attempt(share, won, 12));
+        }
+        session
+    }
+
+    #[test]
+    fn every_beat_the_quest_can_say_is_two_sentences_at_most_and_short() {
+        for language in Language::ALL {
+            let mut beats: Vec<String> = Vec::new();
+            for script in SCRIPTS {
+                for step in script {
+                    if let Say(message) | Ask(message) = step {
+                        beats.push(message.text(*language).to_string());
+                    }
+                }
+            }
+            // What the Tells say, read off a record that has something for every one of them.
+            let record = session_with_a_record();
+            for topic in [Topic::Mined, Topic::Tuned, Topic::AttacksRan, Topic::AttacksMeant] {
+                beats.push(record.tell(0, topic, *language));
+            }
+            for message in [
+                Msg::TuneBitsUnchanged,
+                Msg::TuneBitsUp,
+                Msg::TuneBitsDown,
+                Msg::AttackLost,
+                Msg::AttackLuckyWin,
+                Msg::AttackEvenWon,
+                Msg::AttackEvenLost,
+                Msg::AttackWon,
+                Msg::AttackRanOut,
+                Msg::AttackNotYetRun,
+                Msg::RecapMinedNone,
+                Msg::RecapTunedNo,
+                Msg::RecapAttackNone,
+                Msg::RecapAttackAllLost,
+                Msg::RecapAttackWonAboveHalf,
+                Msg::RecapAttackWonBelowHalf,
+                Msg::RecapAttackLostAboveHalf,
+                Msg::RecapAttackEven,
+            ] {
+                beats.push(message.text(*language).to_string());
+            }
+            for beat in beats {
+                assert!(!beat.is_empty(), "a blank beat in {language}");
+                assert!(
+                    beat.chars().count() <= 160,
+                    "{language}: {} characters is a paragraph: {beat:?}",
+                    beat.chars().count()
+                );
+                assert!(
+                    sentences(&beat) <= 2,
+                    "{language}: {} sentences is two beats or more: {beat:?}",
+                    sentences(&beat)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_attack_split_stays_on_the_side_of_half_it_was_asked_for() {
+        // Four threads rounded 51% to two and two: the "51% attack" was a tie. Two threads made
+        // every share a tie.
+        assert_eq!(attack_split(0.51, 4), (13, 12));
+        let (attacker, honest) = attack_split(0.51, 2);
+        assert!(attacker > honest, "51% on two threads is {attacker} / {honest}");
+        assert_eq!(attack_split(0.30, 3), (3, 7));
+        for budget in 1..=16 {
+            for hundredths in 1..=99 {
+                let share = f64::from(hundredths) / 100.0;
+                let (attacker, honest) = attack_split(share, budget);
+                assert!(attacker >= 1 && honest >= 1, "a side with no threads at {share}");
+                assert!(attacker + honest >= budget.max(2), "fewer threads than the budget");
+                assert!(attacker + honest <= MAX_ATTACK_THREADS);
+                let got = attacker as f64 / (attacker + honest) as f64;
+                assert_eq!(side(got), side(share), "{share} on {budget} threads became {got}");
+                assert!(
+                    (got - share).abs() <= SHARE_TOLERANCE + 1e-9,
+                    "{share} on {budget} threads became {got}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_attack_started_line_gives_the_share_the_threads_really_hold() {
+        let mut session = session();
+        session.go_to(STAGE_ATTACK);
+        session.chosen = KNOB_ATTACKER;
+        for c in "51".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        let at = ATTACK_STAGE.iter().position(|step| matches!(step, Run(_))).expect("a run");
+        session.revealed = at - 1;
+        session.advance();
+        let said = conversation(&session);
+        let snapshot = session.attack_snapshot.clone().expect("the attack started");
+        session.close();
+        let share = format::percent(snapshot.attacker_share);
+        assert!(snapshot.attacker_share > 0.5, "51% was not above half: {share}");
+        assert!(said.contains(&share), "the line does not give the share the run used: {said}");
+    }
+
+    #[test]
+    fn a_tie_is_not_described_as_either_side_of_half() {
+        let mut session = session();
+        session.attempts = vec![(0, attempt(0.5, true, 2))];
+        assert_eq!(
+            session.tell_attack(1, Language::ENGLISH),
+            Msg::AttackEvenWon.text(Language::ENGLISH)
+        );
+        session.attempts = vec![(0, attempt(0.5, false, 0))];
+        assert_eq!(
+            session.tell_attack(1, Language::ENGLISH),
+            Msg::AttackEvenLost.text(Language::ENGLISH)
+        );
+        session.done.attacks = vec![attempt(0.5, false, 0)];
+        assert_eq!(
+            session.tell_attacks_meant(Language::ENGLISH),
+            Msg::RecapAttackEven.text(Language::ENGLISH)
+        );
+    }
+
+    #[test]
+    fn the_recap_says_the_numbers_were_changed_when_the_runs_were_run_with_other_numbers() {
+        // The check used to be against the numbers on entering the recap, which are the numbers
+        // the recap was entered with: it said "you left them where they started" every time.
+        let mut session = session();
+        session.done.runs.push(mined(STAGE_MINE, 2, 1_000.0, 24, 2));
+        session.done.runs.push(mined(STAGE_TUNE, 3, 1_000.0, 26, 3));
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let text = conversation(&session);
+        assert!(text.contains(Msg::RecapTunedYes.text(Language::ENGLISH)), "{text}");
+        assert!(text.contains("24 → 26") && text.contains("2 → 3"), "{text}");
+
+        session.done.runs[1] = mined(STAGE_TUNE, 3, 1_000.0, 24, 2);
+        assert!(conversation(&session).contains(Msg::RecapTunedNo.text(Language::ENGLISH)));
+    }
+
+    #[test]
+    fn a_recap_with_nothing_to_tell_draws_no_blank_beat() {
+        let mut session = session();
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let beats = session.transcript(Language::ENGLISH);
+        assert!(beats.iter().all(|beat| !beat.text.trim().is_empty()), "{beats:?}");
+    }
+
+    #[test]
+    fn the_sentence_after_a_run_is_about_that_run_even_after_the_knob_moves_back() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        let entry = session.bits_on_entry;
+        let run = TUNE_STAGE.iter().position(|step| matches!(step, Run(_))).expect("a run");
+        let tell =
+            TUNE_STAGE.iter().position(|step| matches!(step, Tell(_))).expect("a sentence after");
+        // The run went at one bit more; the knob has since been put back where it was.
+        session.run_bits.push((run, entry + 1));
+        assert_eq!(session.zero_bits(), entry);
+        assert_eq!(
+            session.tell(tell, Topic::Difficulty, Language::ENGLISH),
+            Msg::TuneBitsUp.text(Language::ENGLISH)
+        );
+    }
+
+    #[test]
+    fn a_typed_number_is_answered_even_after_the_stage_has_said_two_dozen_blocks() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        for height in 0..EVENT_CAP as u64 + 5 {
+            session.say(Happening::Block {
+                height,
+                gap: Duration::from_secs(1),
+                miner: 0,
+                on_the_chain: true,
+            });
+        }
+        let blocks = session.log.iter().filter(|l| matches!(l.what, Happening::Block { .. }));
+        assert_eq!(blocks.count(), EVENT_CAP, "the flood was not capped");
+        for c in "99".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert!(
+            session.log.iter().any(|l| matches!(l.what, Happening::PulledIn { .. })),
+            "where the number landed went unsaid"
+        );
+    }
+
+    #[test]
+    fn a_knob_turned_before_this_visits_first_run_does_not_offer_to_run_it_again() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        // A run on an earlier visit leaves the values it started with behind.
+        session.running_with = Some(Settled::of(session.knobs()));
+        session.go_to(STAGE_MINE);
+        session.go_to(STAGE_TUNE);
+        session.chosen = KNOB_DIFFICULTY;
+        session.on(Action::Nudge(-1));
+        assert_eq!(
+            session.go_name(Language::ENGLISH),
+            None,
+            "the key bar offered a rerun where Enter only carries the conversation on"
+        );
+    }
+
+    #[test]
+    fn the_recap_recalls_the_newest_attacks_and_counts_the_rest() {
+        let session = session_with_a_record();
+        let told = session.tell_attacks_ran(Language::ENGLISH);
+        assert!(told.contains("earlier attacks 3"), "{told}");
+        assert!(told.contains("99.0%") && told.contains("45.0%"), "{told}");
+        assert!(!told.contains("30.0%"), "an old attack was named one by one: {told}");
+    }
+
+    #[test]
+    fn a_stopped_run_puts_every_block_it_found_into_the_record() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        session.chosen = KNOB_DIFFICULTY;
+        for c in "16".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        session.start_run();
+        run_until(&mut session, |session| session.mined_blocks() >= 3);
+        session.stop_runs();
+        let last = session.mining_snapshot.as_ref().expect("the run's last word").blocks_in_chain;
+        assert!(last >= 3);
+        assert_eq!(session.mined_blocks(), last, "the record and the run disagree");
+        session.close();
+    }
+
+    #[test]
+    fn a_block_height_is_drawn_whole_however_many_digits_it_has() {
+        let mut session = session();
+        session.go_to(STAGE_MINE);
+        session.start_run();
+        session.stop_runs();
+        let mut snapshot = session.mining_snapshot.clone().expect("a snapshot");
+        snapshot.recent_blocks = vec![BlockSummary {
+            height: 1_234_567,
+            hash: Hash256::ZERO,
+            miner: nmtk_pow::MinerId(0),
+            nonce: 0,
+            extra_nonce: 0,
+            found_after: Duration::from_secs(1),
+            since_previous: Duration::from_secs(1),
+            leading_zero_bits: 30,
+            in_best_chain: true,
+        }];
+        session.mining_snapshot = Some(snapshot);
+        reveal_all(&mut session);
+        let text = draw_at(&session, MIN_WIDTH, 40);
+        assert!(text.contains("1,234,567"), "the height was cut:\n{text}");
+    }
+
+    /// The ending is the one line of the attack panel that matters most, and at 80x24 in English
+    /// it fell off the bottom: a 26-cell label pushed every value under its label, and the rows
+    /// ran out before the ending was reached.
+    #[test]
+    fn how_the_attack_ended_is_on_the_smallest_screen_in_every_language() {
+        for outcome in [AttackOutcome::Succeeded, AttackOutcome::GaveUp] {
+            for language in Language::ALL {
+                let mut session = session();
+                session.go_to(STAGE_ATTACK);
+                let mut ended = blank_attack();
+                ended.outcome = Some(outcome);
+                ended.phase = AttackPhase::Finished;
+                ended.victim_released = true;
+                ended.attack_duration = Some(Duration::from_secs(95));
+                session.attack_snapshot = Some(ended);
+                reveal_all(&mut session);
+                let rows = panel_rows(&session, MIN_WIDTH, *language);
+                let text = said(&rows);
+                let ending = phrases::outcome(outcome).text(*language);
+                assert!(text.contains(ending), "{language}: the ending is not on screen:\n{text}");
+                // Spaces taken out: the capture gives back the cell after a wide glyph as one.
+                let held = Msg::LabelShareHeld.text(*language).replace(' ', "");
+                assert!(
+                    text.replace(' ', "").contains(&held),
+                    "{language}: the share the attacker held is not on screen:\n{text}"
+                );
+            }
+        }
+    }
+
+    /// "no" and "yes" start their sentences in the same column, in every language. The Korean
+    /// pair was two cells apart, because the padding was written for English words.
+    #[test]
+    fn both_answers_in_the_puzzle_start_their_sentences_in_one_column() {
+        for language in Language::ALL {
+            let (no, _) = branch(Msg::PuzzleNo.text(*language));
+            let (yes, _) = branch(Msg::PuzzleYes.text(*language));
+            assert_eq!(cells(no), cells(yes), "{language}: {no:?} and {yes:?}");
+        }
     }
 
     /// `r` is the one thing that forgets results, and only the ones made where it was pressed.
@@ -2933,5 +3809,331 @@ mod tests {
         session.on(Action::Reset);
         assert!(session.mining_snapshot.is_none(), "`r` kept the run it was pressed on");
         session.close();
+    }
+
+    /// The lowest practice difficulty the knob allows, so a real run finds blocks in milliseconds.
+    fn easiest_difficulty(session: &mut Session) {
+        session.go_to(STAGE_TUNE);
+        session.chosen = KNOB_DIFFICULTY;
+        for c in "16".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert_eq!(session.zero_bits(), 16);
+    }
+
+    /// `r` pressed while a run is going. Stopping a run writes its last word back, and `r` used
+    /// to forget first and stop second: the panel went on showing the run it had been pressed to
+    /// throw away, under a status line saying nothing had started, and the recap counted it.
+    #[test]
+    fn r_pressed_while_mining_takes_the_run_off_the_panel_and_out_of_the_record() {
+        let mut session = session();
+        easiest_difficulty(&mut session);
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        run_until(&mut session, |session| session.mined_blocks() >= 1);
+        assert!(session.mining.is_some(), "the run has to be going when r is pressed");
+
+        session.on(Action::Reset);
+        assert!(session.mining.is_none(), "r left the threads running");
+        assert!(session.mining_snapshot.is_none(), "the panel still carries the run");
+        assert_eq!(session.mined_blocks(), 0, "the record still counts the run");
+        assert!(session.done.runs.is_empty(), "{:?}", session.done.runs);
+        // With the whole conversation shown, so nothing is held back by it: no run is left.
+        reveal_all(&mut session);
+        let text = draw_at(&session, MIN_WIDTH, 40);
+        for row in [Msg::LabelBlocksFound, Msg::LabelChainHeight, Msg::HeadingRecentBlocks] {
+            let row = row.text(Language::ENGLISH);
+            assert!(!text.contains(row), "{row} is still on the panel after r:\n{text}");
+        }
+        assert!(text.contains(Msg::StatusIdle.text(Language::ENGLISH)), "{text}");
+
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let recap = conversation(&session);
+        assert!(recap.contains(Msg::RecapMinedNone.text(Language::ENGLISH)), "{recap}");
+        session.close();
+    }
+
+    /// `r` forgets the numbers the stage showing made and keeps every other stage's, the rule the
+    /// ledger quest keeps; Tab keeps all of them. The record used to forget nothing at all, so
+    /// the blocks, the runs and the attacks of a stage the reader had reset were still recapped.
+    #[test]
+    fn r_forgets_only_this_stages_record_and_tab_keeps_every_stages() {
+        let mut session = session();
+        easiest_difficulty(&mut session);
+        session.go_to(STAGE_MINE);
+        walk(&mut session);
+        run_until(&mut session, |session| session.mined_blocks() >= 1);
+        // Tab stops the run and keeps what it made.
+        session.go_to(STAGE_TUNE);
+        let from_mining = session.mined_blocks();
+        assert!(from_mining >= 1);
+        for _ in 0..TUNE_STAGE.len() {
+            if session.mining.is_some() {
+                break;
+            }
+            session.on(Action::Go);
+        }
+        run_until(&mut session, |session| session.mined_blocks() > from_mining);
+        session.go_to(STAGE_ATTACK);
+        let both = session.mined_blocks();
+        // An attack, as the attack stage files it when one ends.
+        session.done.attacks.push(attempt(0.51, true, 3));
+
+        session.go_to(STAGE_RECAP);
+        assert_eq!(session.mined_blocks(), both, "Tab lost blocks on the way to the recap");
+        assert_eq!(session.done.runs.len(), 2);
+        assert_eq!(session.done.attacks.len(), 1);
+        // Nothing was made on the recap, so `r` there forgets nothing.
+        session.on(Action::Reset);
+        assert_eq!(session.mined_blocks(), both);
+        assert_eq!(session.done.attacks.len(), 1);
+
+        session.go_to(STAGE_TUNE);
+        session.on(Action::Reset);
+        assert_eq!(
+            session.mined_blocks(),
+            from_mining,
+            "r on the tuning stage forgot the wrong run"
+        );
+        let stages: Vec<usize> = session.done.runs.iter().map(|run| run.stage).collect();
+        assert_eq!(stages, vec![STAGE_MINE]);
+        assert_eq!(session.done.attacks.len(), 1, "r on the tuning stage forgot the attack");
+        assert!(session.mining_snapshot.is_none(), "the tuning run is still on its panel");
+
+        session.go_to(STAGE_ATTACK);
+        session.on(Action::Reset);
+        assert!(session.done.attacks.is_empty(), "r on the attack stage kept its attack");
+        assert_eq!(session.mined_blocks(), from_mining, "r on the attack stage took the mining");
+
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let recap = conversation(&session);
+        session.close();
+        let blocks = format!("{} {}.", Msg::RecapMinedBlocks.text(Language::ENGLISH), from_mining);
+        assert!(recap.contains(&blocks), "the recap does not count what is left: {recap}");
+        assert!(recap.contains(Msg::RecapTunedNo.text(Language::ENGLISH)), "{recap}");
+        assert!(recap.contains(Msg::RecapAttackNone.text(Language::ENGLISH)), "{recap}");
+    }
+
+    /// The cap on blocks said counts per run. Counted per stage, the tuning stage's first run at
+    /// an easy difficulty said its two dozen blocks within a second, and the second run — the one
+    /// that shows a third miner finding blocks — announced none of its own.
+    #[test]
+    fn the_second_run_on_a_stage_announces_its_blocks_after_the_first_filled_the_cap() {
+        let mut session = session();
+        easiest_difficulty(&mut session);
+        let runs: Vec<usize> = TUNE_STAGE
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| matches!(step, Run(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(runs.len(), 2, "the tuning stage runs twice");
+        session.revealed = runs[0] - 1;
+        session.advance();
+        assert!(session.mining.is_some(), "the first run never started");
+        for height in 0..EVENT_CAP as u64 + 5 {
+            session.say(Happening::Block {
+                height,
+                gap: Duration::from_millis(40),
+                miner: 0,
+                on_the_chain: true,
+            });
+        }
+        let blocks = |session: &Session, from: usize| {
+            let said = |logged: &&Logged| matches!(logged.what, Happening::Block { .. });
+            session.log.iter().filter(|logged| logged.step >= from).filter(said).count()
+        };
+        assert_eq!(blocks(&session, 0), EVENT_CAP, "the first run's flood was not capped");
+
+        session.revealed = runs[1] - 1;
+        session.advance();
+        run_until(&mut session, |session| blocks(session, runs[1]) >= 1);
+        session.close();
+    }
+
+    /// For 51% on a budget of two threads, the split takes 13 against 12, and those used to run
+    /// flat out on every core the machine had. They take turns within the budget now; the share
+    /// they hold is the one the screen and the conversation give.
+    #[test]
+    fn the_attack_takes_the_threads_its_share_needs_and_only_the_machine_it_was_given() {
+        let mut session = session();
+        session.go_to(STAGE_TUNE);
+        reveal_to(&mut session, Msg::TuneWords);
+        session.chosen = KNOB_THREADS;
+        session.on(Action::Type('2'));
+        session.on(Action::Commit);
+        assert_eq!(session.thread_budget(), 2);
+
+        session.go_to(STAGE_ATTACK);
+        session.chosen = KNOB_ATTACKER;
+        for c in "51".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        let at = ATTACK_STAGE.iter().position(|step| matches!(step, Run(_))).expect("a run");
+        session.revealed = at - 1;
+        session.advance();
+        let snapshot = session.attack_snapshot.clone().expect("the attack started");
+        let said = conversation(&session);
+        let text = draw(&session);
+        session.close();
+        assert_eq!((snapshot.attacker.threads, snapshot.honest.threads), (13, 12));
+        assert_eq!(snapshot.threads_at_once, 2, "more threads hashed at once than the budget");
+        assert!((snapshot.attacker_share - 0.52).abs() < 1e-9);
+        assert!(said.contains("attacker's share 52.0%"), "{said}");
+        assert!(text.contains("Attacker really holds  52.0%"), "{text}");
+    }
+
+    /// Label first, value after, in both languages: `zero bits 25`, `0비트 수 25`. The Korean read
+    /// "25 개의 0비트", a number agreeing a counter with its noun, spaced as neither order is.
+    #[test]
+    fn the_difficulty_reads_label_first_in_both_languages_at_eighty_by_twenty_four() {
+        for language in Language::ALL {
+            let unit = Msg::UnitZeroBits.text(*language);
+            let mut tuning = session();
+            tuning.go_to(STAGE_TUNE);
+            let knob = format!("{unit} {}", tuning.zero_bits());
+            let rows = panel_rows(&tuning, MIN_WIDTH, *language);
+            let label = Msg::KnobDifficulty.text(*language);
+            let row = rows.iter().find(|row| row.contains(label)).expect("the difficulty knob");
+            println!("{language}: {row}");
+            assert!(row.contains(&knob), "{language}: {row:?} does not read {knob:?}");
+            assert!(!row.contains("개의"), "{language}: {row:?}");
+
+            let beat = tuning
+                .beat_for(&Happening::MiningStarted { miners: 2, threads: 3, bits: 25 }, *language)
+                .text;
+            assert!(beat.ends_with(&format!("{unit} 25")), "{language}: {beat:?}");
+
+            let mut recap = session();
+            recap.done.runs.push(mined(STAGE_TUNE, 3, 1_000_000.0, 25, 2));
+            recap.go_to(STAGE_RECAP);
+            let text = said(&panel_rows(&recap, MIN_WIDTH, *language));
+            assert!(text.contains(&format!("{unit} 25")), "{language}: {text}");
+        }
+    }
+
+    /// A word a reader has to be given before a panel may use it. English is found word by word
+    /// in any of the forms listed; Korean by its letters, after taking out the longer words that
+    /// hold them — 비트 is not in 비트코인.
+    struct Term {
+        en: &'static [&'static str],
+        ko: &'static str,
+        ko_inside: &'static [&'static str],
+    }
+
+    const TERMS: &[Term] = &[
+        Term { en: &["hash", "hashes", "hashed", "hashing"], ko: "해시", ko_inside: &[] },
+        Term { en: &["bit", "bits"], ko: "비트", ko_inside: &["비트코인"] },
+        Term { en: &["byte", "bytes"], ko: "바이트", ko_inside: &[] },
+        Term { en: &["nonce", "nonces"], ko: "논스", ko_inside: &[] },
+        Term { en: &["node", "nodes"], ko: "노드", ko_inside: &[] },
+        Term { en: &["header", "headers"], ko: "헤더", ko_inside: &[] },
+        Term { en: &["target", "targets"], ko: "목표값", ko_inside: &[] },
+        Term { en: &["sha-256"], ko: "SHA-256", ko_inside: &[] },
+        Term { en: &["block", "blocks"], ko: "블록", ko_inside: &[] },
+        Term { en: &["chain", "chains"], ko: "체인", ko_inside: &[] },
+        Term { en: &["thread", "threads"], ko: "스레드", ko_inside: &[] },
+        Term { en: &["miner", "miners"], ko: "채굴자", ko_inside: &[] },
+        Term { en: &["confirmation", "confirmations"], ko: "확인", ko_inside: &[] },
+    ];
+
+    fn uses(text: &str, term: &Term, language: Language) -> bool {
+        if language == Language::KOREAN {
+            let text = term
+                .ko_inside
+                .iter()
+                .fold(text.to_string(), |text, longer| text.replace(longer, ""));
+            return text.contains(term.ko);
+        }
+        text.split(|c: char| !(c.is_alphanumeric() || c == '-'))
+            .any(|word| term.en.iter().any(|form| word.eq_ignore_ascii_case(form)))
+    }
+
+    /// Everything this stage's conversation has said so far: the quest's own sentences, and not
+    /// the events a run reports, which are not explanations.
+    fn explained(session: &Session, language: Language) -> String {
+        session
+            .transcript(language)
+            .into_iter()
+            .filter(|beat| matches!(beat.voice, Voice::Say | Voice::Ask))
+            .map(|beat| beat.text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The opening stage drew the puzzle — a header with a nonce in it, SHA-256, a target —
+    /// beside a conversation about strangers agreeing on a list that had said none of those
+    /// words. Every stage, at every step, in both languages, with and without runs to draw: a
+    /// word on the panel is one the conversation has already said.
+    #[test]
+    fn no_word_reaches_the_panel_before_it_is_explained() {
+        // What a run leaves to draw, made once: a mining run with a block that lost a race, and
+        // an attack in the middle of its race and at its end.
+        let mining = {
+            let mut session = session();
+            session.go_to(STAGE_MINE);
+            session.start_run();
+            session.stop_runs();
+            let mut snapshot = session.mining_snapshot.take().expect("a run to draw");
+            snapshot.stale_blocks = 1;
+            snapshot.recent_blocks = vec![BlockSummary {
+                height: 7,
+                hash: Hash256::ZERO,
+                miner: nmtk_pow::MinerId(1),
+                nonce: 0,
+                extra_nonce: 0,
+                found_after: Duration::from_secs(9),
+                since_previous: Duration::from_secs(2),
+                leading_zero_bits: 26,
+                in_best_chain: false,
+            }];
+            snapshot
+        };
+        let racing = AttackSnapshot {
+            phase: AttackPhase::Racing,
+            lead: -1,
+            max_deficit: 2,
+            victim_released: true,
+            ..blank_attack()
+        };
+        let ended = AttackSnapshot {
+            phase: AttackPhase::Finished,
+            outcome: Some(AttackOutcome::Succeeded),
+            blocks_reverted: 3,
+            attack_duration: Some(Duration::from_secs(40)),
+            ..racing.clone()
+        };
+        for language in Language::ALL {
+            for (stage, script) in SCRIPTS.iter().enumerate() {
+                for revealed in 0..script.len() {
+                    for runs in 0..3 {
+                        let mut session =
+                            if runs == 0 { session() } else { session_with_a_record() };
+                        session.go_to(stage);
+                        session.revealed = revealed;
+                        if runs > 0 {
+                            session.mining_snapshot = Some(mining.clone());
+                            session.mining_stage = Some(stage);
+                            let attack = if runs == 1 { &racing } else { &ended };
+                            session.attack_snapshot = Some(attack.clone());
+                        }
+                        let panel = said(&panel_rows_at(&session, ROOMY, 60, *language));
+                        let talk = explained(&session, *language);
+                        for term in TERMS {
+                            assert!(
+                                !uses(&panel, term, *language) || uses(&talk, term, *language),
+                                "stage {stage}, step {revealed}, {language}: the panel says {:?} \
+                                 before the conversation has.\npanel: {panel}\nsaid: {talk}",
+                                term.en[0]
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

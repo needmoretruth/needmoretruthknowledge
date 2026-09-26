@@ -22,7 +22,8 @@ const TWO_POW_256: f64 = 115_792_089_237_316_195_423_570_985_008_687_907_853_269
 pub enum TargetError {
     /// The compact form sets the sign bit. Bitcoin has no negative targets.
     NegativeTarget,
-    /// The mantissa is zero, so no hash could ever be below the target.
+    /// The target comes out as zero — the mantissa is zero, or a short size shifted all of it
+    /// away — so no real hash could ever be under it.
     ZeroTarget,
     /// The exponent shifts the mantissa past 256 bits.
     Overflow,
@@ -34,7 +35,11 @@ impl fmt::Display for TargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             TargetError::NegativeTarget => "compact target has the sign bit set",
-            TargetError::ZeroTarget => "compact target has a zero mantissa",
+            // Two encodings land here: a mantissa of zero, and a non-zero one a short size shifts
+            // away. Naming only the first called 0x01003456 a zero mantissa, which it is not.
+            TargetError::ZeroTarget => {
+                "compact target unpacks to zero: its mantissa is zero or its size shifts it away"
+            }
             TargetError::Overflow => "compact target does not fit in 256 bits",
             TargetError::TooManyZeroBits => "a target cannot have 256 or more leading zero bits",
         };
@@ -79,13 +84,24 @@ impl Target {
             let shifted = mantissa >> (8 * (3 - size));
             bytes[29..32].copy_from_slice(&shifted.to_be_bytes()[1..4]);
         } else {
-            if size > 32 {
-                return Err(TargetError::Overflow);
-            }
-            // The mantissa's three bytes sit so that the value is `size` bytes long.
-            let start = 32 - size;
+            // The mantissa's three bytes sit so that the value is `size` bytes long. A size of 33
+            // or 34 is still a number that fits, as long as the bytes pushed off the top are
+            // zeroes: `to_compact` writes 0x2100ffff for a target of all ones, and refusing the
+            // encoding this type writes itself made that target impossible to read back. Bitcoin
+            // draws the line in the same place.
             let mantissa_bytes = mantissa.to_be_bytes();
-            bytes[start..start + 3].copy_from_slice(&mantissa_bytes[1..4]);
+            for (offset, byte) in mantissa_bytes[1..4].iter().enumerate() {
+                match (32 + offset).checked_sub(size) {
+                    Some(index) => bytes[index] = *byte,
+                    None if *byte != 0 => return Err(TargetError::Overflow),
+                    None => {}
+                }
+            }
+        }
+        // A short size shifts a small mantissa away altogether, and what is left is zero: a
+        // target only a hash of exactly nothing could meet, which is the same as a zero mantissa.
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(TargetError::ZeroTarget);
         }
         Ok(Target(bytes))
     }
@@ -259,7 +275,48 @@ mod tests {
     fn the_sign_bit_and_a_zero_mantissa_are_refused() {
         assert_eq!(Target::from_compact(0x1d80_ffff), Err(TargetError::NegativeTarget));
         assert_eq!(Target::from_compact(0x1d00_0000), Err(TargetError::ZeroTarget));
-        assert_eq!(Target::from_compact(0x2100_ffff), Err(TargetError::Overflow));
+        assert_eq!(Target::from_compact(0x2101_0000), Err(TargetError::Overflow));
+        assert_eq!(Target::from_compact(0x2300_0001), Err(TargetError::Overflow));
+    }
+
+    #[test]
+    fn a_mantissa_shifted_away_by_a_short_size_is_a_zero_target_not_a_target_of_zero() {
+        // One byte long, so the mantissa 0x003456 keeps only its top byte, which is zero. It used
+        // to decode to an all-zero target that every block then failed against, forever.
+        assert_eq!(Target::from_compact(0x0100_3456), Err(TargetError::ZeroTarget));
+        assert_eq!(Target::from_compact(0x0000_0001), Err(TargetError::ZeroTarget));
+    }
+
+    #[test]
+    fn the_zero_target_message_is_true_of_a_mantissa_that_was_shifted_away() {
+        // 0x01003456 carries the mantissa 0x003456, which is not zero: the size throws it away.
+        // The message used to say "zero mantissa" about it.
+        let shifted = Target::from_compact(0x0100_3456).expect_err("nothing is left");
+        let said = shifted.to_string();
+        assert!(!said.contains("has a zero mantissa"), "{said}");
+        assert!(said.contains("unpacks to zero"), "{said}");
+        assert!(said.contains("shifts it away"), "the shifted-away case is not named: {said}");
+        // And it still covers the plain zero mantissa, which is the same error.
+        let zero = Target::from_compact(0x1d00_0000).expect_err("zero");
+        assert_eq!(zero.to_string(), said);
+        assert!(said.contains("mantissa is zero"), "{said}");
+    }
+
+    #[test]
+    fn the_encoding_of_the_largest_target_can_be_read_back() {
+        // All ones packs into 0x2100ffff: one byte past 32, because the mantissa's top bit would
+        // otherwise read as a sign. That is how this type writes it, so it has to read it too.
+        let mut all_ones = [0xffu8; 32];
+        let bits = Target(all_ones).to_compact();
+        assert_eq!(bits, 0x2100_ffff);
+        let read = Target::from_compact(bits).expect("an encoding this type wrote itself");
+        all_ones[2..].fill(0);
+        assert_eq!(read, Target(all_ones));
+        assert_eq!(read.to_compact(), bits);
+        // Zero leading bits asks for exactly that target, and is a difficulty a header can carry.
+        assert_eq!(practice_bits(0), Ok(0x2100_ffff));
+        // Bitcoin's own rule: a size of 34 still fits when the two bytes pushed off are zeroes.
+        assert!(Target::from_compact(0x2200_00ff).is_ok());
     }
 
     #[test]

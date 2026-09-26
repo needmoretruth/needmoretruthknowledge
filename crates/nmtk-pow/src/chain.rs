@@ -299,24 +299,34 @@ impl Chain {
 
         if prev == self.tip_hash {
             let height = self.height();
-            self.check(&block, prev, height, None)?;
+            self.check(&block, prev, height, height, &[])?;
             self.push(block);
             return Ok(Acceptance::Extended { height: self.height() });
         }
 
-        if let Some(index) = self
-            .branches
-            .iter()
-            .position(|branch| branch.blocks.last().map(|last| last.hash()) == Some(prev))
-        {
-            let prev_height = self.branches[index].tip_height();
-            self.check(&block, prev, prev_height, Some(index))?;
-            self.branches[index].blocks.push(block);
+        if let Some((index, at)) = self.find_in_branches(&prev) {
+            let branch = &self.branches[index];
+            let fork_height = branch.fork_height;
+            let prev_height = fork_height + at as u64 + 1;
+            self.check(&block, prev, prev_height, fork_height, &branch.blocks[..=at])?;
+            if at + 1 == branch.blocks.len() {
+                self.branches[index].blocks.push(block);
+                return Ok(self.settle_branch(index));
+            }
+            // A block on a block inside a branch, not at its end. That is a fork of a fork, and
+            // it used to be called an orphan: a node that had the parent right there turned the
+            // block away as if it had never heard of it. It is a branch of its own, carrying the
+            // part of the old one it builds on.
+            let mut blocks = self.branches[index].blocks[..=at].to_vec();
+            blocks.push(block);
+            self.make_room_for_a_branch();
+            self.branches.push(Branch { fork_height, blocks });
+            let index = self.branches.len() - 1;
             return Ok(self.settle_branch(index));
         }
 
         if let Some(prev_height) = self.height_of(&prev) {
-            self.check(&block, prev, prev_height, None)?;
+            self.check(&block, prev, prev_height, prev_height, &[])?;
             self.make_room_for_a_branch();
             self.branches.push(Branch { fork_height: prev_height, blocks: vec![block] });
             let index = self.branches.len() - 1;
@@ -328,24 +338,39 @@ impl Chain {
 
     /// Checks whether a branch now beats the chain, and swaps them if it does.
     fn settle_branch(&mut self, index: usize) -> Acceptance {
-        let (fork_height, branch_len, branch_work) = {
+        let (fork_height, branch_len, tip_height) = {
             let branch = &self.branches[index];
-            let work_per_block = self.target.work();
-            let work = self.work_up_to(branch.fork_height)
-                + work_per_block.saturating_mul(branch.blocks.len() as u128);
-            (branch.fork_height, branch.blocks.len(), work)
+            (branch.fork_height, branch.blocks.len(), branch.tip_height())
         };
-        if branch_work <= self.total_work() {
-            let tip_height = fork_height + branch_len as u64;
+        // Every block in a chain is mined at the chain's one difficulty, so the branch carrying
+        // more work is the one with more blocks above the fork. Heights are compared rather than
+        // work totals because a block's work is counted in 128 bits and a hard enough target does
+        // not fit: every total then saturates to the same largest number, and no branch could
+        // ever overtake anything.
+        if tip_height <= self.height() {
             return Acceptance::Fork {
                 fork_height,
                 branch_length: branch_len,
-                behind: self.height().saturating_sub(tip_height),
+                behind: self.height() - tip_height,
             };
         }
 
         let old_height = self.height();
-        let branch = self.branches.swap_remove(index);
+        let mut branch = self.branches.swap_remove(index);
+        // A branch can start with blocks the chain already holds: a fork of a fork carries the
+        // part of the old branch it builds on, and when that old branch has since become the
+        // chain, those blocks sit in both. They are not rolled back and put again — they never
+        // left — so the two chains really part company where the shared run ends. Counting them
+        // as removed listed blocks still in the chain as undone, contradicting what `removed`
+        // promises, and counted them again among the added.
+        let shared = branch
+            .blocks
+            .iter()
+            .zip(self.blocks_after(fork_height))
+            .take_while(|(theirs, ours)| theirs.hash() == ours.hash())
+            .count();
+        let fork_height = fork_height + shared as u64;
+        branch.blocks.drain(..shared);
         let keep = match usize::try_from(fork_height) {
             Ok(height) => height + 1,
             Err(_) => return Acceptance::Orphan,
@@ -356,6 +381,7 @@ impl Chain {
         self.tip_hash = self.tip().hash();
         self.rebuild_index();
         self.reorgs += 1;
+        self.reroot_branches(fork_height, &removed);
         // The chain that just lost becomes a branch of its own: it can still come back.
         if !removed.is_empty() {
             self.make_room_for_a_branch();
@@ -367,6 +393,50 @@ impl Chain {
             added,
             old_height,
             new_height: self.height(),
+        })
+    }
+
+    /// Makes every branch describe itself against the chain as it now stands.
+    ///
+    /// A branch is a fork height and the blocks above it, and the fork height means "the block at
+    /// that height in the chain". A branch that forked from a block the reorg just threw out kept
+    /// its old fork height, which now named a different block: its next block was checked against
+    /// the wrong ancestors, and if it ever won it was spliced on top of a block it did not build
+    /// on, giving a chain whose links did not join. Such a branch now carries the thrown-out
+    /// blocks it really builds on, from the new fork point up; one that joins nothing is dropped.
+    fn reroot_branches(&mut self, fork_height: u64, removed: &[Block]) {
+        let mut kept = Vec::with_capacity(self.branches.len());
+        for mut branch in std::mem::take(&mut self.branches) {
+            let Some(joins) = branch.blocks.first().map(|block| block.header.prev_hash) else {
+                continue;
+            };
+            if self.block_at(branch.fork_height).map(Block::hash) == Some(joins) {
+                kept.push(branch);
+                continue;
+            }
+            let Some(above) = branch.fork_height.checked_sub(fork_height) else { continue };
+            let Ok(above) = usize::try_from(above) else { continue };
+            if above == 0 || above > removed.len() || removed[above - 1].hash() != joins {
+                continue;
+            }
+            let mut blocks = removed[..above].to_vec();
+            blocks.append(&mut branch.blocks);
+            kept.push(Branch { fork_height, blocks });
+        }
+        self.branches = kept;
+    }
+
+    /// The branch holding this block, and where in it, preferring a branch it is the tip of.
+    fn find_in_branches(&self, hash: &Hash256) -> Option<(usize, usize)> {
+        let tip = self
+            .branches
+            .iter()
+            .position(|branch| branch.blocks.last().map(Block::hash).as_ref() == Some(hash));
+        if let Some(index) = tip {
+            return Some((index, self.branches[index].blocks.len() - 1));
+        }
+        self.branches.iter().enumerate().find_map(|(index, branch)| {
+            branch.blocks.iter().position(|block| block.hash() == *hash).map(|at| (index, at))
         })
     }
 
@@ -391,25 +461,25 @@ impl Chain {
     }
 
     fn already_have(&self, hash: &Hash256) -> bool {
-        self.hash_height.contains_key(hash)
-            || self
-                .branches
-                .iter()
-                .any(|branch| branch.blocks.iter().any(|block| block.hash() == *hash))
+        self.hash_height.contains_key(hash) || self.find_in_branches(hash).is_some()
     }
 
     fn height_of(&self, hash: &Hash256) -> Option<u64> {
         self.hash_height.get(hash).copied()
     }
 
-    /// Every check a block has to pass. `branch` names the branch it would join, if any; a block
-    /// on a branch is judged against that branch's own ancestors, not the chain's.
+    /// Every check a block has to pass.
+    ///
+    /// A block is judged against its own ancestors: the chain's blocks up to `chain_height`, then
+    /// `ancestors`, the branch blocks between there and the block it builds on (none when it
+    /// builds straight on the chain).
     fn check(
         &self,
         block: &Block,
         prev_hash: Hash256,
         prev_height: u64,
-        branch: Option<usize>,
+        chain_height: u64,
+        ancestors: &[Block],
     ) -> Result<(), ChainError> {
         if block.header.prev_hash != prev_hash {
             return Err(ChainError::PrevHashMismatch);
@@ -432,23 +502,15 @@ impl Chain {
         }
 
         // What counts as already spent depends on which ancestors this block has.
-        let (ancestor_height, extra) = match branch {
-            None => (self.height().min(prev_height), None),
-            Some(index) => {
-                let branch = &self.branches[index];
-                (branch.fork_height, Some(branch))
-            }
-        };
+        let ancestor_height = self.height().min(chain_height);
         let mut branch_txids: HashSet<Txid> = HashSet::new();
         let mut branch_coins: HashSet<CoinId> = HashSet::new();
-        if let Some(branch) = extra {
-            for earlier in &branch.blocks {
-                for txid in earlier.txids() {
-                    branch_txids.insert(txid);
-                }
-                for tx in &earlier.txs {
-                    branch_coins.extend(tx.inputs.iter().copied());
-                }
+        for earlier in ancestors {
+            for txid in earlier.txids() {
+                branch_txids.insert(txid);
+            }
+            for tx in &earlier.txs {
+                branch_coins.extend(tx.inputs.iter().copied());
             }
         }
 
@@ -686,6 +748,168 @@ mod tests {
         assert_eq!(chain.confirmations(&payment.txid()), None);
         assert_eq!(chain.confirmations(&double_spend.txid()), Some(2));
         assert_eq!(chain.coin_spent_at(&CoinId(77)), Some(2));
+    }
+
+    /// Every block names the one below it and claims the height it sits at.
+    fn assert_links_up(chain: &Chain) {
+        for (height, pair) in chain.blocks().windows(2).enumerate() {
+            assert_eq!(
+                pair[1].header.prev_hash,
+                pair[0].hash(),
+                "the link above {height} is broken"
+            );
+            assert_eq!(pair[1].height(), height as u64 + 1);
+        }
+        assert_eq!(chain.tip_hash(), chain.tip().hash());
+    }
+
+    #[test]
+    fn a_branch_from_a_block_a_reorg_threw_out_is_carried_over_and_can_still_win() {
+        let mut chain = chain();
+        let one = mine_on(&chain, 1, vec![], 0);
+        chain.accept(one.clone()).expect("valid");
+        let two = mine_on(&chain, 1, vec![], 0);
+        chain.accept(two.clone()).expect("valid");
+        let three = mine_on(&chain, 1, vec![], 0);
+        chain.accept(three).expect("valid");
+
+        // A rival for height 3, on block 2: level, so only a branch.
+        let rival = mine_on_branch(&chain, &two, 3, vec![], 10_000);
+        assert!(matches!(chain.accept(rival.clone()), Ok(Acceptance::Fork { .. })));
+
+        // A longer branch from block 1 wins, and throws out blocks 2 and 3 — including the block
+        // the rival builds on.
+        let w2 = mine_on_branch(&chain, &one, 2, vec![], 20_000);
+        chain.accept(w2.clone()).expect("valid");
+        let w3 = mine_on_branch(&chain, &w2, 2, vec![], 30_000);
+        chain.accept(w3.clone()).expect("valid");
+        let w4 = mine_on_branch(&chain, &w3, 2, vec![], 40_000);
+        assert!(matches!(chain.accept(w4), Ok(Acceptance::Reorg(_))));
+        assert_eq!(chain.height(), 4);
+        assert_links_up(&chain);
+
+        // The rival still builds on block 2, which is only on a branch now. Grow it past the
+        // chain and it has to win with block 2 under it, not with the other side's block 2.
+        let r4 = mine_on_branch(&chain, &rival, 3, vec![], 50_000);
+        assert!(matches!(chain.accept(r4.clone()), Ok(Acceptance::Fork { .. })));
+        let r5 = mine_on_branch(&chain, &r4, 3, vec![], 60_000);
+        match chain.accept(r5).expect("valid") {
+            Acceptance::Reorg(reorg) => assert_eq!(reorg.fork_height, 1),
+            other => panic!("expected the rival to win, got {other:?}"),
+        }
+        assert_eq!(chain.height(), 5);
+        assert_eq!(chain.block_at(2).map(Block::hash), Some(two.hash()));
+        assert_links_up(&chain);
+    }
+
+    #[test]
+    fn a_block_on_a_block_inside_a_branch_starts_a_branch_rather_than_being_an_orphan() {
+        let mut chain = chain();
+        let one = mine_on(&chain, 1, vec![], 0);
+        chain.accept(one.clone()).expect("valid");
+        for _ in 0..2 {
+            let next = mine_on(&chain, 1, vec![], 0);
+            chain.accept(next).expect("valid");
+        }
+        // A branch from block 1 two blocks long: level with the chain at height 3.
+        let b2 = mine_on_branch(&chain, &one, 2, vec![], 10_000);
+        chain.accept(b2.clone()).expect("valid");
+        let b3 = mine_on_branch(&chain, &b2, 2, vec![], 20_000);
+        chain.accept(b3).expect("valid");
+
+        // Something builds on the branch's middle block. Its parent is right here.
+        let c3 = mine_on_branch(&chain, &b2, 3, vec![], 30_000);
+        let accepted = chain.accept(c3.clone()).expect("valid");
+        assert_eq!(accepted, Acceptance::Fork { fork_height: 1, branch_length: 2, behind: 0 });
+        let c4 = mine_on_branch(&chain, &c3, 3, vec![], 40_000);
+        assert!(matches!(chain.accept(c4), Ok(Acceptance::Reorg(_))));
+        assert_eq!(chain.block_at(2).map(Block::hash), Some(b2.hash()));
+        assert_eq!(chain.block_at(3).map(Block::hash), Some(c3.hash()));
+        assert_links_up(&chain);
+    }
+
+    #[test]
+    fn a_winning_fork_of_a_fork_reports_only_the_blocks_it_really_rolled_back() {
+        // The chain from the fork-of-a-fork test: a branch b2-b3 from block 1, and c3 built on
+        // b2 in the middle of it, which grows to c4 and wins. b2 is then in the chain and still
+        // at the start of the old branch.
+        let mut chain = chain();
+        let one = mine_on(&chain, 1, vec![], 0);
+        chain.accept(one.clone()).expect("valid");
+        for _ in 0..2 {
+            let next = mine_on(&chain, 1, vec![], 0);
+            chain.accept(next).expect("valid");
+        }
+        let b2 = mine_on_branch(&chain, &one, 2, vec![], 10_000);
+        chain.accept(b2.clone()).expect("valid");
+        let b3 = mine_on_branch(&chain, &b2, 2, vec![], 20_000);
+        chain.accept(b3.clone()).expect("valid");
+        let c3 = mine_on_branch(&chain, &b2, 3, vec![], 30_000);
+        chain.accept(c3.clone()).expect("valid");
+        let c4 = mine_on_branch(&chain, &c3, 3, vec![], 40_000);
+        assert!(matches!(chain.accept(c4.clone()), Ok(Acceptance::Reorg(_))));
+        assert_eq!(chain.block_at(2).map(Block::hash), Some(b2.hash()));
+
+        // Now the old branch overtakes, carrying b2 at its front. Only c3 and c4 go.
+        let b4 = mine_on_branch(&chain, &b3, 2, vec![], 50_000);
+        assert!(matches!(chain.accept(b4.clone()), Ok(Acceptance::Fork { .. })));
+        let b5 = mine_on_branch(&chain, &b4, 2, vec![], 60_000);
+        let reorg = match chain.accept(b5.clone()).expect("valid") {
+            Acceptance::Reorg(reorg) => reorg,
+            other => panic!("expected the old branch to win, got {other:?}"),
+        };
+        let removed: Vec<Hash256> = reorg.removed.iter().map(Block::hash).collect();
+        assert_eq!(removed, vec![c3.hash(), c4.hash()], "b2 was reported as rolled back");
+        assert_eq!(reorg.fork_height, 2, "the chains part company above b2, not above block 1");
+        assert_eq!(reorg.added, 3, "b2 was counted among the blocks put in");
+        assert_eq!((reorg.old_height, reorg.new_height), (4, 5));
+        for block in &reorg.removed {
+            assert!(!chain.contains(&block.hash()), "a block said to be undone is in the chain");
+        }
+        assert_eq!(chain.block_at(2).map(Block::hash), Some(b2.hash()));
+        assert_eq!(chain.tip_hash(), b5.hash());
+        assert_links_up(&chain);
+        // The chain that lost is kept as a branch, and it starts where it really parted.
+        let lost = chain
+            .branches()
+            .iter()
+            .find(|branch| branch.blocks.first().map(Block::hash) == Some(c3.hash()))
+            .expect("the losing chain is kept as a branch");
+        assert_eq!(lost.fork_height, 2);
+        assert_eq!(lost.blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_coin_spent_inside_a_branch_cannot_be_spent_again_by_a_fork_of_that_branch() {
+        let mut chain = chain();
+        let one = mine_on(&chain, 1, vec![], 0);
+        chain.accept(one.clone()).expect("valid");
+        for _ in 0..2 {
+            let next = mine_on(&chain, 1, vec![], 0);
+            chain.accept(next).expect("valid");
+        }
+        // A branch beside the chain whose first block spends coin 3.
+        let b2 = mine_on_branch(&chain, &one, 2, vec![Tx::spend(CoinId(3), 1)], 10_000);
+        chain.accept(b2.clone()).expect("valid");
+        let b3 = mine_on_branch(&chain, &b2, 2, vec![], 20_000);
+        assert!(matches!(chain.accept(b3), Ok(Acceptance::Fork { .. })));
+        // A fork of that branch, from its first block, has that spend among its ancestors.
+        let again = mine_on_branch(&chain, &b2, 3, vec![Tx::spend(CoinId(3), 2)], 30_000);
+        assert_eq!(chain.accept(again), Err(ChainError::CoinAlreadySpent(CoinId(3))));
+        // The chain itself never spent it, so a block on the chain still may.
+        let fine = mine_on(&chain, 1, vec![Tx::spend(CoinId(3), 2)], 0);
+        assert!(matches!(chain.accept(fine), Ok(Acceptance::Extended { .. })));
+    }
+
+    #[test]
+    fn a_target_hard_enough_saturates_the_work_count_which_is_why_heights_decide() {
+        // 2^200 hashes a block does not fit in 128 bits. Chains at this difficulty are compared
+        // by how many blocks they hold, which is the same thing at one difficulty.
+        let hard = Target::from_leading_zero_bits(200).expect("expressible");
+        assert_eq!(hard.work(), u128::MAX);
+        let chain = Chain::new(practice_bits(200).expect("expressible"), 0, MinerId(0))
+            .expect("valid bits");
+        assert_eq!(chain.total_work(), 0, "the genesis block was given, not mined");
     }
 
     #[test]
