@@ -1928,6 +1928,11 @@ impl Session {
         true
     }
 
+    /// Whether the next step of this stage's conversation starts a run.
+    fn next_is_a_run(&self) -> bool {
+        matches!(self.script().get(self.revealed + 1), Some(Run(_)))
+    }
+
     /// Whether the reader has turned a knob since the run in progress started.
     fn knobs_moved(&self) -> bool {
         match &self.running_with {
@@ -2253,7 +2258,12 @@ impl KqSession for Session {
                 // A knob turned since this stage's run started asks for the run to be done again
                 // with what is on screen. That comes before carrying the conversation on: the
                 // sentences after a run are about that run, and they would be about the old one.
-                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                //
+                // Unless the next step is a run of its own. There the values on screen are for that
+                // run — "now give the attacker 51% and press Enter" — and going back to redo the
+                // run before it wiped the 30% attack out of the conversation and ran 51% twice.
+                if self.knobs_moved() && !self.next_is_a_run() && self.rerun() == Reaction::Handled
+                {
                     return Reaction::Handled;
                 }
                 if let Some(Await(until)) = self.script().get(self.revealed)
@@ -4135,5 +4145,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// "Now give the attacker 51% and press Enter again": a reader who did exactly that was taken
+    /// back to the 30% attack, which vanished from the conversation, and watched 51% run in its
+    /// place — the value on screen was read as a change to the run before, not as the next run's.
+    #[test]
+    fn a_value_set_for_the_next_run_starts_that_run_rather_than_redoing_the_last() {
+        let mut session = session();
+        session.go_to(STAGE_ATTACK);
+        let ask = ATTACK_STAGE
+            .iter()
+            .position(|step| matches!(step, Ask(Msg::AttackAskHigh)))
+            .expect("the second ask");
+        let first = ATTACK_STAGE.iter().position(|step| matches!(step, Run(_))).expect("a run");
+        assert!(first < ask);
+        session.revealed = ask;
+        session.running_with = Some(Settled::of(session.knobs()));
+        session.chosen = KNOB_ATTACKER;
+        for c in "51".chars() {
+            session.on(Action::Type(c));
+        }
+        session.on(Action::Commit);
+        assert!(session.knobs_moved(), "typing 51 moved nothing");
+        session.on(Action::Go);
+        let revealed = session.revealed;
+        let share = session.attacker_share();
+        session.close();
+        assert!(revealed > ask, "Enter went back to the first attack: step {revealed}");
+        assert!((share - 0.51).abs() < 1e-9, "the attack ran at {share}");
     }
 }
