@@ -63,6 +63,9 @@ const ATTACK_PLAIN_SGD: usize = 2;
 /// as the one between two values can.
 const PRESET_GAP: usize = 3;
 
+/// The fewest positions worth drawing as a grid.
+const MIN_GRID: usize = 3;
+
 /// Five shades, darkest last. Attention is structure, so it is drawn in black and white; the four
 /// state colours are kept for state.
 const SHADES: [&str; 5] = [" ", "░", "▒", "▓", "█"];
@@ -70,15 +73,11 @@ const SHADES: [&str; 5] = [" ", "░", "▒", "▓", "█"];
 /// Where each stage sits. The order here is the order `lib.rs` declares them in.
 #[cfg(test)]
 const STAGE_QUESTION: usize = 0;
-#[cfg(test)]
 const STAGE_PIECES: usize = 1;
 const STAGE_TRAIN: usize = 2;
 const STAGE_TUNE: usize = 3;
 const STAGE_BREAK: usize = 4;
 const STAGE_RECAP: usize = 5;
-
-/// The most events one stage reports. A loss falls continuously; a conversation does not.
-const EVENT_CAP: usize = 24;
 
 /// The losses worth stopping to mention, highest first. Crossing one is news; the thousand steps
 /// between two of them are not.
@@ -98,6 +97,12 @@ enum Step {
     /// is a guess. "Smaller, faster, and worse" was printed over a model the reader had made
     /// bigger, and the SGD verdict over a run that had not used SGD.
     Tell(Topic),
+    /// Something the reader has to do, worded from this machine's own numbers.
+    ///
+    /// "Set the width to 32" was a fixed sentence, and 32 is what a four-core laptop has already
+    /// chosen: the reader was asked to change a value to the value it had, and told that doing so
+    /// would quarter the weights.
+    Suggest(Topic),
 }
 
 /// What a [`Step::Tell`] is about.
@@ -107,8 +112,36 @@ enum Topic {
     Progress,
     /// How this run compares with the one before it.
     Settings,
-    /// The lesson of one attack, said only if that attack is what ran.
-    Attack { kind: usize, multiplier: f64, lesson: Msg },
+    /// The lesson of one attack, said only if that attack is what ran and the run really did
+    /// what the lesson says.
+    Attack { kind: usize, multiplier: f64, lesson: Msg, check: Check },
+    /// A width half of this machine's own, and what it would do to the weight count.
+    SuggestWidth,
+    /// How many random numbers the quest started from.
+    RecapStart,
+    /// Runs, steps and time, over the whole quest.
+    RecapWork,
+    /// When the sentence first came out, if it ever did.
+    RecapSentence,
+    /// What breaking it came to.
+    RecapBroken,
+}
+
+/// What a run has to have done for an attack's lesson to be true of it.
+///
+/// Choosing the attack and the multiplier the conversation named is not enough on its own: the
+/// run is built on the reader's own settings from the stage before, and a lesson written for the
+/// machine's defaults is a guess about any other shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The loss never went below where it started, and one character is most of the answer.
+    Collapsed,
+    /// It learned something, but the answer is not the sentence.
+    Misspelt,
+    /// The loss did not even halve.
+    Crawled,
+    /// The answer is the sentence.
+    Found,
 }
 
 /// Work a step starts.
@@ -128,7 +161,7 @@ enum Until {
 }
 
 use Deed::{Attack, Train};
-use Step::{Ask, Await, Run, Say, Tell};
+use Step::{Ask, Await, Run, Say, Suggest, Tell};
 
 /// The one question a language model answers.
 const QUESTION: &[Step] = &[
@@ -160,6 +193,9 @@ const PIECES: &[Step] = &[
 /// The run itself, with the conversation waiting on the loss.
 const TRAIN: &[Step] = &[
     Say(Msg::TrainOne),
+    // The panel counts steps from the moment the run starts, and "Space pauses it between
+    // steps" was the first time the word appeared. It is said before it is used.
+    Say(Msg::TrainStep),
     Ask(Msg::TrainAsk),
     Run(Train),
     Await(Until::Steps(1)),
@@ -189,7 +225,7 @@ const TUNE: &[Step] = &[
     Say(Msg::SettingsFive),
     Say(Msg::SettingsSix),
     Say(Msg::SettingsSeven),
-    Ask(Msg::SettingsAsk),
+    Suggest(Topic::SuggestWidth),
     Run(Train),
     Await(Until::Finished),
     Tell(Topic::Settings),
@@ -209,6 +245,7 @@ const BREAK: &[Step] = &[
         kind: ATTACK_RUNAWAY,
         multiplier: BREAKING_MULTIPLIER,
         lesson: Msg::BreakAfterRunaway,
+        check: Check::Collapsed,
     }),
     Say(Msg::BreakWarmupOne),
     Say(Msg::BreakGradient),
@@ -217,30 +254,54 @@ const BREAK: &[Step] = &[
     Ask(Msg::BreakAskWarmup),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack { kind: ATTACK_NO_WARMUP, multiplier: 10.0, lesson: Msg::BreakAfterWarmup }),
+    Tell(Topic::Attack {
+        kind: ATTACK_NO_WARMUP,
+        multiplier: 10.0,
+        lesson: Msg::BreakAfterWarmup,
+        check: Check::Misspelt,
+    }),
     Say(Msg::BreakSgdOne),
     Say(Msg::BreakSgdName),
     Say(Msg::BreakSgdTwo),
-    Say(Msg::BreakSgdThree),
+    // AdamW is named before the sentence that uses the name, and the W is said in words rather
+    // than as "weight decay", which nothing had explained.
     Say(Msg::BreakAdamName),
+    Say(Msg::BreakSgdThree),
     Ask(Msg::BreakAskSgd),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson: Msg::BreakAfterSgd }),
+    Tell(Topic::Attack {
+        kind: ATTACK_PLAIN_SGD,
+        multiplier: 1.0,
+        lesson: Msg::BreakAfterSgd,
+        check: Check::Crawled,
+    }),
     Ask(Msg::BreakAskSgdAgain),
     Run(Attack),
     Await(Until::Finished),
-    Tell(Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 100.0, lesson: Msg::BreakLesson }),
+    Tell(Topic::Attack {
+        kind: ATTACK_PLAIN_SGD,
+        multiplier: 100.0,
+        lesson: Msg::BreakLesson,
+        check: Check::Found,
+    }),
 ];
 
 /// What the reader now knows, beside the numbers they made.
+///
+/// The sentences that say what happened are read from the record of every run in the quest. They
+/// used to be fixed: "a few tens of thousands of random numbers" over a model the reader had
+/// made two million weights wide, and "a few thousand of those steps" to a reader who had taken
+/// four hundred.
 const RECAP: &[Step] = &[
-    Say(Msg::RecapOne),
+    Tell(Topic::RecapStart),
     Say(Msg::RecapTwo),
     Say(Msg::RecapThree),
     Say(Msg::RecapFour),
     Say(Msg::RecapFive),
-    Say(Msg::RecapSix),
+    Tell(Topic::RecapWork),
+    Tell(Topic::RecapSentence),
+    Tell(Topic::RecapBroken),
     Say(Msg::RecapSeven),
 ];
 
@@ -267,10 +328,23 @@ enum Happening {
     Refused(Msg),
     /// A typed number that fell outside the knob's range, with where it landed.
     PulledIn {
-        to: String,
+        to: Landed,
     },
     /// A typed number the knob could not read at all.
     NotANumber,
+}
+
+/// Where a typed number landed, kept so it can be said in the reader's words.
+///
+/// The knob's own text for a choice is its index, counted from nought: a reader who typed 9 into
+/// the attack was told "set to 2" over a panel reading "plain SGD, no memory".
+enum Landed {
+    /// A number, written the way the panel writes it.
+    Number(String),
+    /// One layer and head of the attention grid, counted from one as the panel counts them.
+    View { layer: usize, head: usize },
+    /// One of the attacks.
+    Attack(usize),
 }
 
 /// One happening, filed against the step the reader was on when it happened.
@@ -280,9 +354,95 @@ struct Logged {
 }
 
 /// A run the reader started, and whether its settings were the sensible ones.
+#[derive(Clone)]
 struct Finished {
     snapshot: TrainingSnapshot,
     rate: f32,
+}
+
+/// Every run of the quest added together — finished, stopped by walking away, honest or broken.
+///
+/// The recap used to read the last honest run and nothing else, so a reader who trained for
+/// twelve hundred steps and then tried a hundred-step shape was told they had taken a hundred.
+/// Every run writes in here when it ends, however it ends, and the closing stage reads this.
+#[derive(Clone, Debug, Default)]
+struct Record {
+    runs: usize,
+    steps: usize,
+    time: std::time::Duration,
+    /// The weight count of the very first run: the random numbers the quest started from.
+    first_weights: Option<usize>,
+    /// Where the very first run's loss started.
+    first_loss: Option<f32>,
+    /// The lowest loss any run reached.
+    lowest: Option<f32>,
+    fastest: f64,
+    /// The step of the first run that answered with the sentence, when one did.
+    sentence_at: Option<usize>,
+    broken_runs: usize,
+    /// Runs whose loss stopped being a number.
+    blew_up: usize,
+    /// The run with the lowest loss at its end, honest runs first, without its attention.
+    best: Option<TrainingSnapshot>,
+    best_is_honest: bool,
+}
+
+impl Record {
+    fn add(&mut self, run: &TrainingSnapshot, broken: bool) {
+        self.runs += 1;
+        self.steps += run.step;
+        self.time += run.elapsed;
+        self.first_weights.get_or_insert(run.parameter_count);
+        if self.first_loss.is_none() {
+            self.first_loss = first_finite(&run.loss_history).or(finite(run.loss));
+        }
+        if let Some(low) = lowest(run) {
+            self.lowest = Some(self.lowest.map_or(low, |was| was.min(low)));
+        }
+        self.fastest = self.fastest.max(run.tokens_per_second);
+        if answers(&run.completion) {
+            self.sentence_at.get_or_insert(run.step);
+        }
+        if broken {
+            self.broken_runs += 1;
+        }
+        if run.step > 0 && !run.loss.is_finite() {
+            self.blew_up += 1;
+        }
+        let honest = !broken;
+        let better = match &self.best {
+            None => true,
+            Some(_) if honest != self.best_is_honest => honest,
+            Some(best) => match (finite(run.loss), finite(best.loss)) {
+                (Some(now), Some(was)) => now < was,
+                (Some(_), None) => true,
+                _ => false,
+            },
+        };
+        if better {
+            self.best = Some(light(run));
+            self.best_is_honest = honest;
+        }
+    }
+}
+
+/// Everything a [`Step::Tell`] reads, copied at the moment the sentence was first said.
+///
+/// A `Tell` read the session as it stood whenever the conversation was drawn, so the lesson of
+/// the first attack rewrote itself into "those were not the suggested settings" the moment the
+/// second attack started, and the settings verdict changed under the reader's eyes with every new
+/// run. The numbers a sentence was about are kept with it.
+#[derive(Clone)]
+struct Facts {
+    /// The last run asked for was refused, so nothing ran. The sentences after it used to read
+    /// the run before, and told a reader whose settings were refused how their run had gone.
+    refused: bool,
+    ran: Option<(usize, f64)>,
+    latest: Option<TrainingSnapshot>,
+    honest: Option<Finished>,
+    previous: Option<Finished>,
+    record: Record,
+    machine: TrainingConfig,
 }
 
 pub struct Session {
@@ -329,6 +489,10 @@ pub struct Session {
     refused: Option<StartError>,
     /// How many distinct characters the corpus has. Fixed, and cheap to keep.
     vocabulary: usize,
+    /// Every run of the quest, for the recap.
+    record: Record,
+    /// What each `Tell` of this stage read when it was said, by its step in the script.
+    told: Vec<(usize, Facts)>,
 }
 
 impl Session {
@@ -358,6 +522,8 @@ impl Session {
             broken: None,
             refused: None,
             vocabulary: Tokenizer::from_text(CORPUS).vocab_size(),
+            record: Record::default(),
+            told: Vec::new(),
         };
         session.rebuild_view(&machine_default);
         session
@@ -441,15 +607,51 @@ impl Session {
         }
     }
 
-    /// Stops the worker thread and forgets the run in progress. Finished runs are kept, because
-    /// the recap is about them.
+    /// Stops the worker thread and forgets the run in progress, keeping what it measured.
+    ///
+    /// Walking to another stage stops the work and keeps the numbers: a run left half way was
+    /// dropped without a trace, so a reader who trained for a minute and then pressed Tab to the
+    /// recap was told nothing had been trained yet.
     fn stop(&mut self) {
-        // Dropping the handle asks the worker to stop and waits for it, which costs at most one
-        // training step.
-        self.handle = None;
+        self.end_run(true);
+    }
+
+    /// Stops the run in progress and forgets its numbers too. Only `r` does this.
+    fn throw_away(&mut self) {
+        self.end_run(false);
+    }
+
+    fn end_run(&mut self, keep: bool) {
+        if let Some(handle) = self.handle.take() {
+            // Read before the handle goes: a worker told to stop publishes itself as finished,
+            // and a run cut off at step 300 of 1,500 did not finish.
+            let last = handle.snapshot();
+            // Dropping the handle asks the worker to stop and waits for it, which costs at most
+            // one training step.
+            drop(handle);
+            if keep && last.step > 0 {
+                self.file(&last);
+            }
+        }
         self.latest = None;
         self.running_config = None;
         self.running_broken = false;
+    }
+
+    /// Writes a run that has ended into the record, and keeps it for comparison if it finished.
+    fn file(&mut self, run: &TrainingSnapshot) {
+        let rate = self.running_config.map_or(0.0, |c| c.learning_rate);
+        let broken = self.running_broken;
+        self.record.add(run, broken);
+        if run.state == TrainingState::Finished {
+            let finished = Finished { snapshot: light(run), rate };
+            if broken {
+                self.broken = Some(finished);
+            } else {
+                self.previous = self.honest.take();
+                self.honest = Some(finished);
+            }
+        }
     }
 
     /// Puts the attack knobs back where they cannot break anything.
@@ -603,11 +805,9 @@ impl Session {
                     chosen % heads + 1
                 )
             }
-            STAGE_BREAK if index == BREAK_ATTACK => match choice_of(knob) {
-                ATTACK_NO_WARMUP => Msg::AttackNoWarmup.text(language).to_string(),
-                ATTACK_PLAIN_SGD => Msg::AttackPlainSgd.text(language).to_string(),
-                _ => Msg::AttackRunaway.text(language).to_string(),
-            },
+            STAGE_BREAK if index == BREAK_ATTACK => {
+                attack_name(choice_of(knob)).text(language).to_string()
+            }
             _ => match &knob.value {
                 KnobValue::Decimal { current, .. } => decimal_text(*current),
                 _ => knob.display(),
@@ -719,9 +919,12 @@ impl Session {
         if snapshot.completion.is_empty() {
             let mut lines =
                 wrapped("", Msg::LabelAnswer.text(language), width, theme.muted(), theme.muted());
+            // A model whose weights have blown up has no answer to give, and "the first answer is
+            // about a second away" over it was a promise for the rest of the run.
+            let blown = snapshot.step > 0 && !snapshot.loss.is_finite();
             lines.extend(wrapped(
                 "",
-                Msg::AnswerWaiting.text(language),
+                if blown { Msg::AnswerNone } else { Msg::AnswerWaiting }.text(language),
                 width,
                 theme.muted(),
                 theme.muted(),
@@ -803,39 +1006,44 @@ impl Session {
             head + 1
         );
         // Which head is on screen is what the left and right arrow keys move, so it is the half
-        // of this row that cannot be cut: when the two will not share a line, it takes its own.
-        let mut lines = if cells(title) + 2 + cells(&seen) <= width {
+        // of this row that cannot be cut: when the two will not share a line, it moves down to
+        // the line that counts the grid, rather than taking a row of its own from a grid that at
+        // 80×24 has five to spare.
+        let together = cells(title) + 2 + cells(&seen) <= width;
+        let lines = if together {
             vec![Line::from(vec![
                 Span::styled(format!("{title}  "), theme.heading()),
-                Span::styled(seen, theme.muted()),
+                Span::styled(seen.clone(), theme.muted()),
             ])]
         } else {
-            let mut split = wrapped("", title, width, theme.heading(), theme.heading());
-            split.extend(wrapped("  ", &seen, width, theme.muted(), theme.muted()));
-            split
+            wrapped("", title, width, theme.heading(), theme.heading())
         };
+        let seen_below = (!together).then_some(seen.as_str());
         // The grid is square — every position against every position — so the window on to it is
         // square too. The line above it carries one number, and one number can only be true of the
         // characters across the top and of the rows down the side at once when there are as many
         // of one as of the other. Two columns go to the row label; the newest positions are the
         // interesting ones.
         let mut shown = width.saturating_sub(2).min(attention.length);
-        let mut legend = self.grid_legend(shown, attention, width, language, theme);
+        let mut legend = self.grid_legend(shown, attention, seen_below, width, language, theme);
         // How tall that line is depends on the number in it, and shrinking the window never
-        // lengthens that number, so settling the two against each other takes one pass.
-        for _ in 0..2 {
+        // lengthens that number, so settling the two against each other takes a pass or two.
+        for _ in 0..3 {
             let room = height.saturating_sub(lines.len() + legend.len() + 1);
             if shown <= room {
                 break;
             }
             shown = room;
-            legend = self.grid_legend(shown, attention, width, language, theme);
+            legend = self.grid_legend(shown, attention, seen_below, width, language, theme);
         }
-        if shown == 0 {
+        if shown < MIN_GRID.min(attention.length) {
             // A heading over a box with no row in it promises a grid that never arrives, and a
-            // reader who started a run watches the empty box for the whole of it.
+            // reader who started a run watches the empty box for the whole of it. One or two
+            // positions are no better: a single cell is one position looking at itself, which it
+            // always does completely.
             return Vec::new();
         }
+        let mut lines = lines;
         lines.extend(legend);
         let first = attention.length - shown;
         let header: String =
@@ -853,31 +1061,40 @@ impl Session {
         lines
     }
 
-    /// The line above the grid that says how much of it is on screen, and how the characters that
-    /// stand in for a space and a line break are drawn. Nothing at all when the whole grid fits.
+    /// The lines between the heading and the grid: which head is showing when the heading had no
+    /// room for it, how much of the grid is on screen when not all of it is, and how a space and
+    /// a line break are drawn when one of them is in the part on screen.
+    ///
+    /// The last of those was always drawn, and at 80×24 it wrapped onto a second row and left the
+    /// grid three positions square — over a window of "ore", which has neither mark in it.
     fn grid_legend(
         &self,
         shown: usize,
         attention: &AttentionSnapshot,
+        seen: Option<&str>,
         width: usize,
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        if shown >= attention.length {
+        let mut parts: Vec<String> = seen.map(str::to_string).into_iter().collect();
+        if shown < attention.length {
+            parts.push(format!(
+                "{} {shown} / {}",
+                Msg::AttentionNewest.text(language),
+                attention.length
+            ));
+        }
+        let first = attention.length.saturating_sub(shown);
+        let marked = attention.tokens[first.min(attention.tokens.len())..]
+            .iter()
+            .any(|c| *c == ' ' || c.is_control());
+        if marked {
+            parts.push(Msg::AttentionMarks.text(language).to_string());
+        }
+        if parts.is_empty() {
             return Vec::new();
         }
-        wrapped(
-            "",
-            &format!(
-                "{} {shown} / {}   {}",
-                Msg::AttentionNewest.text(language),
-                attention.length,
-                Msg::AttentionMarks.text(language)
-            ),
-            width,
-            theme.muted(),
-            theme.muted(),
-        )
+        wrapped("", &parts.join("   "), width, theme.muted(), theme.muted())
     }
 
     /// One line saying what a finished run ended up at.
@@ -917,10 +1134,9 @@ impl Session {
         };
         // The model's own answer, which is the point of the comparison: it wraps rather than
         // being cut, because a cut with no ellipsis reads as the model having stopped mid-word.
-        for chunk in wrap(
-            &format!("{PROMPT}{}", one_line(&finished.snapshot.completion)),
-            width.saturating_sub(2),
-        ) {
+        for chunk in
+            wrap(&answer_line(&finished.snapshot.completion, language), width.saturating_sub(2))
+        {
             lines.push(Line::from(Span::styled(format!("  {chunk}"), theme.plain())));
         }
         lines
@@ -930,13 +1146,32 @@ impl Session {
 
     fn render_brief(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let config = self.machine_default;
+        let weights =
+            (Msg::LabelWeights.text(language), format::count(config.parameter_count() as u64));
+        // The first stage says what a weight is and nothing else, so it shows the one number it
+        // has explained. The five beside it — characters, layers, heads, width, window — are the
+        // next stage's words, and a reader who has never heard of a transformer met all five on
+        // the opening screen with no word about any of them.
+        if self.stage != STAGE_PIECES {
+            let [heading, table] =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    Msg::BriefShapeTitle.text(language),
+                    theme.heading(),
+                ))),
+                heading,
+            );
+            paragraph(frame, table, stat_lines(&[weights], area.width as usize, theme));
+            return;
+        }
         let rows = vec![
             (Msg::LabelVocabulary.text(language), format::count(self.vocabulary as u64)),
             (Msg::LabelLayers.text(language), format::count(config.layers as u64)),
             (Msg::LabelHeads.text(language), format::count(config.heads as u64)),
             (Msg::LabelWidth.text(language), format::count(config.d_model as u64)),
             (Msg::LabelContext.text(language), format::count(config.context as u64)),
-            (Msg::LabelWeights.text(language), format::count(config.parameter_count() as u64)),
+            weights,
         ];
         let [heading, table, footer] =
             Layout::vertical([Constraint::Length(2), Constraint::Length(7), Constraint::Min(0)])
@@ -1021,32 +1256,41 @@ impl Session {
             Msg::KnobSteps,
         ];
         let width = area.width as usize;
-        let mut lines = self.knob_lines(&labels, width, language, theme);
-        lines.push(Line::from(""));
-        let chose = format!(
-            "{}  ({} · {} · {})",
-            format::count(self.machine_default.parameter_count() as u64),
-            format::count(self.machine_default.layers as u64),
-            format::count(self.machine_default.heads as u64),
-            format::count(self.machine_default.d_model as u64)
+        let knobs = self.knob_lines(&labels, width, language, theme);
+        let machine = self.machine_default;
+        // Every number here carries its name. "28,828 (2 · 2 · 32)" left the reader to guess
+        // which of the three was the width. The name and its number are held together by a
+        // space that does not break, so a wrapped line never leaves "Heads" at the end of one
+        // row and its 2 at the start of the next.
+        let shape = [
+            (Msg::LabelLayers, machine.layers),
+            (Msg::LabelHeads, machine.heads),
+            (Msg::LabelWidth, machine.d_model),
+        ]
+        .iter()
+        .map(|(label, value)| {
+            format!("{}\u{a0}{}", label.text(language), format::count(*value as u64))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+        let mut chose = stat_lines(
+            &[(
+                Msg::LabelMachineChose.text(language),
+                format::count(machine.parameter_count() as u64),
+            )],
+            width,
+            theme,
         );
-        match self.weights_now() {
-            Ok(weights) => lines.extend(stat_lines(
-                &[
-                    (Msg::LabelWeightsNow.text(language), format::count(weights as u64)),
-                    (Msg::LabelMachineChose.text(language), chose),
-                ],
+        chose.extend(wrapped("  ", &shape, width, theme.muted(), theme.muted()));
+        let weights = match self.weights_now() {
+            Ok(weights) => stat_lines(
+                &[(Msg::LabelWeightsNow.text(language), format::count(weights as u64))],
                 width,
                 theme,
-            )),
+            ),
             Err(message) => {
-                lines.extend(wrapped(
-                    "",
-                    Msg::ErrorTitle.text(language),
-                    width,
-                    theme.bad(),
-                    theme.bad(),
-                ));
+                let mut lines =
+                    wrapped("", Msg::ErrorTitle.text(language), width, theme.bad(), theme.bad());
                 lines.extend(wrapped(
                     "",
                     message.text(language),
@@ -1054,19 +1298,25 @@ impl Session {
                     theme.plain(),
                     theme.plain(),
                 ));
-                lines.extend(stat_lines(
-                    &[(Msg::LabelMachineChose.text(language), chose)],
-                    width,
-                    theme,
-                ));
+                lines
             }
-        }
-        lines.push(Line::from(""));
+        };
 
+        let mut full = knobs.clone();
+        full.push(Line::from(""));
+        full.extend(weights.clone());
+        full.extend(chose);
+        full.push(Line::from(""));
         if let Some(error) = self.refused {
-            lines.extend(self.refusal_lines(error, width, language, theme));
+            full.extend(self.refusal_lines(error, width, language, theme));
         }
-        self.draw_with_the_run(frame, area, lines, theme, language);
+        // While a run is on screen the settings give up their blank rows and the machine's own
+        // choice, which is what lets the run be drawn at all at 80×24: the full list took twelve
+        // of the twenty rows there are, the run needs twelve, and the reader who pressed Enter
+        // watched the list of values and nothing else for the whole of the run.
+        let mut compact = knobs;
+        compact.extend(weights);
+        self.draw_with_the_run(frame, area, full, compact, theme, language);
     }
 
     /// The settings, and under them whatever room is left given to the run itself.
@@ -1077,17 +1327,26 @@ impl Session {
         &self,
         frame: &mut Frame,
         area: Rect,
-        lines: Vec<Line<'static>>,
+        full: Vec<Line<'static>>,
+        compact: Vec<Line<'static>>,
         theme: Theme,
         language: Language,
     ) {
         /// Rows the run needs before it is worth drawing rather than crowding the settings out.
         const ROOM_FOR_THE_RUN: u16 = 12;
-        let used = lines.len() as u16;
-        if self.latest.is_none() || area.height < used + ROOM_FOR_THE_RUN {
-            paragraph(frame, area, lines);
+        if self.latest.is_none() {
+            paragraph(frame, area, full);
             return;
         }
+        let lines = if area.height >= full.len() as u16 + ROOM_FOR_THE_RUN {
+            full
+        } else if area.height >= compact.len() as u16 + ROOM_FOR_THE_RUN {
+            compact
+        } else {
+            paragraph(frame, area, full);
+            return;
+        };
+        let used = lines.len() as u16;
         let [settings, run] =
             Layout::vertical([Constraint::Length(used), Constraint::Min(0)]).areas(area);
         paragraph(frame, settings, lines);
@@ -1190,10 +1449,12 @@ impl Session {
     }
 
     fn render_recap(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
-        // The honest run is the one the recap is about. A reader who only ever broke it gets the
-        // broken run instead, described the same way — it is still what happened.
-        let finished = self.honest.as_ref().or(self.broken.as_ref());
-        let Some(finished) = finished else {
+        // The recap is the whole quest, read from the record every run wrote into. It used to be
+        // the last honest run alone, so a reader who trained for twelve hundred steps and then
+        // tried a hundred-step shape was shown a hundred steps, and a run left half way by
+        // pressing Tab was not there at all.
+        let record = &self.record;
+        let Some(best) = record.best.as_ref().filter(|_| record.runs > 0) else {
             paragraph(
                 frame,
                 area,
@@ -1207,30 +1468,20 @@ impl Session {
             );
             return;
         };
-        let snapshot = &finished.snapshot;
-        let first = snapshot.loss_history.iter().copied().find(|v| v.is_finite());
+        let snapshot = best;
+        let loss = match (record.first_loss, record.lowest) {
+            (Some(start), Some(low)) => {
+                format!("{} → {}", loss_text(start, language), loss_text(low, language))
+            }
+            (Some(start), None) => loss_text(start, language),
+            (None, _) => loss_text(f32::NAN, language),
+        };
         let rows: Vec<(&'static str, String)> = vec![
-            (Msg::RecapWeights.text(language), format::count(snapshot.parameter_count as u64)),
-            (
-                Msg::RecapSteps.text(language),
-                format!(
-                    "{} / {}",
-                    format::count(snapshot.step as u64),
-                    format::count(snapshot.total_steps as u64)
-                ),
-            ),
-            (
-                Msg::RecapLoss.text(language),
-                match first {
-                    Some(start) => format!(
-                        "{} → {}",
-                        loss_text(start, language),
-                        loss_text(snapshot.loss, language)
-                    ),
-                    None => loss_text(snapshot.loss, language),
-                },
-            ),
-            (Msg::RecapTime.text(language), format::duration(snapshot.elapsed)),
+            (Msg::RecapRuns.text(language), format::count(record.runs as u64)),
+            (Msg::RecapSteps.text(language), format::count(record.steps as u64)),
+            (Msg::RecapLoss.text(language), loss),
+            (Msg::RecapTime.text(language), format::duration(record.time)),
+            (Msg::RecapSpeed.text(language), format::count(record.fastest.max(0.0) as u64)),
         ];
         // Wide enough for the longest label in either language, and the same in every row so the
         // recap reads as one column of numbers.
@@ -1269,17 +1520,17 @@ impl Session {
                 lines
             })
             .collect();
-        let right = snapshot.completion.trim_start().starts_with(EXPANSION);
+        let right = answers(&snapshot.completion);
         let state = if right { State::Good } else { State::Bad };
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", rows.len() + 1), theme.muted()),
             Span::styled(column(Msg::RecapAnswer.text(language), label_width), theme.plain()),
             Span::styled(state.mark().to_string(), theme.state(state)),
         ]));
-        for chunk in wrap(&format!("{PROMPT}{}", one_line(&snapshot.completion)), indent) {
+        for chunk in wrap(&answer_line(&snapshot.completion, language), indent) {
             lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.heading())));
         }
-        if let (Some(_), Some(broken)) = (&self.honest, &self.broken) {
+        if let (true, Some(broken)) = (record.best_is_honest, &self.broken) {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled(format!("{} ", rows.len() + 2), theme.muted()),
@@ -1302,8 +1553,7 @@ impl Session {
                 theme.bad(),
                 theme.bad(),
             ));
-            for chunk in wrap(&format!("{PROMPT}{}", one_line(&broken.snapshot.completion)), indent)
-            {
+            for chunk in wrap(&answer_line(&broken.snapshot.completion, language), indent) {
                 lines.push(Line::from(Span::styled(format!("    {chunk}"), theme.plain())));
             }
         }
@@ -1361,22 +1611,49 @@ impl Session {
         self.stop();
         self.revealed = 0;
         self.log.clear();
+        self.told.clear();
         self.forget_run();
         self.refused = None;
+        self.remember_tell();
+    }
+
+    /// The knobs a run is started from. The layer-and-head chooser on the training stage is a
+    /// knob too, but it chooses what to look at, not what to train.
+    ///
+    /// Counting it made looking at the second head and pressing Enter throw away a minute of
+    /// training and start again from random numbers. Worse, a run resets the chooser to the first
+    /// head as it starts, so a reader who had been looking at another head found the very next
+    /// Enter restarting the run they had only just started.
+    fn run_knobs(&self) -> &[Knob] {
+        match self.stage {
+            STAGE_TUNE => &self.tune,
+            STAGE_BREAK => &self.attack,
+            _ => &[],
+        }
     }
 
     /// Whether the reader has turned a knob since the run in progress started.
     fn knobs_moved(&self) -> bool {
         match &self.running_with {
-            Some(settled) => !settled.still(self.knobs()),
+            Some(settled) => !settled.still(self.run_knobs()),
             None => false,
         }
     }
 
+    /// Whether the next step of this stage's conversation starts a run.
+    fn next_is_a_run(&self) -> bool {
+        matches!(self.script().get(self.revealed + 1), Some(Run(_)))
+    }
+
     /// Runs this stage's work again with the values now on screen, in place of the run before it,
     /// so the sentence that reads the result is about the run that just happened.
+    ///
+    /// Only the knobs a run is started from count. The training stage's layer-and-head chooser
+    /// counted too, so Enter at the end of that stage rewound its conversation to the run and
+    /// started again rather than letting the shell walk on: after a refused run the reader
+    /// pressed Enter round the same five sentences for ever and never reached the next stage.
     fn rerun(&mut self) -> Reaction {
-        if self.knobs().is_empty() {
+        if self.run_knobs().is_empty() {
             return Reaction::Ignored;
         }
         let script = self.script();
@@ -1390,6 +1667,7 @@ impl Session {
         self.stop();
         self.forget_run();
         self.log.retain(|logged| logged.step < at);
+        self.told.retain(|(step, _)| *step < at);
         self.revealed = at - 1;
         self.advance();
         Reaction::Handled
@@ -1404,110 +1682,54 @@ impl Session {
     }
 
     fn satisfied(&self, until: Until) -> bool {
-        match until {
-            Until::Steps(wanted) => self.latest.as_ref().is_some_and(|s| s.step >= wanted),
-            // A refused run never finishes, so a refusal has to end the wait too, or the
-            // conversation stops for good behind a message nobody can press past.
-            Until::Finished => {
-                self.refused.is_some()
-                    || self.latest.as_ref().is_some_and(|s| s.state == TrainingState::Finished)
-            }
+        // A refused run never starts, so a refusal ends every wait, or the conversation stops for
+        // good behind a message nobody can press past.
+        if self.refused.is_some() {
+            return true;
         }
+        let finished = self.latest.as_ref().is_some_and(|s| s.state == TrainingState::Finished);
+        match until {
+            // A run the reader made shorter than the step being waited for finishes first, and
+            // the wait for step 300 of a 100-step run used to last for ever.
+            Until::Steps(wanted) => {
+                finished || self.latest.as_ref().is_some_and(|s| s.step >= wanted)
+            }
+            Until::Finished => finished,
+        }
+    }
+
+    /// The numbers a `Tell` said just now would read.
+    fn facts(&self) -> Facts {
+        Facts {
+            refused: self.refused.is_some(),
+            ran: self.ran,
+            latest: self.latest.as_ref().map(light),
+            honest: self.honest.clone(),
+            previous: self.previous.clone(),
+            record: self.record.clone(),
+            machine: self.machine_default,
+        }
+    }
+
+    /// Keeps the numbers of the step just revealed, when it is a sentence that reads them.
+    fn remember_tell(&mut self) {
+        let index = self.revealed;
+        if matches!(self.script().get(index), Some(Tell(_) | Suggest(_)))
+            && !self.told.iter().any(|(step, _)| *step == index)
+        {
+            let facts = self.facts();
+            self.told.push((index, facts));
+        }
+    }
+
+    /// A sentence built from numbers, as it reads right now. The conversation uses the numbers
+    /// that were kept when it was first said; this is for the moment of saying it.
+    #[cfg(test)]
+    fn tell(&self, topic: Topic, language: Language) -> String {
+        self.facts().tell(topic, language).unwrap_or_default()
     }
 
     /// Reveals the next step and starts whatever it asks for.
-    /// A sentence about the run that just finished, built from its own numbers.
-    fn tell(&self, topic: Topic, language: Language) -> String {
-        match topic {
-            Topic::Progress => self.tell_progress(language),
-            Topic::Settings => self.tell_settings(language),
-            Topic::Attack { kind, multiplier, lesson } => {
-                // The lesson is only true of the run it was written about. A reader who pressed
-                // Enter without touching the values ran something else, and used to be told the
-                // conclusion anyway.
-                let asked = self
-                    .ran
-                    .is_some_and(|(k, m)| k == kind && (m - multiplier).abs() < multiplier * 0.01);
-                if asked {
-                    return lesson.text(language).to_string();
-                }
-                // The reader ran something else. Saying "the line is skipped" leaves the screen
-                // with a run on it and nothing about that run; this reads the run instead.
-                let mut text = Msg::BreakNotThatRun.text(language).to_string();
-                if let Some(history) = self.latest.as_ref().map(|s| s.loss_history.as_slice())
-                    && let (Some(first), Some(last)) = (history.first(), history.last())
-                {
-                    text.push_str(&format!(
-                        "  ·  {} {:.3} → {:.3}",
-                        Msg::BreakRanAt.text(language),
-                        first,
-                        last
-                    ));
-                    let learned = last < first;
-                    text.push(' ');
-                    text.push_str(
-                        if learned { Msg::BreakItLearned } else { Msg::BreakItDidNot }
-                            .text(language),
-                    );
-                }
-                text
-            }
-        }
-    }
-
-    /// Whether the loss is still falling, measured rather than assumed.
-    ///
-    /// The last quarter of the history is held against the first: a run that has flattened has
-    /// given up most of its fall already, and a run that has not is still on its way down.
-    fn tell_progress(&self, language: Language) -> String {
-        let history = self.latest.as_ref().map(|s| s.loss_history.as_slice()).unwrap_or(&[]);
-        if history.len() < 8 {
-            return Msg::TrainStillFalling.text(language).to_string();
-        }
-        let quarter = (history.len() / 4).max(1);
-        let early = history[..quarter].iter().sum::<f32>() / quarter as f32;
-        let late = history[history.len() - quarter..].iter().sum::<f32>() / quarter as f32;
-        let mid = history[quarter..history.len() - quarter].to_vec();
-        let middle = if mid.is_empty() { late } else { mid.iter().sum::<f32>() / mid.len() as f32 };
-        // Flat when the latest stretch has given up far less than the run did getting here.
-        let whole = (early - late).abs();
-        let recent = (middle - late).abs();
-        let message = if whole > 0.0 && recent < whole * 0.2 {
-            Msg::TrainSlowing
-        } else {
-            Msg::TrainStillFalling
-        };
-        message.text(language).to_string()
-    }
-
-    /// This run held against the one before it: what the reader changed, and what it cost.
-    fn tell_settings(&self, language: Language) -> String {
-        let (Some(now), Some(before)) = (self.honest.as_ref(), self.previous.as_ref()) else {
-            return Msg::SettingsFirstRun.text(language).to_string();
-        };
-        let (weights, was) = (now.snapshot.parameter_count, before.snapshot.parameter_count);
-        let (loss, loss_was) = (now.snapshot.loss, before.snapshot.loss);
-        let verdict = if weights == was {
-            Msg::SettingsSameShape
-        } else if weights < was {
-            if loss > loss_was { Msg::SettingsSmallerWorse } else { Msg::SettingsSmallerBetter }
-        } else if loss < loss_was {
-            Msg::SettingsBiggerBetter
-        } else {
-            Msg::SettingsBiggerWorse
-        };
-        format!(
-            "{} {} {} → {}, {} {:.3} → {:.3}.",
-            verdict.text(language),
-            Msg::LabelWeights.text(language),
-            format::count(was as u64),
-            format::count(weights as u64),
-            Msg::LabelLoss.text(language),
-            loss_was,
-            loss,
-        )
-    }
-
     fn advance(&mut self) -> bool {
         let script = self.script();
         if self.revealed + 1 >= script.len() {
@@ -1515,7 +1737,7 @@ impl Session {
         }
         self.revealed += 1;
         if let Run(deed) = script[self.revealed] {
-            let settled = Settled::of(self.knobs());
+            let settled = Settled::of(self.run_knobs());
             self.running_with = Some(settled);
             self.forget_run();
             let config = match deed {
@@ -1554,13 +1776,17 @@ impl Session {
                 self.revealed += 1;
             }
         }
+        self.remember_tell();
         true
     }
 
     fn say(&mut self, what: Happening) {
-        if self.log.len() < EVENT_CAP {
-            self.log.push(Logged { step: self.revealed, what });
-        }
+        // No cap. There used to be one of twenty-four per stage, and the Break stage runs four
+        // attacks of up to eight happenings each, so the ending of the last attack — the one the
+        // stage exists for — was silently never said. A run says at most eight things (its start,
+        // five milestones, the sentence, its end), so nothing here grows without the reader
+        // pressing a key.
+        self.log.push(Logged { step: self.revealed, what });
     }
 
     /// Reads the run and turns anything new into beats.
@@ -1569,11 +1795,12 @@ impl Session {
         let step = snapshot.step;
         let loss = snapshot.loss;
         let finished = snapshot.state == TrainingState::Finished;
-        let right = snapshot.completion.trim_start().starts_with(EXPANSION);
-        let seconds = snapshot.elapsed.as_secs_f64();
+        let right = answers(&snapshot.completion);
+        let seconds = snapshot.elapsed;
+        let low = lowest(snapshot);
 
-        if self.first_loss.is_none() && loss.is_finite() && step > 0 {
-            self.first_loss = Some(loss);
+        if self.first_loss.is_none() && step > 0 {
+            self.first_loss = first_finite(&snapshot.loss_history).or(finite(loss));
         }
         while self.milestone < MILESTONES.len()
             && loss.is_finite()
@@ -1588,11 +1815,14 @@ impl Session {
         }
         if finished && !self.said_ended {
             self.said_ended = true;
-            let fell = match self.first_loss {
-                Some(first) => loss.is_finite() && loss < first,
-                None => false,
+            // "Never got below where it started" is a statement about the lowest point of the
+            // run, not about its last one: a loss that fell to 1.2 and climbed back to 3.5 got
+            // well below where it started, and used to be told it never had.
+            let fell = match (self.first_loss, low) {
+                (Some(first), Some(low)) => low < first,
+                _ => false,
             };
-            self.say(Happening::Ended { loss, seconds, fell });
+            self.say(Happening::Ended { loss, seconds: seconds.as_secs_f64(), fell });
         }
     }
 
@@ -1608,8 +1838,9 @@ impl Session {
                 format::count(*steps as u64),
             )),
             Happening::Loss { loss, step } => Beat::event(format!(
-                "{} {loss:.3}  ·  {} {}",
+                "{} {}  ·  {} {}",
                 Msg::EventLoss.text(language),
+                loss_text(*loss, language),
                 Msg::EventStep.text(language),
                 format::count(*step as u64),
             )),
@@ -1627,13 +1858,13 @@ impl Session {
                     "{}  ·  {} {}",
                     Msg::EventFinished.text(language),
                     Msg::EventLoss.text(language),
-                    if loss.is_finite() {
-                        format!("{loss:.3}")
-                    } else {
-                        Msg::NotANumber.text(language).to_string()
-                    },
+                    loss_text(*loss, language),
                 );
-                text.push_str(&format!("  ·  {} {seconds:.0}s", Msg::EventSeconds.text(language)));
+                text.push_str(&format!(
+                    "  ·  {} {}",
+                    Msg::EventSeconds.text(language),
+                    format::duration(std::time::Duration::from_secs_f64(seconds.max(0.0))),
+                ));
                 if !*fell {
                     text.push_str(&format!("  ·  {}", Msg::EventNeverFell.text(language)));
                 }
@@ -1646,11 +1877,387 @@ impl Session {
                     "{}  ·  {} {}",
                     Msg::EventOutsideRange.text(language),
                     Msg::EventSetTo.text(language),
-                    to,
+                    landed_text(to, language),
                 ),
             ),
             Happening::NotANumber => Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)),
         }
+    }
+
+    /// Accepts a number typed into a choice, counting from one the way the panel does.
+    ///
+    /// The knob's own reading counts from nought, so typing 2 into the layer-and-head chooser
+    /// showed the third head, and typing 3 into the attack — there are three — was "outside what
+    /// this value allows".
+    fn commit_choice(&mut self) -> Typed {
+        let Some(knob) = self.stage_knobs_mut() else { return Typed::Nothing };
+        let Some(draft) = knob.draft().map(str::to_string) else { return Typed::Nothing };
+        knob.cancel();
+        let KnobValue::Choice { current, count } = &mut knob.value else {
+            return Typed::Nothing;
+        };
+        let Some(asked) = draft.trim().parse::<f64>().ok().filter(|v| v.is_finite()) else {
+            return Typed::NotANumber;
+        };
+        if *count == 0 {
+            return Typed::NotANumber;
+        }
+        let asked = asked.round();
+        let landed = asked.clamp(1.0, *count as f64);
+        *current = landed as usize - 1;
+        if landed == asked {
+            Typed::Taken
+        } else {
+            Typed::PulledIn { to: format::count(landed as u64) }
+        }
+    }
+
+    /// Where the chosen knob now stands, in the words the panel uses for it.
+    fn landed(&self) -> Landed {
+        let Some(knob) = self.stage_knobs().get(self.chosen) else {
+            return Landed::Number(String::new());
+        };
+        match (self.stage, &knob.value) {
+            (STAGE_TRAIN, _) => {
+                let heads = self.attention().map_or(self.tuned().heads, |a| a.heads).max(1);
+                let chosen = choice_of(knob);
+                Landed::View { layer: chosen / heads + 1, head: chosen % heads + 1 }
+            }
+            (STAGE_BREAK, KnobValue::Choice { current, .. }) => Landed::Attack(*current),
+            (_, KnobValue::Decimal { current, .. }) => Landed::Number(decimal_text(*current)),
+            _ => Landed::Number(knob.value.display()),
+        }
+    }
+}
+
+impl Facts {
+    /// A sentence about what the runs did, built from their own numbers. `None` when there is
+    /// nothing true to say — the recap of a quest in which nothing was ever trained does not
+    /// count the runs it never had.
+    fn tell(&self, topic: Topic, language: Language) -> Option<String> {
+        Some(match topic {
+            // A refused run never started, and the reason is the beat above this one. What
+            // follows it says that nothing ran rather than reading an older run as this one.
+            Topic::Progress if self.refused => Msg::TrainNoRun.text(language).to_string(),
+            Topic::Settings if self.refused => Msg::SettingsNothingRan.text(language).to_string(),
+            Topic::Attack { .. } if self.refused => Msg::BreakNothingRan.text(language).to_string(),
+            Topic::Progress => self.tell_progress(language),
+            Topic::Settings => self.tell_settings(language),
+            Topic::Attack { kind, multiplier, lesson, check } => {
+                self.tell_attack(kind, multiplier, lesson, check, language)
+            }
+            Topic::SuggestWidth => self.suggest_width(language),
+            Topic::RecapStart => match self.record.first_weights {
+                Some(weights) => format!(
+                    "{} {} {}.",
+                    Msg::RecapOne.text(language),
+                    Msg::WordWeights.text(language),
+                    format::count(weights as u64)
+                ),
+                None => Msg::RecapNothing.text(language).to_string(),
+            },
+            Topic::RecapWork => {
+                let record = &self.record;
+                if record.runs == 0 {
+                    return None;
+                }
+                format!(
+                    "{} {} {}  ·  {} {}  ·  {} {}",
+                    Msg::RecapWork.text(language),
+                    Msg::WordRuns.text(language),
+                    format::count(record.runs as u64),
+                    Msg::WordSteps.text(language),
+                    format::count(record.steps as u64),
+                    Msg::WordTime.text(language),
+                    format::duration(record.time),
+                )
+            }
+            Topic::RecapSentence => {
+                if self.record.runs == 0 {
+                    return None;
+                }
+                match self.record.sentence_at {
+                    Some(step) => {
+                        format!("{} {}.", Msg::RecapSix.text(language), format::count(step as u64))
+                    }
+                    None => Msg::RecapNoSentence.text(language).to_string(),
+                }
+            }
+            Topic::RecapBroken => {
+                let record = &self.record;
+                if record.runs == 0 {
+                    return None;
+                }
+                if record.broken_runs == 0 {
+                    Msg::RecapNeverBroke.text(language).to_string()
+                } else {
+                    format!(
+                        "{} {} {}  ·  {} {}",
+                        Msg::RecapBrokeIt.text(language),
+                        Msg::WordBrokenRuns.text(language),
+                        format::count(record.broken_runs as u64),
+                        Msg::WordBlewUp.text(language),
+                        format::count(record.blew_up as u64),
+                    )
+                }
+            }
+        })
+    }
+
+    /// The lesson of one attack, when the run that just ended is that attack and did what the
+    /// lesson says; otherwise what the run did instead, read from its numbers.
+    fn tell_attack(
+        &self,
+        kind: usize,
+        multiplier: f64,
+        lesson: Msg,
+        check: Check,
+        language: Language,
+    ) -> String {
+        // The lesson is only true of the run it was written about. A reader who pressed Enter
+        // without touching the values ran something else, and used to be told the conclusion
+        // anyway.
+        let asked =
+            self.ran.is_some_and(|(k, m)| k == kind && (m - multiplier).abs() < multiplier * 0.01);
+        let run = self.latest.as_ref();
+        if let Some(run) = run.filter(|run| asked && holds(check, run)) {
+            // A collapse is said with the numbers that show it and the character it fell onto.
+            // The fixed sentence used to promise "one letter", and the model most often falls
+            // onto the space, which leaves nothing on screen to see.
+            if check == Check::Collapsed
+                && let (Some(first), Some(character)) =
+                    (first_finite(&run.loss_history), repeated(&run.completion))
+            {
+                let character = match character {
+                    ' ' => Msg::CharSpace.text(language).to_string(),
+                    other => format!("\u{2018}{other}\u{2019}"),
+                };
+                return format!(
+                    "{}  ·  {} {} → {}  ·  {} {}",
+                    lesson.text(language),
+                    Msg::BreakRanAt.text(language),
+                    loss_text(first, language),
+                    loss_text(run.loss, language),
+                    Msg::BreakRepeated.text(language),
+                    character,
+                );
+            }
+            return lesson.text(language).to_string();
+        }
+        // The reader ran something else, or the run went another way. Either way the screen has
+        // a run on it, and this reads that run rather than leaving it unexplained.
+        let lead = if asked { Msg::BreakNotWhatWasSaid } else { Msg::BreakNotThatRun };
+        let mut text = lead.text(language).to_string();
+        if let Some(run) = run
+            && let Some(first) = first_finite(&run.loss_history)
+        {
+            text.push_str(&format!(
+                "  ·  {} {} → {}",
+                Msg::BreakRanAt.text(language),
+                loss_text(first, language),
+                loss_text(run.loss, language),
+            ));
+            let verdict = if !run.loss.is_finite() {
+                Msg::BreakItBlewUp
+            } else if lowest(run).is_some_and(|low| low < first) {
+                Msg::BreakItLearned
+            } else {
+                Msg::BreakItDidNot
+            };
+            text.push(' ');
+            text.push_str(verdict.text(language));
+        }
+        text
+    }
+
+    /// Whether the loss is still falling, measured rather than assumed.
+    ///
+    /// The last quarter of the history is held against the first: a run that has flattened has
+    /// given up most of its fall already, and a run that has not is still on its way down. A run
+    /// that went up rather than down is neither, and neither is one whose loss is no longer a
+    /// number — both used to be told the fall had flattened out, or that it was still falling.
+    fn tell_progress(&self, language: Language) -> String {
+        let Some(run) = self.latest.as_ref().filter(|run| !run.loss_history.is_empty()) else {
+            return Msg::TrainNoRun.text(language).to_string();
+        };
+        if !run.loss.is_finite() {
+            return Msg::TrainBlewUp.text(language).to_string();
+        }
+        let history: Vec<f32> =
+            run.loss_history.iter().copied().filter(|v| v.is_finite()).collect();
+        let (Some(&first), Some(&last)) = (history.first(), history.last()) else {
+            return Msg::TrainBlewUp.text(language).to_string();
+        };
+        if history.len() < 8 {
+            let message = if last < first { Msg::TrainStillFalling } else { Msg::TrainNotFalling };
+            return message.text(language).to_string();
+        }
+        let quarter = (history.len() / 4).max(1);
+        let early = history[..quarter].iter().sum::<f32>() / quarter as f32;
+        let late = history[history.len() - quarter..].iter().sum::<f32>() / quarter as f32;
+        if late >= early {
+            return Msg::TrainNotFalling.text(language).to_string();
+        }
+        let mid = &history[quarter..history.len() - quarter];
+        let middle = if mid.is_empty() { late } else { mid.iter().sum::<f32>() / mid.len() as f32 };
+        // Flat when the latest stretch has given up far less than the run did getting here.
+        let whole = early - late;
+        let recent = (middle - late).abs();
+        let message = if recent < whole * 0.2 { Msg::TrainSlowing } else { Msg::TrainStillFalling };
+        message.text(language).to_string()
+    }
+
+    /// This run held against the one before it: what the reader changed, and what it cost.
+    fn tell_settings(&self, language: Language) -> String {
+        let (Some(now), Some(before)) = (self.honest.as_ref(), self.previous.as_ref()) else {
+            return Msg::SettingsFirstRun.text(language).to_string();
+        };
+        let (weights, was) = (now.snapshot.parameter_count, before.snapshot.parameter_count);
+        let (loss, loss_was) = (now.snapshot.loss, before.snapshot.loss);
+        // A loss that is not a number is neither higher nor lower than anything, and every
+        // comparison with it is false: a run that blew up used to be "a lower loss".
+        let verdict = if !(loss.is_finite() && loss_was.is_finite()) {
+            Msg::SettingsBlewUp
+        } else if weights == was {
+            Msg::SettingsSameShape
+        } else if weights < was {
+            if loss > loss_was { Msg::SettingsSmallerWorse } else { Msg::SettingsSmallerBetter }
+        } else if loss < loss_was {
+            Msg::SettingsBiggerBetter
+        } else {
+            Msg::SettingsBiggerWorse
+        };
+        format!(
+            "{} {} {} → {}, {} {} → {}.",
+            verdict.text(language),
+            Msg::WordWeights.text(language),
+            format::count(was as u64),
+            format::count(weights as u64),
+            Msg::EventLoss.text(language),
+            loss_text(loss_was, language),
+            loss_text(loss, language),
+        )
+    }
+
+    /// Half of this machine's width, kept a whole number of heads wide, and what it does to the
+    /// weights. Read from the machine's choice rather than from the knob, so the suggestion does
+    /// not halve itself again the moment the reader follows it.
+    fn suggest_width(&self, language: Language) -> String {
+        let machine = self.machine;
+        let heads = machine.heads.max(1);
+        let half = (machine.d_model / 2 / heads * heads).max(heads);
+        let smaller = TrainingConfig { d_model: half, ..machine };
+        format!(
+            "{} {} {} → {}  ·  {} {} → {}",
+            Msg::SettingsAsk.text(language),
+            Msg::WordWidth.text(language),
+            format::count(machine.d_model as u64),
+            format::count(half as u64),
+            Msg::WordWeights.text(language),
+            format::count(machine.parameter_count() as u64),
+            format::count(smaller.parameter_count() as u64),
+        )
+    }
+}
+
+/// Whether a run did what an attack's lesson says it did.
+fn holds(check: Check, run: &TrainingSnapshot) -> bool {
+    let first = first_finite(&run.loss_history);
+    match check {
+        Check::Collapsed => {
+            let never_fell = match (first, lowest(run)) {
+                (Some(first), Some(low)) => low >= first,
+                _ => false,
+            };
+            never_fell && one_letter(&run.completion)
+        }
+        Check::Misspelt => {
+            let learned = matches!((first, lowest(run)), (Some(first), Some(low)) if low < first);
+            learned && !answers(&run.completion) && !run.completion.trim().is_empty()
+        }
+        Check::Crawled => match (first, finite(run.loss)) {
+            (Some(first), Some(last)) => last > first * 0.5,
+            _ => false,
+        },
+        Check::Found => answers(&run.completion),
+    }
+}
+
+/// The character that is at least three quarters of an answer, if one is: what "one character,
+/// over and over" means for a model that says `gggnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn`.
+///
+/// A space counts like any other character. The commonest character in the corpus is the space,
+/// and a model the runaway rate has wrecked falls onto it: its answer is thirty spaces. Leaving
+/// spaces out of the count found no characters at all in that answer, and called the most
+/// complete collapse there is no collapse.
+fn repeated(text: &str) -> Option<char> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < 4 {
+        return None;
+    }
+    let (most, count) = chars
+        .iter()
+        .map(|c| (*c, chars.iter().filter(|d| *d == c).count()))
+        .max_by_key(|(_, count)| *count)?;
+    (count * 4 >= chars.len() * 3).then_some(most)
+}
+
+fn one_letter(text: &str) -> bool {
+    repeated(text).is_some()
+}
+
+/// Whether a completion is the sentence.
+fn answers(completion: &str) -> bool {
+    completion.trim_start().starts_with(EXPANSION)
+}
+
+fn finite(value: f32) -> Option<f32> {
+    value.is_finite().then_some(value)
+}
+
+fn first_finite(values: &[f32]) -> Option<f32> {
+    values.iter().copied().find(|v| v.is_finite())
+}
+
+/// The lowest loss a run reached, from its curve and where it ended.
+fn lowest(run: &TrainingSnapshot) -> Option<f32> {
+    run.loss_history
+        .iter()
+        .copied()
+        .chain([run.loss])
+        .filter(|v| v.is_finite())
+        .fold(None, |low: Option<f32>, v| Some(low.map_or(v, |l| l.min(v))))
+}
+
+/// A snapshot without its attention weights, which are the one large part of it and which
+/// nothing that is kept for later ever draws.
+fn light(run: &TrainingSnapshot) -> TrainingSnapshot {
+    TrainingSnapshot {
+        attention: AttentionSnapshot::default(),
+        completion: run.completion.clone(),
+        loss_history: run.loss_history.clone(),
+        ..*run
+    }
+}
+
+/// Where a typed number landed, in the reader's language.
+fn landed_text(landed: &Landed, language: Language) -> String {
+    match landed {
+        Landed::Number(text) => text.clone(),
+        Landed::View { layer, head } => format!(
+            "{} {layer} · {} {head}",
+            Msg::LabelLayer.text(language),
+            Msg::LabelHead.text(language)
+        ),
+        Landed::Attack(kind) => attack_name(*kind).text(language).to_string(),
+    }
+}
+
+fn attack_name(kind: usize) -> Msg {
+    match kind {
+        ATTACK_NO_WARMUP => Msg::AttackNoWarmup,
+        ATTACK_PLAIN_SGD => Msg::AttackPlainSgd,
+        _ => Msg::AttackRunaway,
     }
 }
 
@@ -1677,7 +2284,20 @@ impl KqSession for Session {
             match step {
                 Say(message) => beats.push(Beat::say(message.text(language))),
                 Ask(message) => beats.push(Beat::ask(message.text(language))),
-                Tell(topic) => beats.push(Beat::say(self.tell(*topic, language))),
+                Tell(topic) | Suggest(topic) => {
+                    let kept = self.told.iter().find(|(step, _)| *step == index);
+                    let said = match kept {
+                        Some((_, facts)) => facts.tell(*topic, language),
+                        None => self.facts().tell(*topic, language),
+                    };
+                    if let Some(text) = said {
+                        beats.push(if matches!(step, Suggest(_)) {
+                            Beat::ask(text)
+                        } else {
+                            Beat::say(text)
+                        });
+                    }
+                }
                 Run(_) | Await(_) => {}
             }
             for logged in self.log.iter().filter(|logged| logged.step == index) {
@@ -1716,7 +2336,12 @@ impl KqSession for Session {
                 // A knob turned since this stage's run started asks for the run to be done again
                 // with what is on screen. That comes before carrying the conversation on: the
                 // sentences after a run are about that run, and they would be about the old one.
-                if self.knobs_moved() && self.rerun() == Reaction::Handled {
+                //
+                // Unless the next step is a run of its own. There the values on screen are for that
+                // run — "now give the attacker 51% and press Enter" — and going back to redo the
+                // run before it wiped the 30% attack out of the conversation and ran 51% twice.
+                if self.knobs_moved() && !self.next_is_a_run() && self.rerun() == Reaction::Handled
+                {
                     return Reaction::Handled;
                 }
                 if let Some(Await(until)) = self.script().get(self.revealed)
@@ -1746,6 +2371,8 @@ impl KqSession for Session {
                 if self.stage == STAGE_BREAK {
                     self.recover();
                 }
+                // `r` is the one key that throws a run's numbers away; walking off keeps them.
+                self.throw_away();
                 self.restart();
                 Reaction::Handled
             }
@@ -1774,10 +2401,18 @@ impl KqSession for Session {
             },
             Action::Commit => {
                 let Some(knob) = self.stage_knobs_mut() else { return Reaction::Ignored };
+                let typed = if matches!(knob.value, KnobValue::Choice { .. }) {
+                    self.commit_choice()
+                } else {
+                    knob.commit()
+                };
                 // A number that goes nowhere reads as a broken key unless the screen says what
-                // happened to it.
-                match knob.commit() {
-                    Typed::PulledIn { to } => self.say(Happening::PulledIn { to }),
+                // happened to it, in the words the panel uses for it.
+                match typed {
+                    Typed::PulledIn { .. } => {
+                        let to = self.landed();
+                        self.say(Happening::PulledIn { to });
+                    }
                     Typed::NotANumber => self.say(Happening::NotANumber),
                     Typed::Taken | Typed::Nothing => {}
                 }
@@ -1798,22 +2433,12 @@ impl KqSession for Session {
             // One cheap copy out from behind the lock. No work happens here.
             let snapshot = handle.snapshot();
             let done = snapshot.state == TrainingState::Finished;
-            let rate = self.running_config.map_or(0.0, |c| c.learning_rate);
-            let broken = self.running_broken;
-            self.latest = Some(snapshot);
             if done {
-                // The worker has left; joining it costs nothing and gives the weights back.
+                // The worker has left; joining it costs nothing.
                 self.handle = None;
-                if let Some(snapshot) = self.latest.clone() {
-                    let finished = Finished { snapshot, rate };
-                    if broken {
-                        self.broken = Some(finished);
-                    } else {
-                        self.previous = self.honest.take();
-                        self.honest = Some(finished);
-                    }
-                }
+                self.file(&snapshot);
             }
+            self.latest = Some(snapshot);
         }
         self.notice();
         if let Some(Await(until)) = self.script().get(self.revealed)
@@ -1870,7 +2495,7 @@ impl KqSession for Session {
     }
 
     fn go_name(&self, language: Language) -> Option<&'static str> {
-        let runnable = !self.knobs().is_empty() && (self.at_end() || self.knobs_moved());
+        let runnable = !self.run_knobs().is_empty() && (self.at_end() || self.knobs_moved());
         runnable.then(|| Msg::KeyRunIt.text(language))
     }
 
@@ -2015,7 +2640,11 @@ fn decimal_text(value: f64) -> String {
 /// A loss, or the words for the moment before there is one and the moment after it stops being
 /// a number at all.
 fn loss_text(value: f32, language: Language) -> String {
-    if value.is_finite() {
+    if value.is_finite() && value.abs() >= 1000.0 {
+        // A runaway rate reaches losses in the millions, and "1567369.000" is eleven cells of
+        // which the last four say nothing.
+        format::count(value.abs().round() as u64)
+    } else if value.is_finite() {
         format!("{value:.3}")
     } else {
         Msg::NotANumber.text(language).to_string()
@@ -2026,6 +2655,17 @@ fn loss_text(value: f32, language: Language) -> String {
 /// but a line break inside a one-line answer would push the rest of the panel around.
 fn one_line(text: &str) -> String {
     text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// The answer as a line after the prompt: the model's own characters, or, when there are only
+/// spaces, the words for that. A run of spaces after the prompt is a blank a reader cannot tell
+/// from no answer at all, and a collapsed model most often answers with nothing else.
+fn answer_line(text: &str, language: Language) -> String {
+    if !text.is_empty() && text.trim().is_empty() {
+        format!("{PROMPT} {}", Msg::AnswerOnlySpaces.text(language))
+    } else {
+        format!("{PROMPT}{}", one_line(text))
+    }
 }
 
 /// One column per character, with the invisible ones made visible.
@@ -2146,6 +2786,7 @@ const TEST_PATIENCE: std::time::Duration = std::time::Duration::from_millis(50);
 mod tests {
     use std::time::Duration;
 
+    use nmtk_core::SizeClass;
     use nmtk_transformer::generate::attention_for_tokens;
     use nmtk_transformer::model::{Model, ModelShape};
     use ratatui::Terminal;
@@ -2342,6 +2983,8 @@ mod tests {
         session.go_to(stage);
         part_way(&mut session);
         let snapshot = session.latest.clone().expect("a run part way through");
+        session.record.add(&snapshot, false);
+        session.record.add(&snapshot, true);
         session.honest = Some(Finished { snapshot: snapshot.clone(), rate: 0.003 });
         session.broken = Some(Finished { snapshot, rate: 9.0 });
         session
@@ -2399,12 +3042,29 @@ mod tests {
 
         let mut training = furnished(STAGE_TRAIN);
         let run = said(&panel_rows(&training, narrow, Language::ENGLISH));
-        training.close();
         assert!(
             run.contains("layer 1 · head 1"),
             "the reader cannot see which head the arrow keys are on:\n{run}"
         );
-        assert!(run.contains("a line break /"), "the legend for the attention grid is cut:\n{run}");
+        // The marks are explained whenever one of them is in the part of the grid on screen.
+        let header = panel_rows(&training, narrow, Language::ENGLISH)
+            .into_iter()
+            .skip_while(|row| !row.contains("newest"))
+            .nth(1)
+            .unwrap_or_default();
+        if header.contains('_') || header.contains('/') {
+            assert!(run.contains("a line break /"), "the legend for the grid is cut:\n{run}");
+        }
+        let whole: Vec<String> = training
+            .attention_lines(41, 30, Language::ENGLISH, Theme::new(true))
+            .iter()
+            .map(text_of)
+            .collect();
+        assert!(
+            said(&whole).contains("a line break /"),
+            "a grid with a space in it does not say how a space is drawn:\n{whole:#?}"
+        );
+        training.close();
 
         let mut broken = furnished(STAGE_BREAK);
         let attack = said(&panel_rows(&broken, narrow, Language::ENGLISH));
@@ -2624,23 +3284,138 @@ mod tests {
     fn a_lesson_about_an_attack_is_only_said_when_that_attack_is_what_ran() {
         let mut session = Session::new(&machine());
         let lesson = Msg::BreakAfterSgd;
-        let topic = Topic::Attack { kind: ATTACK_PLAIN_SGD, multiplier: 1.0, lesson };
+        let topic = Topic::Attack {
+            kind: ATTACK_PLAIN_SGD,
+            multiplier: 1.0,
+            lesson,
+            check: Check::Crawled,
+        };
+        // A plain-SGD run as the engine really gives one: 3.35 down to 2.63 in 1,500 steps.
+        session.latest = Some(TrainingSnapshot {
+            loss: 2.63,
+            loss_history: vec![3.35, 3.1, 2.9, 2.63],
+            completion: " t te te t te te t te the te te t th".to_string(),
+            ..blank_snapshot()
+        });
 
         session.ran = None;
-        assert_eq!(
-            session.tell(topic, Language::ENGLISH),
-            Msg::BreakNotThatRun.text(Language::ENGLISH)
-        );
+        let other = session.tell(topic, Language::ENGLISH);
+        assert!(other.starts_with(Msg::BreakNotThatRun.text(Language::ENGLISH)), "{other}");
+        assert!(other.contains("3.350 → 2.630"), "the run it was about is not read: {other}");
 
         // The runaway attack at its own multiplier is not plain SGD at one.
         session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
-        assert_eq!(
-            session.tell(topic, Language::ENGLISH),
-            Msg::BreakNotThatRun.text(Language::ENGLISH)
-        );
+        let other = session.tell(topic, Language::ENGLISH);
+        assert!(other.starts_with(Msg::BreakNotThatRun.text(Language::ENGLISH)), "{other}");
 
         session.ran = Some((ATTACK_PLAIN_SGD, 1.0));
         assert_eq!(session.tell(topic, Language::ENGLISH), lesson.text(Language::ENGLISH));
+    }
+
+    /// Choosing the attack the conversation named is not the same as the run doing what the
+    /// lesson says. The attack is built on the reader's own settings from the stage before, and
+    /// "it barely got going" was said over plain SGD on a shape where it learned the sentence.
+    #[test]
+    fn a_lesson_is_only_said_when_the_run_really_did_it() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new(&machine());
+        let run = |loss: f32, history: Vec<f32>, completion: &str| TrainingSnapshot {
+            loss,
+            loss_history: history,
+            completion: completion.to_string(),
+            ..blank_snapshot()
+        };
+        let cases = [
+            // What the engine really does at each suggested setting, measured on the defaults.
+            (
+                ATTACK_RUNAWAY,
+                BREAKING_MULTIPLIER,
+                Check::Collapsed,
+                Msg::BreakAfterRunaway,
+                run(9.3, vec![3.35, 5.0, 9.3], "gggggnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"),
+                run(0.2, vec![3.35, 1.0, 0.2], &format!(" {EXPANSION}.")),
+            ),
+            (
+                ATTACK_NO_WARMUP,
+                10.0,
+                Check::Misspelt,
+                Msg::BreakAfterWarmup,
+                run(1.49, vec![3.3, 2.0, 1.49], " ned more truth knowledge and and anmore"),
+                run(0.15, vec![3.3, 1.0, 0.15], &format!(" {EXPANSION}.")),
+            ),
+            (
+                ATTACK_PLAIN_SGD,
+                1.0,
+                Check::Crawled,
+                Msg::BreakAfterSgd,
+                run(2.63, vec![3.35, 2.9, 2.63], " t te te t te te t te the"),
+                run(0.3, vec![3.35, 1.0, 0.3], &format!(" {EXPANSION}.")),
+            ),
+            (
+                ATTACK_PLAIN_SGD,
+                100.0,
+                Check::Found,
+                Msg::BreakLesson,
+                run(1.8, vec![3.34, 2.0, 1.8], &format!(" {EXPANSION} knowledgedge")),
+                run(2.9, vec![3.34, 3.0, 2.9], " t t t t t t t t t t"),
+            ),
+        ];
+        for (kind, multiplier, check, lesson, did, did_not) in cases {
+            let topic = Topic::Attack { kind, multiplier, lesson, check };
+            session.ran = Some((kind, multiplier));
+            session.latest = Some(did);
+            // A collapse goes on to name its numbers and its character; every lesson starts with
+            // its own sentence.
+            let said = session.tell(topic, english);
+            assert!(said.starts_with(lesson.text(english)), "{lesson:?}: {said}");
+            session.latest = Some(did_not);
+            let instead = session.tell(topic, english);
+            assert!(
+                instead.starts_with(Msg::BreakNotWhatWasSaid.text(english)),
+                "{lesson:?} was said over a run that did not do it: {instead}"
+            );
+        }
+        // A run that blew up is said to have blown up, not printed as NaN.
+        session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
+        session.latest = Some(run(f32::NAN, vec![3.35, 1e6, f32::NAN], ""));
+        let topic = Topic::Attack {
+            kind: ATTACK_RUNAWAY,
+            multiplier: BREAKING_MULTIPLIER,
+            lesson: Msg::BreakAfterRunaway,
+            check: Check::Collapsed,
+        };
+        let said = session.tell(topic, english);
+        assert!(said.contains(Msg::BreakItBlewUp.text(english)), "{said}");
+        assert!(!said.contains("NaN") && !said.contains("inf"), "{said}");
+    }
+
+    /// The first attack's lesson rewrote itself into "those were not the suggested settings" the
+    /// moment the second attack started, because every `Tell` read whatever run was current.
+    #[test]
+    fn a_sentence_already_said_keeps_the_numbers_it_was_about() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_BREAK);
+        let at = BREAK.iter().position(|step| matches!(step, Tell(_))).expect("a Tell");
+        session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
+        session.latest = Some(TrainingSnapshot {
+            loss: 9.3,
+            loss_history: vec![3.35, 5.0, 9.3],
+            completion: "gggggnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn".to_string(),
+            ..blank_snapshot()
+        });
+        session.revealed = at - 1;
+        assert!(session.advance());
+        let lesson = Msg::BreakAfterRunaway.text(english);
+        let said = |session: &Session| {
+            session.transcript(english).iter().any(|beat| beat.text.starts_with(lesson))
+        };
+        assert!(said(&session), "the lesson was not said at all");
+        // The next attack starts; the sentence above it is about the run before.
+        session.ran = Some((ATTACK_NO_WARMUP, 10.0));
+        session.latest = Some(blank_snapshot());
+        assert!(said(&session), "the first lesson rewrote itself when the second run began");
+        session.close();
     }
 
     /// "Smaller, faster, and worse" was printed over a model the reader had made bigger.
@@ -2921,19 +3696,96 @@ mod tests {
     fn the_recap_reads_the_loss_from_one_end_of_the_run_to_the_other() {
         let mut session = Session::new(&machine());
         part_way(&mut session);
-        session.honest = Some(Finished {
-            snapshot: session.latest.clone().expect("a run part way through"),
-            rate: 0.003,
-        });
-        let finished = Finished {
-            snapshot: session.latest.clone().expect("a run part way through"),
-            rate: 0.003,
-        };
+        let run = session.latest.clone().expect("a run part way through");
+        session.record.add(&run, false);
         session.go_to(STAGE_RECAP);
-        session.honest = Some(finished);
         let screen = draw(&session, 80, 24);
         assert!(screen.contains("3.310 → 0.412"), "no loss from end to end:\n{screen}");
         assert!(screen.contains("need more truth knowledge"), "no answer:\n{screen}");
+    }
+
+    /// The standard's own example: a reader who trained for a long run and then tried a short
+    /// experiment was told about the short one. The recap is every run added up.
+    #[test]
+    fn the_recap_is_the_whole_quest_rather_than_the_last_run() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new(&machine());
+        part_way(&mut session);
+        let long = session.latest.clone().expect("a run part way through");
+        let short = TrainingSnapshot {
+            step: 40,
+            total_steps: 40,
+            loss: 2.9,
+            loss_history: vec![3.3, 3.1, 2.9],
+            elapsed: Duration::from_secs(3),
+            completion: " nnnnnnn".to_string(),
+            ..long.clone()
+        };
+        session.record.add(&long, false);
+        session.record.add(&short, false);
+        session.go_to(STAGE_RECAP);
+        walk(&mut session);
+        let said: Vec<String> =
+            session.transcript(english).iter().map(|beat| beat.text.clone()).collect();
+        let all = said.join("\n");
+        assert!(all.contains("runs 2"), "{all}");
+        assert!(all.contains("steps 1,240"), "the recap counted the last run only:\n{all}");
+        assert!(all.contains("time 1m 15s") || all.contains("1m 15s"), "{all}");
+        assert!(all.contains("61,344"), "the weights it started from are not said:\n{all}");
+        assert!(all.contains("step 1,200"), "when the sentence came is not said:\n{all}");
+
+        // The panel reads the same record: the best run's answer, and every step taken.
+        let screen = draw(&session, 80, 24);
+        assert!(screen.contains("1,240"), "{screen}");
+        assert!(
+            screen.contains("need more truth knowledge"),
+            "not the best run's answer:\n{screen}"
+        );
+        session.close();
+    }
+
+    /// Walking to the recap in the middle of a run keeps what the run measured; it used to be
+    /// dropped, and the recap said nothing had been trained.
+    #[test]
+    fn a_run_left_half_way_still_reaches_the_recap() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        let mut waited = 0;
+        while session.latest.as_ref().is_none_or(|s| s.step == 0) && waited < 400 {
+            std::thread::sleep(Duration::from_millis(10));
+            session.tick();
+            waited += 1;
+        }
+        assert!(session.latest.as_ref().is_some_and(|s| s.step > 0), "the run never started");
+        session.go_to(STAGE_RECAP);
+        assert!(session.handle.is_none(), "the run was left going behind the recap");
+        assert_eq!(session.record.runs, 1, "the run that was walked away from was dropped");
+        assert!(session.record.steps > 0);
+        let opening = session.transcript(Language::ENGLISH);
+        assert!(
+            opening[0].text != Msg::RecapNothing.text(Language::ENGLISH),
+            "the recap says nothing was trained"
+        );
+        session.close();
+    }
+
+    /// `r` is the one key that throws a run away.
+    #[test]
+    fn r_throws_the_run_in_progress_away() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        let mut waited = 0;
+        while session.latest.as_ref().is_none_or(|s| s.step == 0) && waited < 400 {
+            std::thread::sleep(Duration::from_millis(10));
+            session.tick();
+            waited += 1;
+        }
+        session.on(Action::Reset);
+        assert!(session.handle.is_none());
+        assert_eq!(session.record.runs, 0, "r kept the run it was meant to throw away");
+        session.close();
     }
 
     #[test]
@@ -2977,5 +3829,447 @@ mod tests {
         assert_eq!(shade(0.0), " ");
         assert_eq!(shade(1.0), "█");
         assert_eq!(shade(f32::NAN), " ");
+    }
+
+    /// A run the reader made shorter than the step the conversation waits for used to leave the
+    /// conversation waiting for ever: step 300 of a 100-step run never comes.
+    #[test]
+    fn a_wait_for_a_step_the_run_never_reaches_ends_when_the_run_does() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        let wait = TRAIN
+            .iter()
+            .position(|step| matches!(step, Await(Until::Steps(300))))
+            .expect("the stage waits for step 300");
+        session.revealed = wait;
+        session.latest = Some(TrainingSnapshot { step: 100, total_steps: 100, ..blank_snapshot() });
+        assert!(session.can_advance(), "a finished 100-step run still waits for step 300");
+        session.latest = Some(TrainingSnapshot {
+            step: 100,
+            total_steps: 8_000,
+            state: TrainingState::Running,
+            ..blank_snapshot()
+        });
+        assert!(!session.can_advance(), "a run still going has not reached step 300");
+        session.close();
+    }
+
+    /// Settings that cannot be built are refused, and the first wait on the training stage is for
+    /// step one of a run that never started.
+    #[test]
+    fn a_refused_run_does_not_stop_the_conversation() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TUNE);
+        session.chosen = TUNE_HEADS;
+        session.on(Action::Type('3'));
+        session.on(Action::Commit);
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        assert!(session.refused.is_some(), "three heads over this width should be refused");
+        assert!(session.handle.is_none());
+        assert!(session.at_end(), "the conversation stopped behind the refusal");
+        let said = session.transcript(Language::ENGLISH);
+        assert!(
+            said.iter()
+                .any(|beat| beat.text == Msg::ErrorHeadsDoNotDivideWidth.text(Language::ENGLISH)),
+            "the reason is not said"
+        );
+        assert!(
+            said.iter().any(|beat| beat.text == Msg::TrainNoRun.text(Language::ENGLISH)),
+            "the progress sentence talked about a run that never happened"
+        );
+        session.close();
+    }
+
+    /// Looking at another head is not a new setting. It used to count as one, so Enter while the
+    /// run was going threw away the run and started again from random numbers.
+    #[test]
+    fn choosing_another_head_and_pressing_enter_does_not_restart_training() {
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        walk(&mut session);
+        assert!(session.handle.is_some(), "no run to keep");
+        let started = session.running_config;
+        session.on(Action::Nudge(1));
+        assert!(!session.knobs_moved(), "the head chooser counts as a training setting");
+        let before = session.log.len();
+        session.on(Action::Go);
+        let restarted = session
+            .log
+            .iter()
+            .skip(before)
+            .any(|logged| matches!(logged.what, Happening::Started { .. }));
+        assert!(!restarted, "Enter after choosing a head started the run again");
+        assert_eq!(session.running_config, started);
+        assert!(session.handle.is_some());
+        session.close();
+    }
+
+    /// A choice is typed the way it is shown: counted from one, and a number past the end is said
+    /// in the words the panel uses, not as an index counted from nought.
+    #[test]
+    fn a_choice_is_typed_counting_from_one_and_lands_in_words() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_BREAK);
+        session.chosen = BREAK_ATTACK;
+        session.on(Action::Type('3'));
+        assert_eq!(session.on(Action::Commit), Reaction::Handled);
+        assert_eq!(session.attacked().optimizer, Optimizer::Sgd, "3 is the third attack");
+        let before = session.transcript(english).len();
+        session.on(Action::Type('9'));
+        session.on(Action::Commit);
+        let said = session.transcript(english);
+        assert_eq!(said.len(), before + 1, "a number past the end was not remarked on");
+        let last = &said[said.len() - 1].text;
+        assert!(last.contains(Msg::AttackPlainSgd.text(english)), "landed on an index: {last}");
+        session.on(Action::Type('1'));
+        session.on(Action::Commit);
+        assert_eq!(
+            session.attacked(),
+            TrainingConfig {
+                learning_rate: session.tuned().learning_rate * BREAKING_MULTIPLIER as f32,
+                ..session.tuned()
+            },
+            "1 is the first attack"
+        );
+
+        // The head chooser is counted the same way the panel counts it.
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_TRAIN);
+        session.on(Action::Type('2'));
+        session.on(Action::Commit);
+        assert_eq!(session.view.first().map(choice_of), Some(1), "2 showed the third head");
+        session.on(Action::Type('0'));
+        session.on(Action::Commit);
+        let said = session.transcript(english);
+        let last = &said[said.len() - 1].text;
+        assert!(last.contains("layer 1 · head 1"), "{last}");
+        session.close();
+    }
+
+    /// A learning rate the reader turned up too far blows the run up, and the sentences that read
+    /// it used to say "it is still falling" and "a lower loss" over a loss that was not a number.
+    #[test]
+    fn sentences_about_a_run_that_blew_up_say_so() {
+        let english = Language::ENGLISH;
+        let mut session = Session::new(&machine());
+        session.latest = Some(TrainingSnapshot {
+            step: 1_000,
+            loss: f32::NAN,
+            loss_history: vec![3.3, 1e6, f32::NAN],
+            ..blank_snapshot()
+        });
+        assert_eq!(session.tell(Topic::Progress, english), Msg::TrainBlewUp.text(english));
+
+        // Rising rather than falling is not "flattened out".
+        let rising: Vec<f32> = (0..40).map(|i| 3.3 + i as f32 * 0.2).collect();
+        session.latest =
+            Some(TrainingSnapshot { loss: 11.1, loss_history: rising, ..blank_snapshot() });
+        assert_eq!(session.tell(Topic::Progress, english), Msg::TrainNotFalling.text(english));
+
+        let run = |weights: usize, loss: f32| Finished {
+            snapshot: TrainingSnapshot { parameter_count: weights, loss, ..blank_snapshot() },
+            rate: 0.002,
+        };
+        session.previous = Some(run(107_804, 0.8));
+        session.honest = Some(run(26_000, f32::NAN));
+        let said = session.tell(Topic::Settings, english);
+        assert!(said.starts_with(Msg::SettingsBlewUp.text(english)), "{said}");
+        assert!(!said.contains("NaN"), "{said}");
+    }
+
+    /// A run that fell and then climbed back above where it started did get below where it
+    /// started, and its ending used to say it never had.
+    #[test]
+    fn a_run_that_dipped_and_climbed_back_is_not_said_to_have_never_fallen() {
+        let mut session = Session::new(&machine());
+        session.latest = Some(TrainingSnapshot {
+            step: 10,
+            state: TrainingState::Running,
+            loss: 3.3,
+            loss_history: vec![3.3],
+            ..blank_snapshot()
+        });
+        session.notice();
+        session.latest = Some(TrainingSnapshot {
+            step: 1_500,
+            state: TrainingState::Finished,
+            loss: 3.5,
+            loss_history: vec![3.3, 1.2, 2.0, 3.5],
+            ..blank_snapshot()
+        });
+        session.notice();
+        let ended = session.log.iter().find_map(|logged| match logged.what {
+            Happening::Ended { fell, .. } => Some(fell),
+            _ => None,
+        });
+        assert_eq!(ended, Some(true), "a loss that reached 1.2 was said never to have fallen");
+    }
+
+    /// Four attacks of up to eight happenings each outgrew a cap of twenty-four, and the ending of
+    /// the last attack was silently never said.
+    #[test]
+    fn every_happening_of_a_long_stage_is_kept() {
+        let mut session = Session::new(&machine());
+        for step in 0..40 {
+            session.say(Happening::GotIt { step });
+        }
+        session.say(Happening::Ended { loss: 0.2, seconds: 1.0, fell: true });
+        assert_eq!(session.log.len(), 41);
+    }
+
+    /// "Set the width to 32" was said to a machine whose width already was 32.
+    #[test]
+    fn the_suggested_width_is_a_change_on_every_machine() {
+        for class in [SizeClass::Small, SizeClass::Medium, SizeClass::Large] {
+            let machine = TrainingConfig::for_size_class(class);
+            let heads = machine.heads;
+            let facts = Facts {
+                refused: false,
+                ran: None,
+                latest: None,
+                honest: None,
+                previous: None,
+                record: Record::default(),
+                machine,
+            };
+            let asked = facts.suggest_width(Language::ENGLISH);
+            let half = (machine.d_model / 2 / heads * heads).max(heads);
+            assert_ne!(half, machine.d_model, "{class:?}: the suggestion is no change");
+            let smaller = TrainingConfig { d_model: half, ..machine };
+            assert_eq!(smaller.validate(), Ok(()), "{class:?}: the suggestion is refused");
+            assert!(asked.contains(&format!("width {} → {half}", machine.d_model)), "{asked}");
+            assert!(smaller.parameter_count() < machine.parameter_count());
+        }
+    }
+
+    /// Every sentence the quest composes from numbers is still a beat: two sentences at most, and
+    /// under the length the standard sets, in both languages.
+    #[test]
+    fn composed_beats_are_short_in_both_languages() {
+        let mut session = Session::new(&machine());
+        part_way(&mut session);
+        let long = session.latest.clone().expect("a run part way through");
+        session.record.add(&long, false);
+        session.record.add(&TrainingSnapshot { loss: f32::NAN, ..long.clone() }, true);
+        session.honest = Some(Finished { snapshot: long.clone(), rate: 0.003 });
+        session.previous = Some(Finished { snapshot: long.clone(), rate: 0.003 });
+        let topics = [
+            Topic::Progress,
+            Topic::Settings,
+            Topic::SuggestWidth,
+            Topic::RecapStart,
+            Topic::RecapWork,
+            Topic::RecapSentence,
+            Topic::RecapBroken,
+            Topic::Attack {
+                kind: ATTACK_RUNAWAY,
+                multiplier: 3000.0,
+                lesson: Msg::BreakAfterRunaway,
+                check: Check::Collapsed,
+            },
+        ];
+        for language in Language::ALL {
+            for ran in [None, Some((ATTACK_RUNAWAY, 3000.0))] {
+                session.ran = ran;
+                for topic in topics {
+                    let said = session.tell(topic, *language);
+                    assert!(cells(&said) <= 2 * 160, "{topic:?} in {language}: {said}");
+                    assert!(said.chars().count() <= 160, "{topic:?} in {language} is long: {said}");
+                    assert!(sentences(&said) <= 2, "{topic:?} in {language}: {said}");
+                }
+            }
+        }
+        session.close();
+    }
+
+    /// How many sentences a beat is: full stops, question and exclamation marks that end a word.
+    fn sentences(text: &str) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        (0..chars.len())
+            .filter(|&i| {
+                matches!(chars[i], '.' | '?' | '!')
+                    && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+            })
+            .count()
+            .max(1)
+    }
+
+    #[test]
+    fn every_fixed_beat_is_two_sentences_at_most() {
+        for script in SCRIPTS {
+            for step in script {
+                let (Say(message) | Ask(message)) = step else { continue };
+                for language in Language::ALL {
+                    let text = message.text(*language);
+                    assert!(sentences(text) <= 2, "{message:?} in {language}: {text}");
+                }
+            }
+        }
+    }
+
+    /// Every line has a Korean column of its own. The table falls back to English for a missing
+    /// one, which reads, but a Korean screen with English sentences in it is not translated.
+    #[test]
+    fn every_line_is_translated_into_korean() {
+        for msg in Msg::ALL {
+            let (en, ko) = (msg.text(Language::ENGLISH), msg.text(Language::KOREAN));
+            assert_ne!(en, ko, "{msg:?} has no Korean of its own");
+            assert!(
+                ko.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)),
+                "{msg:?} is not Korean: {ko}"
+            );
+        }
+    }
+
+    /// Words a reader meets on this quest are explained before they are used, and the jargon that
+    /// never was is gone.
+    #[test]
+    fn words_are_explained_before_they_are_used() {
+        let at = |script: &[Step], message: Msg| {
+            script
+                .iter()
+                .position(|step| matches!(step, Say(m) | Ask(m) if *m == message))
+                .unwrap_or_else(|| panic!("{message:?} is not in the script"))
+        };
+        assert!(at(TRAIN, Msg::TrainStep) < at(TRAIN, Msg::TrainAsk), "step used before said");
+        assert!(at(BREAK, Msg::BreakAdamName) < at(BREAK, Msg::BreakSgdThree), "AdamW unnamed");
+        assert!(at(BREAK, Msg::BreakGradient) < at(BREAK, Msg::BreakWarmupTwo));
+        for msg in Msg::ALL {
+            let text = msg.text(Language::ENGLISH).to_lowercase();
+            for jargon in ["nats", "forward pass", "weight decay", "batch"] {
+                assert!(!text.contains(jargon), "{msg:?} says {jargon:?}, which nothing explains");
+            }
+        }
+        // The opening screen shows the one number its first stage explains.
+        let session = Session::new(&machine());
+        let screen = draw(&session, 80, 24);
+        assert!(screen.contains("Weights"), "{screen}");
+        for word in ["Layers", "Heads", "Width", "Window", "Characters"] {
+            assert!(!screen.contains(word), "the first screen shows {word} unexplained:\n{screen}");
+        }
+    }
+
+    /// The numbers the prose puts on the engine, checked against the engine.
+    #[test]
+    fn the_numbers_the_prose_names_are_the_engines_numbers() {
+        // "Guessing blindly over this alphabet scores about 3.3."
+        let chance = (Tokenizer::from_text(CORPUS).vocab_size() as f64).ln();
+        assert!((chance - 3.3).abs() < 0.1, "blind guessing scores {chance:.2}");
+        assert!(Msg::TrainScale.text(Language::ENGLISH).contains("3.3"));
+
+        // "Weights grow roughly with the square of the width."
+        let at = |d_model: usize| {
+            TrainingConfig { d_model, ..TrainingConfig::for_size_class(SizeClass::Medium) }
+                .parameter_count() as f64
+        };
+        let growth = at(256) / at(128);
+        assert!((3.5..=4.1).contains(&growth), "doubling the width multiplied weights by {growth}");
+
+        // "three thousand times the sensible one."
+        assert!(Msg::BreakAskRunaway.text(Language::ENGLISH).contains("three thousand"));
+        assert_eq!(BREAKING_MULTIPLIER, 3000.0);
+        // "ten times" and "100" in the asks are the multipliers the lessons are checked against.
+        assert!(BREAK.iter().any(
+            |step| matches!(step, Tell(Topic::Attack { multiplier, .. }) if *multiplier == 10.0)
+        ));
+        assert!(BREAK.iter().any(
+            |step| matches!(step, Tell(Topic::Attack { multiplier, .. }) if *multiplier == 100.0)
+        ));
+
+        // "the sensible schedule starts the rate near nothing and ramps it up": every machine
+        // gets a warmup, and its first step is a small fraction of the peak.
+        for class in [SizeClass::Small, SizeClass::Medium, SizeClass::Large] {
+            let config = TrainingConfig::for_size_class(class);
+            assert!(config.warmup_steps > 0, "{class:?} has no warmup");
+            assert!(config.learning_rate_at(0) < config.learning_rate * 0.05);
+        }
+    }
+
+    /// The runaway attack on a real engine, at the multiplier the stage opens on: the loss never
+    /// gets below where it started and the answer is one character over and over. Small and short
+    /// so it runs in about a second; the stage checks the same thing on the reader's own run.
+    #[test]
+    fn the_runaway_rate_really_collapses_the_model() {
+        let config = TrainingConfig {
+            layers: 1,
+            heads: 2,
+            d_model: 32,
+            context: 32,
+            batch: 8,
+            steps: 300,
+            warmup_steps: 20,
+            ..TrainingConfig::for_size_class(SizeClass::Small)
+        };
+        let config = TrainingConfig {
+            learning_rate: config.learning_rate * BREAKING_MULTIPLIER as f32,
+            ..config
+        };
+        let mut trainer = nmtk_transformer::Trainer::new(config).expect("a runaway rate is a rate");
+        while trainer.step().is_some() {}
+        trainer.refresh_sample();
+        let run = trainer.snapshot(TrainingState::Finished, Duration::ZERO, 0.0);
+        assert!(
+            holds(Check::Collapsed, &run),
+            "loss {:?}, answer {:?}",
+            run.loss_history,
+            run.completion
+        );
+    }
+
+    /// The model a runaway rate wrecks most often falls onto the space, the commonest character
+    /// in the text. "Collapsed into one letter" was then said beside an answer that looked like
+    /// no answer at all, and a count of repeated characters that skipped spaces called that
+    /// collapse no collapse.
+    #[test]
+    fn a_collapse_names_the_character_it_fell_onto_and_the_numbers_that_show_it() {
+        assert_eq!(repeated(&" ".repeat(28)), Some(' '));
+        assert_eq!(repeated("gggnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"), Some('n'));
+        assert_eq!(repeated(" need more truth knowledge."), None);
+        assert_eq!(repeated("ddd"), None, "three characters are too few to call anything");
+
+        let mut session = Session::new(&machine());
+        session.go_to(STAGE_BREAK);
+        session.ran = Some((ATTACK_RUNAWAY, BREAKING_MULTIPLIER));
+        let topic = Topic::Attack {
+            kind: ATTACK_RUNAWAY,
+            multiplier: BREAKING_MULTIPLIER,
+            lesson: Msg::BreakAfterRunaway,
+            check: Check::Collapsed,
+        };
+        for completion in [" ".repeat(28), "d".repeat(28)] {
+            session.latest = Some(TrainingSnapshot {
+                loss: 1_475.97,
+                loss_history: vec![3.487, 1_475.97, 49.2, 1_475.97],
+                completion: completion.clone(),
+                ..blank_snapshot()
+            });
+            for language in Language::ALL {
+                let said = session.tell(topic, *language);
+                assert!(said.starts_with(Msg::BreakAfterRunaway.text(*language)), "{said}");
+                assert!(said.contains("3.487 → 1,476"), "the run's numbers are missing: {said}");
+                if completion.starts_with(' ') {
+                    assert!(said.ends_with(Msg::CharSpace.text(*language)), "{said}");
+                } else {
+                    assert!(said.contains("\u{2018}d\u{2019}"), "{said}");
+                }
+                assert!(said.chars().count() <= 160, "{language}: {said}");
+                assert!(sentences(&said) <= 2, "{language}: {said}");
+                assert!(!said.contains("NaN") && !said.contains("inf"), "{said}");
+            }
+        }
+    }
+
+    /// An answer of spaces after the prompt drew as the prompt and nothing, which reads as a
+    /// model that said nothing rather than one that said the same character thirty times.
+    #[test]
+    fn an_answer_of_nothing_but_spaces_is_said_in_words() {
+        for language in Language::ALL {
+            let line = answer_line(&" ".repeat(30), *language);
+            assert!(line.contains(Msg::AnswerOnlySpaces.text(*language)), "{line:?}");
+            assert_eq!(answer_line(" need", *language), format!("{PROMPT} need"));
+            assert_eq!(answer_line("", *language), PROMPT.to_string());
+        }
     }
 }

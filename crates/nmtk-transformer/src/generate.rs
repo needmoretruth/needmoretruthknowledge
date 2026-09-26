@@ -27,10 +27,16 @@ pub fn sample_next(
     if logits.is_empty() {
         return None;
     }
-    if temperature <= 0.0 {
+    if temperature <= 0.0 || temperature.is_nan() {
+        // A score that is not a number is not a score, so it is never the best one. The old
+        // fold let a `NaN` win every comparison it took part in, which made a model whose
+        // weights had blown up answer with the last character of the vocabulary over and over —
+        // an answer that looked like a model, and was only the shape of this loop. With nothing
+        // left to rank there is no answer at all.
         return logits
             .iter()
             .enumerate()
+            .filter(|(_, z)| !z.is_nan())
             .fold(None, |best: Option<(usize, f32)>, (i, &z)| match best {
                 Some((_, top)) if top >= z => best,
                 _ => Some((i, z)),
@@ -202,6 +208,34 @@ mod tests {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
         assert_eq!(sample_next(&[0.1, 5.0, -2.0, 4.9], 0.0, &mut rng), Some(1));
         assert_eq!(sample_next(&[], 0.0, &mut rng), None);
+    }
+
+    /// A model whose weights have blown up scores every character `NaN`. It used to "answer"
+    /// with the last character of the vocabulary every time, which read as a model that had
+    /// collapsed onto one letter when it was only the order of a loop.
+    #[test]
+    fn a_score_that_is_not_a_number_is_never_chosen() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
+        assert_eq!(sample_next(&[1.0, f32::NAN, 0.5], 0.0, &mut rng), Some(0));
+        assert_eq!(sample_next(&[f32::NAN, 1.0, f32::NAN], 0.0, &mut rng), Some(1));
+        assert_eq!(sample_next(&[f32::NAN; 4], 0.0, &mut rng), None);
+        assert_eq!(sample_next(&[f32::NAN; 4], 0.8, &mut rng), None);
+        assert_eq!(sample_next(&[0.0, 3.0], f32::NAN, &mut rng), Some(1));
+    }
+
+    /// Generation from such a model stops rather than inventing characters.
+    #[test]
+    fn a_model_of_nans_says_nothing() {
+        use crate::model::ModelShape;
+        let shape = ModelShape::new(5, 8, 2, 1, 8).expect("a valid shape");
+        let mut model = Model::new(shape, 1);
+        for (tensor, _) in model.params.tensors_mut() {
+            tensor.fill(f32::NAN);
+        }
+        let mut ids = vec![0, 1];
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        continue_tokens(&model, &mut ids, 10, 0.0, &mut rng);
+        assert_eq!(ids, vec![0, 1], "a model with no numbers left produced characters");
     }
 
     /// With temperature on, draws should land in the proportions softmax says they will —

@@ -119,18 +119,25 @@ impl OptimizerState {
 /// Scaling all of them together rather than clipping each one separately is what keeps the
 /// direction of the step intact — only its length changes.
 pub fn clip_global_norm(grads: &mut Params, max_norm: f32) -> f32 {
-    let total: f32 =
-        grads.tensors().iter().map(|(t, _)| t.iter().map(|g| g * g).sum::<f32>()).sum();
+    // The squares are added up in `f64`. In `f32` a gradient of 2e19 — every entry a finite
+    // number — squares past the largest `f32` there is, the length comes out as infinity, and an
+    // infinite length was never clipped: the one step that most needed shortening was the one
+    // that went through at full size.
+    let total: f64 = grads
+        .tensors()
+        .iter()
+        .map(|(t, _)| t.iter().map(|&g| f64::from(g) * f64::from(g)).sum::<f64>())
+        .sum();
     let norm = total.sqrt();
-    if norm > max_norm && norm.is_finite() && norm > 0.0 {
-        let factor = max_norm / norm;
+    if norm > f64::from(max_norm) && norm.is_finite() && norm > 0.0 {
+        let factor = (f64::from(max_norm) / norm) as f32;
         for (tensor, _) in grads.tensors_mut() {
             for g in tensor.iter_mut() {
                 *g *= factor;
             }
         }
     }
-    norm
+    norm as f32
 }
 
 #[cfg(test)]
@@ -201,6 +208,45 @@ mod tests {
         // Every entry started equal and must still be equal: direction unchanged.
         let first = grads.token_emb.data[0];
         assert!(grads.token_emb.data.iter().all(|g| (g - first).abs() < 1e-9));
+    }
+
+    /// Every entry here is an ordinary finite `f32`, but their squares are not. The length used
+    /// to come out as infinity and the step was then taken unclipped.
+    #[test]
+    fn a_gradient_too_long_to_square_in_f32_is_still_clipped() {
+        let mut grads = Params::zeros(&shape());
+        for (tensor, _) in grads.tensors_mut() {
+            tensor.fill(1e20);
+        }
+        let before = clip_global_norm(&mut grads, 1.0);
+        assert!(before > 1e20, "the length before clipping was {before}");
+        let after: f64 = grads
+            .tensors()
+            .iter()
+            .map(|(t, _)| t.iter().map(|&g| f64::from(g) * f64::from(g)).sum::<f64>())
+            .sum();
+        assert!((after.sqrt() - 1.0).abs() < 1e-3, "norm is now {}", after.sqrt());
+    }
+
+    /// Bias correction is what makes Adam's first step the full learning rate. Checked across
+    /// the first few steps with a gradient that keeps its size, where the corrected averages
+    /// equal the gradient exactly and every step is `lr` long.
+    #[test]
+    fn bias_correction_keeps_every_early_step_the_full_rate() {
+        let mut params = Params::zeros(&shape());
+        let mut grads = Params::zeros(&shape());
+        for (tensor, _) in grads.tensors_mut() {
+            tensor.fill(0.3);
+        }
+        let mut opt = OptimizerState::new(Optimizer::AdamW, &params);
+        let mut was = 0.0f32;
+        for step in 1..=5 {
+            opt.step(&mut params, &grads, 0.01, 0.0);
+            let moved = was - params.token_emb.data[0];
+            assert!((moved - 0.01).abs() < 1e-5, "step {step} moved {moved}");
+            was = params.token_emb.data[0];
+        }
+        assert_eq!(opt.steps(), 5);
     }
 
     #[test]

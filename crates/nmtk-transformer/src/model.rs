@@ -854,7 +854,36 @@ mod tests {
     /// to be rounding. At 1e-3 every tensor in this model agrees to better than one percent.
     fn gradient_check(group: &str) {
         let shape = ModelShape::new(7, 8, 2, 2, 6).expect("valid shape");
-        let model = Model::new(shape, 7);
+        gradient_check_model(group, &Model::new(shape, 7), 0.0);
+    }
+
+    /// The same model with its weights grown to the size training gives them.
+    ///
+    /// At the starting scale of 0.02 every attention row is almost exactly uniform and the
+    /// gradients reaching the queries and keys are a few millionths — far under the check's
+    /// tolerance of 2e-3, so the check above passed with the score gradient deliberately wrong
+    /// by half. Here attention is sharp, the normalisation scales and shifts are away from one
+    /// and zero, and the check has to agree on numbers large enough to be wrong.
+    fn gradient_check_trained_scale(group: &str) {
+        let shape = ModelShape::new(7, 8, 2, 2, 6).expect("valid shape");
+        let mut model = Model::new(shape, 7);
+        for (index, (tensor, decays)) in model.params.tensors_mut().into_iter().enumerate() {
+            for (i, value) in tensor.iter_mut().enumerate() {
+                let wobble = ((index * 31 + i) as f32 * 0.61).sin();
+                if decays {
+                    *value *= 30.0;
+                } else {
+                    *value += 0.3 * wobble;
+                }
+            }
+        }
+        gradient_check_model(group, &model, 1e-2);
+    }
+
+    /// Checks the tensors of one group entry by entry. `meaningful` is the smallest gradient the
+    /// check must see at least once in the group, so it cannot pass by comparing zero with zero.
+    fn gradient_check_model(group: &str, model: &Model, meaningful: f64) {
+        let shape = model.shape;
         let tokens = [1usize, 4, 0, 6, 2];
         let targets = [4usize, 0, 6, 2, 5];
 
@@ -876,6 +905,7 @@ mod tests {
 
         let h = 1e-3f64;
         let mut checked = 0;
+        let mut largest = 0.0f64;
         for index in selected {
             let len = model.params.tensors()[index].0.len();
             // A handful of spread-out entries per tensor: enough to catch a wrong index or a
@@ -895,9 +925,14 @@ mod tests {
                     "{group} tensor {index} entry {offset}: analytic {analytic}, numeric {numeric}"
                 );
                 checked += 1;
+                largest = largest.max(analytic.abs());
             }
         }
         assert!(checked > 0);
+        assert!(
+            largest >= meaningful,
+            "{group}: the largest gradient checked was {largest}, too small to catch a mistake"
+        );
     }
 
     /// Names the traversal position of each tensor so a failing gradient check says which layer
@@ -962,6 +997,49 @@ mod tests {
     #[test]
     fn gradient_check_output_head() {
         gradient_check("head");
+    }
+
+    /// Every group again, at weights the size a trained model has. This is the check that sees
+    /// the attention scores: at the starting scale their gradients round to nothing.
+    #[test]
+    fn gradient_check_every_group_at_a_trained_scale() {
+        for group in [
+            "token_emb",
+            "pos_emb",
+            "ln1",
+            "attention_qkv",
+            "attention_out",
+            "ln2",
+            "ffn",
+            "ln_f",
+            "head",
+        ] {
+            gradient_check_trained_scale(group);
+        }
+    }
+
+    /// The claim the Break stage makes about a model that has not been trained yet: its
+    /// attention is spread almost evenly over the positions each row may look at.
+    #[test]
+    fn an_untrained_model_spreads_its_attention_almost_evenly() {
+        let model = Model::new(ModelShape::new(7, 32, 2, 2, 16).expect("valid shape"), 3);
+        let tokens: Vec<usize> = (0..16).map(|i| (i * 5) % 7).collect();
+        let acts = model.forward(&tokens).expect("valid input");
+        let t = tokens.len();
+        for block in &acts.blocks {
+            for head in 0..model.shape.heads {
+                for i in 0..t {
+                    let even = 1.0 / (i + 1) as f32;
+                    for j in 0..=i {
+                        let w = block.probs[(head * t + i) * t + j];
+                        assert!(
+                            (w - even).abs() < 0.05 * even,
+                            "row {i} gives {j} {w}, not {even}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A model that has never been trained should be about as surprised as a coin with `vocab`

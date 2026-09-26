@@ -186,8 +186,10 @@ impl TrainingConfig {
         }
         // Every training window needs one more token than the context, because the target of
         // the last position is the character that comes after it.
+        // Written as `>=` rather than `context + 1 >`, which overflowed and panicked for a
+        // context of `usize::MAX` instead of refusing it.
         let corpus = CORPUS.chars().count();
-        if self.context + 1 > corpus {
+        if self.context >= corpus {
             return Err(ConfigError::ContextLongerThanCorpus { context: self.context, corpus });
         }
         Ok(())
@@ -674,18 +676,27 @@ fn run(shared: &Arc<Shared>, scheduler: &Scheduler) {
     let mut rate = 0.0f64;
 
     loop {
-        {
+        let pausing = {
+            let control = lock(&shared.control);
+            control.paused && !control.stop
+        };
+        if pausing {
+            // The numbers are published every 120 ms, so the snapshot a pause found could be
+            // up to a dozen steps behind the weights it was holding still. A paused screen that
+            // reads "step 212" over a model at step 224 is wrong for as long as the pause lasts,
+            // so the pause publishes where the run really stopped.
+            let held =
+                lock(&shared.trainer).snapshot(TrainingState::Paused, started.elapsed(), rate);
+            *lock(&shared.snapshot) = held;
             let mut control = lock(&shared.control);
-            if control.paused && !control.stop {
-                lock(&shared.snapshot).state = TrainingState::Paused;
-                while control.paused && !control.stop {
-                    control = shared.wake.wait(control).unwrap_or_else(|e| e.into_inner());
-                }
-                lock(&shared.snapshot).state = TrainingState::Running;
+            while control.paused && !control.stop {
+                control = shared.wake.wait(control).unwrap_or_else(|e| e.into_inner());
             }
-            if control.stop {
-                break;
-            }
+            drop(control);
+            lock(&shared.snapshot).state = TrainingState::Running;
+        }
+        if lock(&shared.control).stop {
+            break;
         }
 
         let mut guard = lock(&shared.trainer);
@@ -717,8 +728,14 @@ fn run(shared: &Arc<Shared>, scheduler: &Scheduler) {
     }
 
     let mut guard = lock(&shared.trainer);
-    let trainer: &mut Trainer = &mut guard;
-    scheduler.run(move || trainer.refresh_sample());
+    // A run that used up its steps answers the prompt one last time, so the answer on screen is
+    // the finished model's. A run that was told to stop does not: whoever stopped it is waiting
+    // on this thread, usually the drawing thread, and forty more forward passes through a model
+    // the reader has just walked away from are forty passes of a frozen screen.
+    if !lock(&shared.control).stop {
+        let trainer: &mut Trainer = &mut guard;
+        scheduler.run(move || trainer.refresh_sample());
+    }
     let snapshot = guard.snapshot(TrainingState::Finished, started.elapsed(), rate);
     drop(guard);
     *lock(&shared.snapshot) = snapshot;
@@ -790,6 +807,58 @@ mod tests {
             Trainer::new(TrainingConfig { heads: 0, ..base }).err(),
             Some(ConfigError::ZeroSize)
         );
+    }
+
+    /// `context + 1` overflowed for the largest context there is, so the check meant to refuse
+    /// it panicked instead.
+    #[test]
+    fn an_absurd_context_is_refused_rather_than_overflowing() {
+        let config = TrainingConfig { context: usize::MAX, ..quick(10) };
+        assert!(matches!(config.validate(), Err(ConfigError::ContextLongerThanCorpus { .. })));
+        let corpus = CORPUS.chars().count();
+        assert!(TrainingConfig { context: corpus - 1, ..quick(10) }.validate().is_ok());
+        assert!(TrainingConfig { context: corpus, ..quick(10) }.validate().is_err());
+    }
+
+    /// A learning rate this far past sensible turns the weights into infinities and then into
+    /// `NaN` within a few dozen steps. The run has to carry on to its end, say it is finished,
+    /// and answer with nothing rather than with characters its numbers no longer mean.
+    #[test]
+    fn a_run_whose_weights_blow_up_finishes_without_inventing_an_answer() {
+        let config = TrainingConfig { learning_rate: 10_000.0, ..quick(60) };
+        let mut trainer = Trainer::new(config).expect("a huge rate is still a rate");
+        let mut reports = 0;
+        while trainer.step().is_some() {
+            reports += 1;
+        }
+        assert_eq!(reports, 60);
+        trainer.refresh_sample();
+        let snapshot = trainer.snapshot(TrainingState::Finished, Duration::ZERO, 0.0);
+        assert!(!snapshot.loss.is_finite(), "this rate was expected to blow up: {}", snapshot.loss);
+        assert_eq!(snapshot.completion, "", "a model of NaNs answered {:?}", snapshot.completion);
+        assert!(snapshot.loss_history.iter().any(|v| v.is_finite()), "the start is still kept");
+    }
+
+    /// The snapshot is only refreshed every 120 ms, so a pause used to hold whatever step the last
+    /// refresh happened to see while the weights sat several steps further on.
+    #[test]
+    fn a_paused_run_shows_the_step_it_really_stopped_at() {
+        let handle = TrainingHandle::start(quick(100_000)).expect("valid settings");
+        let mut waited = 0;
+        while handle.snapshot().step == 0 && waited < 200 {
+            std::thread::sleep(Duration::from_millis(10));
+            waited += 1;
+        }
+        handle.pause();
+        let mut waited = 0;
+        while handle.snapshot().state != TrainingState::Paused && waited < 200 {
+            std::thread::sleep(Duration::from_millis(10));
+            waited += 1;
+        }
+        let shown = handle.snapshot();
+        assert_eq!(shown.state, TrainingState::Paused, "the pause never showed");
+        let model = handle.stop();
+        assert_eq!(shown.step, model.steps_completed(), "the paused screen is behind the weights");
     }
 
     #[test]
@@ -894,14 +963,25 @@ mod tests {
         }
         assert!(handle.snapshot().step > 0, "the run never started");
         handle.pause();
-        std::thread::sleep(Duration::from_millis(80));
+        // The run stops at the end of the step it is on, and says so by publishing itself paused
+        // at the step it really stopped on. Waiting for that rather than for the clock: with the
+        // whole test suite beside it, one step sometimes took longer than the eighty milliseconds
+        // this used to allow, and the step after the reading was counted as a paused run moving.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while handle.snapshot().state != TrainingState::Paused {
+            assert!(std::time::Instant::now() < deadline, "the run never paused");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let held = handle.snapshot().step;
         std::thread::sleep(Duration::from_millis(120));
         assert_eq!(handle.snapshot().step, held, "a paused run kept stepping");
         assert!(handle.is_paused());
         handle.resume();
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(handle.snapshot().step > held, "a resumed run did not carry on");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while handle.snapshot().step <= held {
+            assert!(std::time::Instant::now() < deadline, "a resumed run did not carry on");
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         let model = handle.stop();
         assert!(model.steps_completed() > held);

@@ -84,7 +84,20 @@ pub fn layer_norm_row_backward(
 /// softmax ignores a constant added to every score.
 pub fn softmax_in_place(row: &mut [f32]) {
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if max == f32::INFINITY {
+        // A score that has overflowed to infinity outweighs every finite one, so all of the
+        // weight goes to the infinite scores, shared equally. Returning the row untouched, as
+        // this used to, handed the caller raw scores labelled as probabilities: an attention
+        // row of infinities that summed to far more than one.
+        let top = row.iter().filter(|v| **v == f32::INFINITY).count() as f32;
+        for v in row.iter_mut() {
+            *v = if *v == f32::INFINITY { 1.0 / top } else { 0.0 };
+        }
+        return;
+    }
     if !max.is_finite() {
+        // Every score is minus infinity or not a number. There is nothing to rank, and a row
+        // of garbage is left as it is so the garbage shows further on rather than hiding.
         return;
     }
     let mut sum = 0.0f32;
@@ -115,11 +128,36 @@ pub fn softmax_backward(p: &[f32], dp: &[f32], ds: &mut [f32]) {
 /// Unlike ReLU it has a gradient everywhere, including for negative inputs, so no unit can go
 /// permanently silent early in training.
 pub fn gelu(x: f32) -> f32 {
+    // Far out on either side the tanh is exactly ±1 in `f32` and GELU is exactly `x` or zero.
+    // Saying so directly matters for huge inputs, which a runaway learning rate produces: the
+    // cube overflows to infinity there, and at `x = −∞` the formula is `−∞ · 0`, which is not a
+    // number.
+    if x > GELU_SATURATES {
+        return x;
+    }
+    if x < -GELU_SATURATES {
+        return 0.0;
+    }
     0.5 * x * (1.0 + (GELU_C * (x + GELU_A * x * x * x)).tanh())
 }
 
+/// Past this distance from zero the tanh in GELU has rounded to exactly ±1 in `f32`
+/// (`tanh(0.8 · (10 + 44.7))` is one to far more digits than `f32` keeps), so the saturated
+/// answers above are the formula's own answers, not an approximation of them.
+const GELU_SATURATES: f32 = 10.0;
+
 /// The derivative of [`gelu`], differentiated by hand through the tanh and the cubic.
+///
+/// Saturated the same way as [`gelu`]: out there `1 − t²` is exactly zero while `x²` overflows
+/// to infinity, and zero times infinity is not a number — a single huge activation used to turn
+/// the whole backward pass into `NaN`.
 pub fn gelu_grad(x: f32) -> f32 {
+    if x > GELU_SATURATES {
+        return 1.0;
+    }
+    if x < -GELU_SATURATES {
+        return 0.0;
+    }
     let inner = GELU_C * (x + GELU_A * x * x * x);
     let t = inner.tanh();
     let d_inner = GELU_C * (1.0 + 3.0 * GELU_A * x * x);
@@ -214,6 +252,38 @@ mod tests {
     /// error stays small.
     fn finite_difference(mut f: impl FnMut(f32) -> f32, x: f32, h: f32) -> f32 {
         (f(x + h) - f(x - h)) / (2.0 * h)
+    }
+
+    /// A runaway learning rate drives activations far past anything a sensible run sees. The
+    /// cube inside GELU overflowed there and `gelu_grad(1e20)` came out as `NaN`, which then
+    /// spread through every gradient of the step.
+    #[test]
+    fn gelu_and_its_gradient_stay_numbers_for_huge_inputs() {
+        for x in [1e13f32, 1e20, 3e38, f32::MAX, -1e13, -1e20, -3e38, f32::MIN] {
+            assert!(gelu(x).is_finite(), "gelu({x}) = {}", gelu(x));
+            assert!(gelu_grad(x).is_finite(), "gelu_grad({x}) = {}", gelu_grad(x));
+        }
+        assert_eq!(gelu(1e20), 1e20);
+        assert_eq!(gelu(-1e20), 0.0);
+        assert_eq!(gelu_grad(1e20), 1.0);
+        assert_eq!(gelu_grad(-1e20), 0.0);
+        // The shortcut starts where the formula already gives the same answer, so there is no
+        // step in the curve at the seam.
+        for x in [GELU_SATURATES, -GELU_SATURATES] {
+            let formula = 0.5 * x * (1.0 + (GELU_C * (x + GELU_A * x * x * x)).tanh());
+            assert!((gelu(x) - formula).abs() < 1e-6, "gelu jumps at {x}");
+            let above = gelu(x + x.signum() * 1e-3);
+            assert!((above - gelu(x)).abs() < 2e-3, "gelu jumps just past {x}");
+        }
+    }
+
+    /// Scores that overflowed to infinity used to come back untouched: raw infinities where the
+    /// caller expected a distribution.
+    #[test]
+    fn softmax_of_an_infinite_score_is_still_a_distribution() {
+        let mut p = row(&[f32::INFINITY, 1.0, f32::INFINITY, -3.0]);
+        softmax_in_place(&mut p);
+        assert_eq!(p, vec![0.5, 0.0, 0.5, 0.0]);
     }
 
     #[test]
