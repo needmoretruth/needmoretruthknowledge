@@ -269,9 +269,12 @@ pub fn build(inputs: ViewInputs<'_>, forgery: &ForgeryOutcome) -> PartyViews {
         Stage::TrustedSetup => vec![Item::ToxicWaste, Item::SetupParameters],
         _ => Vec::new(),
     };
+    // What it would still need and does not have. In stage 3 that is nothing: the waste is the
+    // whole attack, and the recap used to say "needs blinding" beside an attack that had just been
+    // accepted without one.
     let attacker_would_need = match inputs.stage {
         Stage::Sigma | Stage::FiatShamir => vec![Item::SpendingKey],
-        Stage::TrustedSetup => vec![Item::NoteBlinding],
+        Stage::TrustedSetup => Vec::new(),
         Stage::Halo2 => vec![Item::SpendingKey, Item::NoteBlinding],
     };
 

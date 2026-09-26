@@ -376,11 +376,15 @@ mod tests {
     }
 
     fn draw(session: &dyn KqSession) -> String {
+        draw_in(session, Language::ENGLISH)
+    }
+
+    fn draw_in(session: &dyn KqSession, language: Language) -> String {
         let mut terminal = Terminal::new(TestBackend::new(MIN_WIDTH, MIN_HEIGHT)).expect("backend");
         terminal
             .draw(|frame| {
                 let area = panel(frame.area());
-                session.render(frame, area, Theme::new(true), Language::ENGLISH);
+                session.render(frame, area, Theme::new(true), language);
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
@@ -409,9 +413,10 @@ mod tests {
         for system in ["Sigma", "Fiat-Shamir", "Trusted setup", "halo2"] {
             assert!(screen.contains(system), "no row for {system}:\n{screen}");
         }
-        // The numbers are real: halo2's proof is kilobytes where a sigma transcript is 96 bytes.
-        assert!(screen.contains("96 B"), "the sigma transcript size is missing:\n{screen}");
-        assert!(screen.contains("KiB"), "halo2's proof size is missing:\n{screen}");
+        // The numbers are real: halo2's proof is kilobytes where a sigma transcript is 96 bytes,
+        // and the column is in the unit its largest value wants, so the 96 reads as 0.09 KiB.
+        assert!(screen.contains("0.09 KiB"), "the sigma transcript size is missing:\n{screen}");
+        assert!(!screen.contains(" B "), "a size in a second unit:\n{screen}");
         session.close();
     }
 
@@ -478,12 +483,27 @@ mod tests {
         let mut session = ZeroKnowledge.open(&machine());
         session.on(Action::Stage(RUN));
         run_to_done(&mut session);
+        // In every language the quest declares: Korean labels are wider than English ones, and
+        // the right-hand border is the first thing a label that does not fit pushes out.
         for stage in 0..ZeroKnowledge.meta().stages.len() {
             session.on(Action::Stage(stage));
-            let screen = draw(session.as_ref());
-            let widest = screen.lines().map(|line| line.chars().count()).max().unwrap_or(0);
-            assert_eq!(widest, MIN_WIDTH as usize, "the panel spilled:\n{screen}");
-            assert_eq!(screen.lines().count(), MIN_HEIGHT as usize);
+            walk(&mut session);
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while session.run_state() == RunState::Running {
+                assert!(Instant::now() < deadline, "the run never finished");
+                session.tick();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            session.tick();
+            walk(&mut session);
+            for language in Language::ALL {
+                let screen = draw_in(session.as_ref(), *language);
+                assert_eq!(screen.lines().count(), MIN_HEIGHT as usize);
+                for line in screen.lines().skip(2).take(MIN_HEIGHT as usize - 4) {
+                    let right: String = line.chars().rev().take(1).collect();
+                    assert_eq!(right, "\u{2502}", "{language}: the border moved:\n{screen}");
+                }
+            }
         }
         session.close();
     }

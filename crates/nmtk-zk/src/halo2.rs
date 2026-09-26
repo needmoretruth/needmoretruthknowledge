@@ -549,6 +549,18 @@ mod tests {
         assert!(!verify(&keys, &proof, total));
     }
 
+    /// The shape the screen reports is written down as constants; they have to be the circuit's.
+    #[test]
+    fn the_reported_shape_is_the_one_the_circuit_declares() {
+        let mut meta = ConstraintSystem::<Fp>::default();
+        BalanceCircuit::configure(&mut meta);
+        let pinned = format!("{:?}", meta.pinned());
+        assert!(pinned.contains(&format!("num_advice_columns: {ADVICE_COLUMNS},")), "{pinned}");
+        assert!(pinned.contains(&format!("num_fixed_columns: {FIXED_COLUMNS},")), "{pinned}");
+        assert!(pinned.contains(&format!("num_instance_columns: {INSTANCE_COLUMNS},")), "{pinned}");
+        assert_eq!(Config::new(16).expect("supported width").max_value(), 65_535);
+    }
+
     #[test]
     fn widths_outside_the_supported_range_are_refused() {
         assert_eq!(Config::new(4).err(), Some(ZkError::ValueBitsUnsupported));

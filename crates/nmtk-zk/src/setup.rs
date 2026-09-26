@@ -4,8 +4,9 @@
 //! `C = value*G + blinding*H`, and the proof of "this commitment holds `value`" is its opening.
 //! The commitment binds only because nobody knows the discrete logarithm of `H` with respect to
 //! `G`. That logarithm is `tau`, the toxic waste, and it is a real [`ToxicWaste`] value in this
-//! module: whoever holds it can reopen any commitment at any value they like, and the verifier —
-//! the same verifier, unchanged — accepts.
+//! module: whoever holds it can reopen a commitment of their own at any value they like, and the
+//! verifier — the same verifier, unchanged — accepts. (It cannot reopen somebody else's: that
+//! still needs the other party's blinding factor, which the waste does not give.)
 //!
 //! `tau` is never held by one party. Each participant contributes a factor and only sees the point
 //! that comes out; the waste exists only if every single contribution is kept and they are combined.
@@ -230,6 +231,17 @@ pub fn forge_opening_without_toxic_waste(
     Opening { value: claimed_value, blinding: curve::encode_scalar(&curve::random_scalar(rng)) }
 }
 
+/// A commitment an attacker makes itself, and the opening only it knows.
+fn attacker_commitment(
+    parameters: &Parameters,
+    value: u64,
+    rng: &mut DeterministicRng,
+) -> (ValueCommitment, Opening) {
+    let blinding = curve::random_scalar(rng);
+    let commitment = commit(parameters, value, &blinding);
+    (commitment, Opening { value, blinding: curve::encode_scalar(&blinding) })
+}
+
 /// What one participant did, as a screen shows the ceremony.
 #[derive(Clone, Copy, Debug)]
 pub struct ContributionRecord {
@@ -263,6 +275,8 @@ pub struct CeremonyRecord {
 pub struct ForgeryRecord {
     /// Whether this attacker held the toxic waste.
     pub held_toxic_waste: bool,
+    /// The commitment the attacker published: to `true_value`, with a blinding of its own.
+    pub commitment: [u8; 32],
     /// The value it wanted the commitment to say.
     pub claimed_value: u64,
     /// The opening it produced.
@@ -322,15 +336,26 @@ pub fn run(
 
     // This run models the ceremony going wrong: every participant kept their factor, so the waste
     // can be rebuilt and an attacker holds it.
+    //
+    // Each attacker commits to `true_value` itself, with a blinding factor of its own, and then
+    // tries to open that same commitment at `claimed_value`. That is what binding is about — a
+    // committer changing its mind afterwards — and it is all a holder of the waste needs. The
+    // attack used to start from the honest sender's opening instead, which quietly handed the
+    // attacker the sender's blinding factor: the four views say the attacker never has it, and a
+    // screen showing an attack that only worked with a secret nobody gave it was a lie.
     let waste = ToxicWaste::from_all_contributions(&parameters, &contributions);
+    let (with_waste_commitment, own_opening) = attacker_commitment(&parameters, true_value, rng);
     let with_waste_opening = match waste.as_ref() {
-        Some(waste) => forge_opening_with_toxic_waste(waste, &honest_opening, claimed_value)?,
+        Some(waste) => forge_opening_with_toxic_waste(waste, &own_opening, claimed_value)?,
         None => forge_opening_without_toxic_waste(claimed_value, rng),
     };
-    let with_waste_accepted = verify_opening(&parameters, &commitment, &with_waste_opening)?;
+    let with_waste_accepted =
+        verify_opening(&parameters, &with_waste_commitment, &with_waste_opening)?;
 
+    let (without_waste_commitment, _) = attacker_commitment(&parameters, true_value, rng);
     let without_waste_opening = forge_opening_without_toxic_waste(claimed_value, rng);
-    let without_waste_accepted = verify_opening(&parameters, &commitment, &without_waste_opening)?;
+    let without_waste_accepted =
+        verify_opening(&parameters, &without_waste_commitment, &without_waste_opening)?;
 
     let ceremony = CeremonyRecord {
         participants,
@@ -356,12 +381,14 @@ pub fn run(
         honest_accepted,
         with_waste: ForgeryRecord {
             held_toxic_waste: waste.is_some(),
+            commitment: with_waste_commitment.bytes(),
             claimed_value,
             opening: with_waste_opening,
             accepted: with_waste_accepted,
         },
         without_waste: ForgeryRecord {
             held_toxic_waste: false,
+            commitment: without_waste_commitment.bytes(),
             claimed_value,
             opening: without_waste_opening,
             accepted: without_waste_accepted,
@@ -452,5 +479,30 @@ mod tests {
         assert!(run.with_waste.accepted);
         assert!(!run.without_waste.accepted);
         assert_eq!(run.with_waste.claimed_value, 700);
+    }
+
+    /// The waste attack used to reopen the honest sender's commitment starting from the sender's
+    /// own blinding factor — a secret the attacker is never given. It has to work from the waste
+    /// and the attacker's own commitment alone.
+    #[test]
+    fn the_waste_attack_never_touches_the_honest_senders_opening() {
+        let run = run(DEFAULT_PARTICIPANTS, 7, 700, &mut rng()).expect("stage 3 runs");
+        assert_ne!(run.with_waste.commitment, run.commitment);
+        assert_ne!(run.with_waste.opening.blinding, run.honest_opening.blinding);
+        assert_ne!(run.without_waste.commitment, run.commitment);
+        assert!(run.with_waste.held_toxic_waste);
+        assert!(!run.without_waste.held_toxic_waste);
+    }
+
+    /// Without the waste, knowing the opening of your own commitment is still not enough to
+    /// reopen it at another value: the shift has to be divided by `tau`.
+    #[test]
+    fn knowing_your_own_opening_is_not_enough_without_the_waste() {
+        let mut rng = rng();
+        let (parameters, _) = run_ceremony(3, &mut rng).expect("ceremony runs");
+        let (commitment, own) = attacker_commitment(&parameters, 7, &mut rng);
+        assert!(verify_opening(&parameters, &commitment, &own).expect("verify runs"));
+        let guessed = forge_opening_without_toxic_waste(700, &mut rng);
+        assert!(!verify_opening(&parameters, &commitment, &guessed).expect("verify runs"));
     }
 }

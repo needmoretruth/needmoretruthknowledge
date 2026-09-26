@@ -275,7 +275,13 @@ pub fn run_stage(
 
     match stage {
         Stage::Sigma => {
-            let run = sigma::run(&mut rng)?;
+            // The verifier's coin is a generator of its own, derived under another label. Drawn
+            // from the prover's stream, the challenge was the prover's next number.
+            let mut coin = DeterministicRng::new(Seed(curve::digest(
+                0x20,
+                &[&stage_seed(seed, stage).bytes()],
+            )));
+            let run = sigma::run(&mut rng, &mut coin)?;
             // The proof is the three messages the protocol produces. The statement is public
             // input that everyone already has, so counting it as proof made the onlooker's view
             // say 128 bytes where every other screen in the quest says 96.
@@ -405,40 +411,58 @@ pub fn run_stage(
                 StageDetail::TrustedSetup(Box::new(run)),
             ))
         }
-        Stage::Halo2 => {
-            let config = halo2::Config::for_machine(profile);
-            let run = halo2::run(config, payment.value, payment.change, &mut rng)?;
-            let proof = run.proof.clone();
-            let forgery = ForgeryOutcome::new(vec![ForgeryAttempt {
-                kind: ForgeryKind::OverspendOutOfRange,
-                attacker_holds: None,
-                accepted: run.forgery.accepted,
-                proof_bytes: run.forgery.proof_bytes,
-            }]);
-            let trust = TrustModel {
-                setup: SetupKind::Transparent,
-                interactive: false,
-                verifier_must_be_online: false,
-                anyone_can_verify_later: true,
-                soundness_needs_destroyed_secret: false,
-            };
-            Ok(assemble(
-                stage,
-                Measurement {
-                    setup_nanos: run.setup_nanos,
-                    prove_nanos: run.prove_nanos,
-                    verify_nanos: run.verify_nanos,
-                    proof_bytes: run.proof_bytes,
-                },
-                trust,
-                run.accepted,
-                forgery,
-                &payment,
-                &proof,
-                StageDetail::Halo2(Box::new(run)),
-            ))
-        }
+        Stage::Halo2 => run_halo2_with(halo2::Config::for_machine(profile), rng, &payment),
     }
+}
+
+/// Runs stage 4 at a circuit width the caller picks, on the same seed and the same payment
+/// [`run_stage`] would use.
+///
+/// A screen that lets the reader choose the width used to drive `halo2::run` itself, with a seed of
+/// its own and its own copy of the trust model, so the same seed gave one proof inside the quest
+/// and another here. There is one way to run stage 4 now, and the width is its only argument.
+pub fn run_halo2(seed: Seed, config: halo2::Config) -> Result<StageOutcome, ZkError> {
+    let mut rng = DeterministicRng::new(stage_seed(seed, Stage::Halo2));
+    let payment = views::scenario(views::DEFAULT_VALUE, views::DEFAULT_CHANGE, &mut rng);
+    run_halo2_with(config, rng, &payment)
+}
+
+fn run_halo2_with(
+    config: halo2::Config,
+    mut rng: DeterministicRng,
+    payment: &ShieldedPayment,
+) -> Result<StageOutcome, ZkError> {
+    let stage = Stage::Halo2;
+    let run = halo2::run(config, payment.value, payment.change, &mut rng)?;
+    let proof = run.proof.clone();
+    let forgery = ForgeryOutcome::new(vec![ForgeryAttempt {
+        kind: ForgeryKind::OverspendOutOfRange,
+        attacker_holds: None,
+        accepted: run.forgery.accepted,
+        proof_bytes: run.forgery.proof_bytes,
+    }]);
+    let trust = TrustModel {
+        setup: SetupKind::Transparent,
+        interactive: false,
+        verifier_must_be_online: false,
+        anyone_can_verify_later: true,
+        soundness_needs_destroyed_secret: false,
+    };
+    Ok(assemble(
+        stage,
+        Measurement {
+            setup_nanos: run.setup_nanos,
+            prove_nanos: run.prove_nanos,
+            verify_nanos: run.verify_nanos,
+            proof_bytes: run.proof_bytes,
+        },
+        trust,
+        run.accepted,
+        forgery,
+        payment,
+        &proof,
+        StageDetail::Halo2(Box::new(run)),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,6 +559,37 @@ mod tests {
         }
     }
 
+    /// The recap says that moving between the four systems changes only the proof size and the
+    /// attacker's rows. Everything else a party is shown has to be the same in all four.
+    #[test]
+    fn between_systems_only_the_proof_and_the_attacker_change() {
+        let outcomes = run_all(Seed::fixed(), &profile()).expect("all stages run");
+        let first = &outcomes[0].views;
+        for outcome in &outcomes[1..] {
+            let views = &outcome.views;
+            assert_eq!(views.sender.holds, first.sender.holds);
+            assert_eq!(views.sender.learns, first.sender.learns);
+            assert_eq!(views.sender.can_verify, first.sender.can_verify);
+            assert_eq!(
+                (views.sender.amount, views.sender.change),
+                (first.sender.amount, first.sender.change)
+            );
+            assert_eq!(views.receiver.holds, first.receiver.holds);
+            assert_eq!(views.receiver.learns, first.receiver.learns);
+            assert_eq!(views.receiver.never_learns, first.receiver.never_learns);
+            assert_eq!(views.receiver.can_verify, first.receiver.can_verify);
+            assert_eq!(views.receiver.amount, first.receiver.amount);
+            assert_eq!(views.onlooker.sees, first.onlooker.sees);
+            assert_eq!(views.onlooker.cannot_see, first.onlooker.cannot_see);
+            assert_eq!(views.onlooker.can_verify, first.onlooker.can_verify);
+        }
+        let attackers: Vec<_> = outcomes
+            .iter()
+            .map(|o| (o.views.attacker.holds.clone(), o.views.attacker.attempts.len()))
+            .collect();
+        assert!(attackers.windows(2).any(|pair| pair[0] != pair[1]), "the attacker never changed");
+    }
+
     #[test]
     fn the_receiver_learns_the_amount_and_not_the_sender() {
         let outcome = run_stage(Stage::Halo2, Seed::fixed(), &profile()).expect("stage runs");
@@ -612,6 +667,51 @@ mod tests {
             .map(|line| line.bytes.clone())
             .expect("the transcript has a commitment");
         assert_ne!(sigma_commitment.as_slice(), fs_run.proof.commitment.as_slice());
+    }
+
+    /// A screen that picks the circuit width ran stage 4 on a seed of its own, so the same seed
+    /// gave one proof in the quest and another in the engine.
+    #[test]
+    fn stage_four_at_a_chosen_width_is_the_same_run_as_stage_four() {
+        let config = halo2::Config::for_machine(&profile());
+        let chosen = run_halo2(Seed::from_u64(3), config).expect("runs");
+        let inside = run_stage(Stage::Halo2, Seed::from_u64(3), &profile()).expect("runs");
+        let (StageDetail::Halo2(a), StageDetail::Halo2(b)) = (chosen.detail, inside.detail) else {
+            panic!("stage 4 returned another stage's detail");
+        };
+        assert_eq!(a.proof, b.proof);
+        assert_eq!(chosen.trust, inside.trust);
+    }
+
+    /// The recap printed "needs blinding" under an attacker whose attack had just been accepted
+    /// without one, and the attack itself quietly used the honest sender's blinding factor.
+    #[test]
+    fn the_toxic_waste_holder_needs_nothing_more_and_uses_nothing_it_was_not_given() {
+        let outcome = run_stage(Stage::TrustedSetup, Seed::fixed(), &profile()).expect("runs");
+        assert!(outcome.views.attacker.would_need.is_empty());
+        assert!(!outcome.views.attacker.holds.contains(&Item::NoteBlinding));
+        let StageDetail::TrustedSetup(run) = outcome.detail else { panic!("wrong detail") };
+        assert!(run.with_waste.accepted);
+        assert_ne!(run.with_waste.commitment, run.commitment);
+        assert_ne!(run.with_waste.opening.blinding, run.honest_opening.blinding);
+    }
+
+    /// The quest says the third system keeps its proof short and that the fourth takes the longest
+    /// of the four to prove. Both are measured here rather than taken on trust.
+    #[test]
+    fn the_sizes_and_times_the_prose_promises_are_the_ones_measured() {
+        let outcomes = run_all(Seed::fixed(), &profile()).expect("all stages run");
+        let bytes = |stage: Stage| outcomes[stage.index()].measurement.proof_bytes;
+        assert_eq!(bytes(Stage::Sigma), sigma::TRANSCRIPT_BYTES);
+        assert_eq!(bytes(Stage::FiatShamir), fiat_shamir::PROOF_BYTES);
+        assert_eq!(bytes(Stage::TrustedSetup), setup::PROOF_BYTES);
+        assert!(bytes(Stage::TrustedSetup) < bytes(Stage::FiatShamir));
+        assert!(bytes(Stage::FiatShamir) < bytes(Stage::Sigma));
+        assert!(bytes(Stage::Halo2) > 1024, "halo2's proof is kilobytes");
+        let halo2 = outcomes[Stage::Halo2.index()].measurement.prove_nanos;
+        for outcome in &outcomes[..3] {
+            assert!(outcome.measurement.prove_nanos < halo2, "{:?} outran halo2", outcome.stage);
+        }
     }
 
     #[test]

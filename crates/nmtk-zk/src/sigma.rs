@@ -244,7 +244,12 @@ pub struct Run {
 
 /// Runs stage 1 end to end: an honest three-message proof, then an attacker who has the statement
 /// but not the secret and must answer a challenge it could not predict.
-pub fn run(rng: &mut DeterministicRng) -> Result<Run, ZkError> {
+///
+/// The prover and the verifier each flip their own coins. They used to share one generator, so the
+/// challenge was simply the next number after the prover's own nonce in a stream the prover was
+/// holding: a prover that ran its generator one step further knew `c` before it committed, which is
+/// exactly what the screen says it cannot do. `coin` is the verifier's and nobody else draws from it.
+pub fn run(rng: &mut DeterministicRng, coin: &mut DeterministicRng) -> Result<Run, ZkError> {
     let witness = Witness::random(rng);
     let statement = witness.statement();
     let mut prover = Prover::new(&witness);
@@ -260,7 +265,7 @@ pub fn run(rng: &mut DeterministicRng) -> Result<Run, ZkError> {
 
     let start_verify = std::time::Instant::now();
     verifier.receive_commitment(&commitment)?;
-    let challenge = verifier.challenge(rng)?;
+    let challenge = verifier.challenge(coin)?;
     let challenge_nanos = start_verify.elapsed().as_nanos() as u64;
     transcript.push(Step::Challenge, Side::Verifier, &challenge.0, None);
 
@@ -274,7 +279,7 @@ pub fn run(rng: &mut DeterministicRng) -> Result<Run, ZkError> {
     let check_nanos = start_check.elapsed().as_nanos() as u64;
     transcript.push(Step::Verdict, Side::Verifier, &[], Some(accepted));
 
-    let (forged_transcript, forged_accepted) = forge(&statement, rng)?;
+    let (forged_transcript, forged_accepted) = forge(&statement, rng, coin)?;
 
     Ok(Run {
         statement: statement.public_key(),
@@ -290,7 +295,11 @@ pub fn run(rng: &mut DeterministicRng) -> Result<Run, ZkError> {
 
 /// An attacker that holds the statement and no secret. It commits like anyone can, then has to
 /// produce `s` with `s*G == R + c*P` for a challenge it sees only afterwards, so it guesses.
-fn forge(statement: &Statement, rng: &mut DeterministicRng) -> Result<(Transcript, bool), ZkError> {
+fn forge(
+    statement: &Statement,
+    rng: &mut DeterministicRng,
+    coin: &mut DeterministicRng,
+) -> Result<(Transcript, bool), ZkError> {
     let mut verifier = Verifier::new(*statement);
     let mut transcript = Transcript { lines: Vec::new() };
     transcript.push(Step::Statement, Side::Public, &statement.public_key(), None);
@@ -300,7 +309,7 @@ fn forge(statement: &Statement, rng: &mut DeterministicRng) -> Result<(Transcrip
     transcript.push(Step::Commitment, Side::Prover, &commitment.0, None);
 
     verifier.receive_commitment(&commitment)?;
-    let challenge = verifier.challenge(rng)?;
+    let challenge = verifier.challenge(coin)?;
     transcript.push(Step::Challenge, Side::Verifier, &challenge.0, None);
 
     let guess = Response(curve::encode_scalar(&curve::random_scalar(rng)));
@@ -320,21 +329,52 @@ mod tests {
         DeterministicRng::new(Seed::fixed())
     }
 
+    fn coin() -> DeterministicRng {
+        DeterministicRng::new(Seed::from_u64(99))
+    }
+
+    fn line(run: &Run, step: Step) -> Vec<u8> {
+        run.transcript
+            .lines
+            .iter()
+            .find(|line| line.step == step)
+            .map(|line| line.bytes.clone())
+            .expect("the transcript has that step")
+    }
+
+    /// The challenge came out of the prover's own generator, one draw after its nonce, so the
+    /// prover could have known it before committing — the one thing the protocol forbids.
+    #[test]
+    fn the_challenge_does_not_come_from_the_provers_generator() {
+        let one = run(&mut rng(), &mut coin()).expect("stage 1 runs");
+        let other_coin =
+            run(&mut rng(), &mut DeterministicRng::new(Seed::from_u64(100))).expect("stage 1 runs");
+        // Same prover, same commitment; a different verifier, a different challenge.
+        assert_eq!(line(&one, Step::Commitment), line(&other_coin, Step::Commitment));
+        assert_ne!(line(&one, Step::Challenge), line(&other_coin, Step::Challenge));
+        // And a different prover leaves the verifier's challenge exactly where it was.
+        let other_prover =
+            run(&mut DeterministicRng::new(Seed::from_u64(5)), &mut coin()).expect("stage 1 runs");
+        assert_ne!(line(&one, Step::Commitment), line(&other_prover, Step::Commitment));
+        assert_eq!(line(&one, Step::Challenge), line(&other_prover, Step::Challenge));
+        assert!(one.accepted && other_coin.accepted && other_prover.accepted);
+    }
+
     #[test]
     fn an_honest_proof_verifies() {
-        let run = run(&mut rng()).expect("stage 1 runs");
+        let run = run(&mut rng(), &mut coin()).expect("stage 1 runs");
         assert!(run.accepted);
     }
 
     #[test]
     fn a_guessed_response_is_rejected() {
-        let run = run(&mut rng()).expect("stage 1 runs");
+        let run = run(&mut rng(), &mut coin()).expect("stage 1 runs");
         assert!(!run.forged_accepted);
     }
 
     #[test]
     fn the_transcript_carries_all_four_messages() {
-        let run = run(&mut rng()).expect("stage 1 runs");
+        let run = run(&mut rng(), &mut coin()).expect("stage 1 runs");
         let steps: Vec<Step> = run.transcript.lines.iter().map(|line| line.step).collect();
         assert_eq!(
             steps,
@@ -375,8 +415,8 @@ mod tests {
 
     #[test]
     fn the_same_seed_replays_the_same_transcript() {
-        let first = run(&mut rng()).expect("stage 1 runs");
-        let second = run(&mut rng()).expect("stage 1 runs");
+        let first = run(&mut rng(), &mut coin()).expect("stage 1 runs");
+        let second = run(&mut rng(), &mut coin()).expect("stage 1 runs");
         assert_eq!(first.statement, second.statement);
         let a: Vec<Vec<u8>> = first.transcript.lines.iter().map(|l| l.bytes.clone()).collect();
         let b: Vec<Vec<u8>> = second.transcript.lines.iter().map(|l| l.bytes.clone()).collect();

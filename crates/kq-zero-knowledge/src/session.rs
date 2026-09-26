@@ -1,4 +1,4 @@
-//! The quest a reader has opened: five stages over four proof systems.
+//! The quest a reader has opened: seven stages over four proof systems.
 //!
 //! The work runs on a worker thread. Three of the four systems finish in well under a millisecond,
 //! but halo2 on the widest circuit takes longer than a frame on this machine, and a run that takes
@@ -12,12 +12,12 @@ use std::thread::JoinHandle;
 use nmtk_core::{Language, MachineProfile, format};
 use nmtk_kq::knob::{Knob, KnobValue, Settled, Typed};
 use nmtk_kq::session::{Action, Beat, KqSession, Reaction, RunState};
-use nmtk_kq::text::{self, column, pad, rpad, wrap};
+use nmtk_kq::text::{self, column, rpad, wrap};
 use nmtk_kq::theme::{self, State, Theme};
 use nmtk_kq::widgets;
 use nmtk_zk::{
-    DeterministicRng, ForgeryAttempt, ForgeryKind, ForgeryOutcome, Measurement, Seed, SetupKind,
-    Stage, StageDetail, StageOutcome, TrustModel, ZkError, halo2, sigma, views,
+    ForgeryAttempt, ForgeryKind, Measurement, Seed, Stage, StageDetail, StageOutcome, ZkError,
+    halo2, sigma,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -134,9 +134,19 @@ impl Runner {
     }
 }
 
-/// Runs one system. Three of them go through the engine's own entry point; halo2 is driven
-/// directly because the reader chooses the circuit width and that entry point reads the width off
-/// the machine instead.
+/// A runner dropped without being stopped — a session dropped without `close`, or a panic between
+/// the two — used to leave its thread proving on with nobody to read the answer.
+impl Drop for Runner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Runs one system. halo2 is run at the width the reader chose; the other three have no width.
+///
+/// halo2 used to be driven from here with a seed of its own and a hand-copied trust model, so the
+/// same seed proved one thing in the tuning stage and another everywhere else. The engine has one
+/// way to run it now.
 fn run_one(
     stage: Stage,
     seed: u64,
@@ -144,60 +154,9 @@ fn run_one(
     machine: &MachineProfile,
 ) -> Result<StageOutcome, ZkError> {
     match stage {
-        Stage::Halo2 => run_halo2(seed, bits),
+        Stage::Halo2 => nmtk_zk::run_halo2(Seed::from_u64(seed), halo2::Config::new(bits)?),
         other => nmtk_zk::run_stage(other, Seed::from_u64(seed), machine),
     }
-}
-
-/// halo2 at the width the reader asked for.
-fn run_halo2(seed: u64, bits: u32) -> Result<StageOutcome, ZkError> {
-    let config = halo2::Config::new(bits)?;
-    // The engine gives every system its own generator derived from the run's seed so that no two
-    // draw the same nonce. This one is driven from outside, so it takes a seed of its own.
-    let mut rng = DeterministicRng::new(Seed::from_u64(seed ^ 0xA102));
-    let payment = views::scenario(views::DEFAULT_VALUE, views::DEFAULT_CHANGE, &mut rng);
-    let run = halo2::run(config, payment.value, payment.change, &mut rng)?;
-
-    let attempts = vec![ForgeryAttempt {
-        kind: ForgeryKind::OverspendOutOfRange,
-        attacker_holds: None,
-        accepted: run.forgery.accepted,
-        proof_bytes: run.forgery.proof_bytes,
-    }];
-    let forgery = ForgeryOutcome { any_accepted: attempts.iter().any(|a| a.accepted), attempts };
-    let trust = TrustModel {
-        setup: SetupKind::Transparent,
-        interactive: false,
-        verifier_must_be_online: false,
-        anyone_can_verify_later: true,
-        soundness_needs_destroyed_secret: false,
-    };
-    let measurement = Measurement {
-        setup_nanos: run.setup_nanos,
-        prove_nanos: run.prove_nanos,
-        verify_nanos: run.verify_nanos,
-        proof_bytes: run.proof_bytes,
-    };
-    let honest_accepted = run.accepted;
-    let views = views::build(
-        views::ViewInputs {
-            stage: Stage::Halo2,
-            payment: &payment,
-            proof: &run.proof,
-            honest_accepted,
-            setup: trust.setup,
-        },
-        &forgery,
-    );
-    Ok(StageOutcome {
-        stage: Stage::Halo2,
-        measurement,
-        trust,
-        honest_accepted,
-        forgery,
-        views,
-        detail: StageDetail::Halo2(Box::new(run)),
-    })
 }
 
 /// Where each stage sits. The order here is the order `lib.rs` declares them in.
@@ -217,6 +176,46 @@ enum Topic {
     Spread,
     /// How many attacks the reader ran, and how many the verifier let through.
     Attacks,
+    /// How many of this run's attacks got through.
+    Through,
+    /// What the circuit width did to the run that just finished.
+    Widened,
+}
+
+/// Everything every run in this quest measured, kept for the closing stage.
+///
+/// The recap used to read the last run's outcomes, and the recap stage starts a run of its own, so
+/// "your own numbers" were the four the recap had just made: a reader who had proved sixty-four-bit
+/// circuits all afternoon was shown the default width, and every attack they ran before it was
+/// forgotten. Each finished system writes into this once, and only `r` clears it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Record {
+    /// Systems that finished.
+    runs: usize,
+    quickest_prove: u64,
+    slowest_prove: u64,
+    smallest_proof: usize,
+    largest_proof: usize,
+    /// Attacks made, and how many the verifier accepted.
+    tried: usize,
+    through: usize,
+}
+
+impl Record {
+    fn add(&mut self, outcome: &StageOutcome) {
+        let measure = &outcome.measurement;
+        if self.runs == 0 {
+            self.quickest_prove = measure.prove_nanos;
+            self.smallest_proof = measure.proof_bytes;
+        }
+        self.runs += 1;
+        self.quickest_prove = self.quickest_prove.min(measure.prove_nanos);
+        self.slowest_prove = self.slowest_prove.max(measure.prove_nanos);
+        self.smallest_proof = self.smallest_proof.min(measure.proof_bytes);
+        self.largest_proof = self.largest_proof.max(measure.proof_bytes);
+        self.tried += outcome.forgery.attempts.len();
+        self.through += outcome.forgery.attempts.iter().filter(|a| a.accepted).count();
+    }
 }
 
 /// One move in a stage's conversation.
@@ -265,10 +264,15 @@ const WHAT: &[Step] = &[
 const FOUR: &[Step] = &[
     Say(Msg::FourOne),
     Say(Msg::FourTwo),
+    // "Verifier" was the fourth beat's subject before anybody had said what one is.
+    Say(Msg::Roles),
     Say(Msg::FourSigma),
     Say(Msg::FourFiatShamir),
+    // The panel beside this stage says "becomes a hash" and nothing on screen said what one was.
+    Say(Msg::FourHash),
     Say(Msg::FourTrustedSetup),
     Say(Msg::FourHalo2),
+    Say(Msg::FourCircuit),
     Say(Msg::FourNumbers),
 ];
 
@@ -278,6 +282,8 @@ const RUN: &[Step] = &[
     Ask(Msg::RunAsk),
     Run(Systems),
     Await(Until::Finished),
+    // The size column is the first place bytes appear.
+    Say(Msg::RunBytes),
     Say(Msg::RunMeasured),
     Say(Msg::RunCheck),
     Say(Msg::RunWhy),
@@ -286,6 +292,7 @@ const RUN: &[Step] = &[
 /// The interactive protocol, one message at a time.
 const MESSAGES: &[Step] = &[
     Say(Msg::SigmaIntro),
+    Say(Msg::Roles),
     // The vocabulary before the algebra. A reviewer reached "P = x times G" without having been
     // told what a point or a G is, and stopped reading there.
     Say(Msg::SigmaOneWay),
@@ -313,6 +320,8 @@ const MESSAGES: &[Step] = &[
 const TUNE: &[Step] = &[
     Say(Msg::TuneOne),
     Say(Msg::TuneCircuit),
+    // What a bit is, before the sentence that measures in them.
+    Say(Msg::TuneBitIs),
     Say(Msg::TuneBits),
     Say(Msg::TuneWider),
     Say(Msg::TuneSeed),
@@ -320,7 +329,9 @@ const TUNE: &[Step] = &[
     Ask(Msg::TuneAsk),
     Run(Systems),
     Await(Until::Finished),
-    Say(Msg::TuneAfter),
+    // Said from the run, not for it: a reader who picked Sigma alone was told "only halo2 moved"
+    // about a run halo2 was not in.
+    Tell(Topic::Widened),
     Say(Msg::TuneNoise),
     Say(Msg::TuneShapeOne),
     Say(Msg::TuneShapeTwo),
@@ -329,18 +340,25 @@ const TUNE: &[Step] = &[
 
 /// Every attack, against the verifiers that just accepted the honest proofs.
 const BREAK: &[Step] = &[
+    // Its first sentence is about "the same verifier", and this stage may be the first opened.
+    Say(Msg::Roles),
     Say(Msg::BreakOne),
     Say(Msg::BreakTwo),
     Ask(Msg::BreakAsk),
     Run(Systems),
     Await(Until::Finished),
-    Say(Msg::BreakTwoGetThrough),
+    // How many got through is read off this run rather than written down beforehand.
+    Tell(Topic::Through),
+    // The two words the next beats turn on, said again here because this stage can be the first
+    // one a reader opens.
+    Say(Msg::BreakRecall),
     Say(Msg::BreakWeakHash),
     Say(Msg::BreakWeakHashTwo),
     Say(Msg::BreakWaste),
     Say(Msg::BreakUnchanged),
-    Say(Msg::BreakCeremony),
+    // What a ceremony is comes before the sentence that asks whether one was honest.
     Say(Msg::BreakCeremonyIs),
+    Say(Msg::BreakCeremony),
     Say(Msg::BreakPromise),
 ];
 
@@ -349,12 +367,17 @@ const SIDES: &[Step] = &[
     Say(Msg::SidesOne),
     Run(Systems),
     Await(Until::Finished),
+    // Note, commitment and nullifier are each said before the first sentence that leans on them.
+    // The sender "held the note" before anyone had said what a note was, and the onlooker saw "a
+    // nullifier" two beats before the one that explained it.
+    Say(Msg::SidesNote),
     Say(Msg::SidesTwo),
-    Say(Msg::SidesThree),
-    Say(Msg::SidesFour),
     Say(Msg::SidesKeys),
     Say(Msg::SidesBlinding),
+    Say(Msg::SidesThree),
+    Say(Msg::SidesCommitment),
     Say(Msg::SidesNullifier),
+    Say(Msg::SidesFour),
     // Where the shape came from, once its three words have been earned. A reader who has heard
     // of Zcash gets an anchor, and the quest stops borrowing a design without saying whose.
     Say(Msg::SidesZcash),
@@ -395,6 +418,11 @@ enum Happening {
     PulledIn {
         to: String,
     },
+    /// The same for the system knob, which is drawn as a name rather than a number, so the name
+    /// is said in whichever language is on screen when the beat is read.
+    SystemPulledIn {
+        current: usize,
+    },
     /// A typed number the knob could not read at all.
     NotANumber,
 }
@@ -428,6 +456,8 @@ pub struct Session {
     message: usize,
     /// Which system the recap is showing the four sides of.
     focus: Stage,
+    /// What every run in the quest measured, for the closing stage.
+    record: Record,
 }
 
 impl Session {
@@ -471,6 +501,7 @@ impl Session {
             running_with: None,
             message: 0,
             focus: Stage::Halo2,
+            record: Record::default(),
         }
     }
 
@@ -482,7 +513,14 @@ impl Session {
     }
 
     /// The systems the reader asked for: one of them, or the whole lineage.
+    ///
+    /// The choice is made on the tuning stage and belongs to it. It used to be read everywhere, so
+    /// a reader who picked Sigma there and walked on to the attacks ran Sigma alone, was told "two
+    /// of them got through" beside a table with one row, and met a recap with three systems missing.
     fn wanted(&self) -> Vec<Stage> {
+        if self.stage != STAGE_TUNE {
+            return Stage::ALL.to_vec();
+        }
         match self.knobs[KNOB_STAGE].value {
             KnobValue::Choice { current, .. } if current >= 1 && current <= Stage::ALL.len() => {
                 vec![Stage::ALL[current - 1]]
@@ -527,48 +565,86 @@ impl Session {
     fn forget_results(&mut self) {
         self.stop_and_forget_the_telling();
         self.outcomes.clear();
+        self.record = Record::default();
     }
 
-    /// A sentence about what this machine measured, for the end of the quest.
+    /// A sentence about what this machine measured.
+    ///
+    /// `Spread` and `Attacks` close the quest and read the whole quest's [`Record`]; `Through` and
+    /// `Widened` follow one run and read that run.
     fn tell(&self, topic: Topic, language: Language) -> String {
-        let measured: Vec<&Measurement> =
-            self.outcomes.iter().map(|outcome| &outcome.measurement).collect();
-        if measured.is_empty() {
-            return Msg::YoursNothing.text(language).to_string();
-        }
         match topic {
             Topic::Spread => {
-                let slowest = measured.iter().map(|m| m.prove_nanos).max().unwrap_or(0);
-                let quickest = measured.iter().map(|m| m.prove_nanos).min().unwrap_or(0);
-                let unit = self.unit_over(&Stage::ALL, |m| m.prove_nanos);
-                let largest = measured.iter().map(|m| m.proof_bytes).max().unwrap_or(0);
-                let smallest = measured.iter().map(|m| m.proof_bytes).min().unwrap_or(0);
+                let record = &self.record;
+                if record.runs == 0 {
+                    return Msg::YoursNothing.text(language).to_string();
+                }
+                let time = unit_for(record.slowest_prove);
+                let size = size_unit_for(record.largest_proof);
                 format!(
-                    "{}: {} {} → {}, {} {} → {}.",
+                    "{}: {} {} → {}, {} {} → {}, {} {}.",
                     Msg::YoursSpread.text(language),
-                    Msg::ColumnProve.text(language),
-                    time_in(quickest, unit),
-                    time_in(slowest, unit),
-                    Msg::ColumnSize.text(language),
-                    format::bytes(smallest as u64),
-                    format::bytes(largest as u64),
+                    Msg::EventProved.text(language),
+                    time_in(record.quickest_prove, time),
+                    time_in(record.slowest_prove, time),
+                    Msg::EventSize.text(language),
+                    size_in(record.smallest_proof, size),
+                    size_in(record.largest_proof, size),
+                    Msg::YoursRuns.text(language),
+                    format::count(record.runs as u64),
                 )
             }
             Topic::Attacks => {
-                let attempts: Vec<&ForgeryAttempt> =
-                    self.outcomes.iter().flat_map(|o| o.forgery.attempts.iter()).collect();
-                let through = attempts.iter().filter(|a| a.accepted).count();
+                let record = &self.record;
+                if record.runs == 0 {
+                    return Msg::YoursNothing.text(language).to_string();
+                }
                 let counted = format!(
                     "{} {}  ·  {} {}",
                     Msg::WordTried.text(language),
-                    attempts.len(),
+                    format::count(record.tried as u64),
                     Msg::BreakSummaryAccepted.text(language),
-                    through
+                    format::count(record.through as u64)
                 );
-                let verdict =
-                    if through == 0 { Msg::YoursAttacksNone } else { Msg::YoursAttacksThrough };
+                let verdict = if record.through == 0 {
+                    Msg::YoursAttacksNone
+                } else {
+                    Msg::YoursAttacksThrough
+                };
                 format!("{counted}. {}", verdict.text(language))
             }
+            Topic::Through => {
+                let attempts: Vec<&ForgeryAttempt> =
+                    self.outcomes.iter().flat_map(|o| o.forgery.attempts.iter()).collect();
+                let through = attempts.iter().filter(|a| a.accepted).count();
+                format!(
+                    "{} {}  ·  {} {}",
+                    Msg::BreakGotThrough.text(language),
+                    through,
+                    Msg::WordTried.text(language),
+                    attempts.len()
+                )
+            }
+            Topic::Widened => match self.outcome(Stage::Halo2) {
+                Some(outcome) => {
+                    let bits = match &outcome.detail {
+                        StageDetail::Halo2(run) => run.config.value_bits,
+                        _ => 0,
+                    };
+                    let prove = outcome.measurement.prove_nanos;
+                    format!(
+                        "{}  ·  {} {} {}  ·  {} {}. {}",
+                        phrases::stage(Stage::Halo2).text(language),
+                        Msg::KnobBits.text(language),
+                        bits,
+                        Msg::UnitBits.text(language),
+                        Msg::EventProved.text(language),
+                        time_in(prove, unit_for(prove)),
+                        Msg::TuneOthersFixed.text(language),
+                    )
+                }
+                None => Msg::TuneNoHalo2.text(language).to_string(),
+            },
         }
     }
 
@@ -589,6 +665,17 @@ impl Session {
             .max()
             .unwrap_or(0);
         unit_for(largest)
+    }
+
+    /// The unit a column of proof sizes is written in, taken from the largest of them.
+    fn size_unit_over(&self, stages: &[Stage]) -> SizeUnit {
+        let largest = stages
+            .iter()
+            .filter_map(|stage| self.outcome(*stage))
+            .map(|outcome| outcome.measurement.proof_bytes)
+            .max()
+            .unwrap_or(0);
+        size_unit_for(largest)
     }
 
     /// The interactive protocol's transcript, once stage one has finished.
@@ -652,6 +739,7 @@ impl Session {
         // slowest row in each. Per-value units made the slowest system look like the fastest.
         let prove_unit = self.unit_over(stages, |m| m.prove_nanos);
         let verify_unit = self.unit_over(stages, |m| m.verify_nanos);
+        let size_unit = self.size_unit_over(stages);
 
         let headings = [
             Msg::ColumnProve.text(language).to_string(),
@@ -684,7 +772,7 @@ impl Session {
                         [
                             time_in(measure.prove_nanos, prove_unit),
                             time_in(measure.verify_nanos, verify_unit),
-                            format::bytes(measure.proof_bytes as u64),
+                            size_in(measure.proof_bytes, size_unit),
                         ],
                     )
                 }
@@ -745,8 +833,14 @@ impl Session {
             Span::styled(phrases::step(line.step).text(language).to_string(), theme.heading()),
         ])];
 
-        let mut second =
-            vec![Span::styled(pad(phrases::side(line.side).text(language), 20), theme.muted())];
+        // Measured from the three sides in this language rather than padded to twenty cells, which
+        // is the English width with nothing to spare.
+        let sides = [Msg::SideProver, Msg::SideVerifier, Msg::SidePublic];
+        let side_column = label_width(&sides, language, width, VALUE_MIN);
+        let mut second = vec![Span::styled(
+            label_cell(phrases::side(line.side).text(language), side_column),
+            theme.muted(),
+        )];
         match line.accepted {
             Some(accepted) => {
                 let state = if accepted { State::Good } else { State::Bad };
@@ -884,8 +978,13 @@ impl Session {
     }
 
     /// The knobs, with the chosen one marked.
-    fn knob_lines(&self, language: Language, theme: Theme) -> Vec<Line<'static>> {
+    ///
+    /// The label column is measured from the three labels in the language on screen. It was a
+    /// fifteen-cell `pad`, which widens and never narrows, so a label past fifteen cells ran
+    /// straight into its value.
+    fn knob_lines(&self, width: usize, language: Language, theme: Theme) -> Vec<Line<'static>> {
         let labels = [Msg::KnobStage, Msg::KnobBits, Msg::KnobSeed];
+        let label_column = label_width(&labels, language, width.saturating_sub(2), VALUE_MIN);
         self.knobs
             .iter()
             .enumerate()
@@ -902,7 +1001,10 @@ impl Session {
                 };
                 Line::from(vec![
                     Span::styled(format!("{marker} "), theme.state(State::Chosen)),
-                    Span::styled(pad(labels[index].text(language), 15), theme.plain()),
+                    Span::styled(
+                        label_cell(labels[index].text(language), label_column),
+                        theme.plain(),
+                    ),
                     Span::styled(value, if picked { theme.heading() } else { theme.muted() }),
                 ])
             })
@@ -911,9 +1013,7 @@ impl Session {
 
     fn system_text(&self, language: Language) -> &'static str {
         match self.knobs[KNOB_STAGE].value {
-            KnobValue::Choice { current, .. } if current >= 1 && current <= Stage::ALL.len() => {
-                phrases::stage(Stage::ALL[current - 1]).text(language)
-            }
+            KnobValue::Choice { current, .. } => system_name(current, language),
             _ => Msg::StageAll.text(language),
         }
     }
@@ -926,7 +1026,7 @@ impl Session {
         language: Language,
         theme: Theme,
     ) -> Vec<Line<'static>> {
-        let label = 12;
+        let label = label_width(&[Msg::LabelTrust], language, width, VALUE_MIN);
         match stages {
             [only] => match self.outcome(*only) {
                 Some(outcome) => {
@@ -936,7 +1036,7 @@ impl Session {
                         .enumerate()
                         .map(|(index, part)| {
                             let head = if index == 0 {
-                                pad(Msg::LabelTrust.text(language), label)
+                                label_cell(Msg::LabelTrust.text(language), label)
                             } else {
                                 " ".repeat(label)
                             };
@@ -1037,9 +1137,9 @@ impl Session {
             party_block(
                 Msg::PartyOnlooker,
                 // The size the table, the conversation and this panel say is one measurement, read
-                // here from the one field they all read. The bytes the onlooker's own view carries
-                // are everything the run put on the wire, which for the interactive protocol
-                // includes the public statement — 128 where the proof is 96.
+                // here from the one field they all read. (The onlooker's own view once counted the
+                // public statement as proof, 128 where the proof is 96; the engine no longer does,
+                // and reading one field keeps the two from drifting apart again.)
                 format!(
                     "{} {}",
                     Msg::WordProof.text(language),
@@ -1077,7 +1177,7 @@ impl Session {
         // about dropped rows that is dropped in half says less than nothing.
         let notice = wrap(Msg::PanelTrimmed.text(language), width);
         let dropped = fit(&mut blocks, height, notice.len());
-        let mut lines: Vec<Line<'static>> = blocks.into_iter().flatten().collect();
+        let mut lines: Vec<Line<'static>> = blocks.into_iter().flatten().flatten().collect();
         if dropped {
             for part in notice {
                 lines.push(Line::from(Span::styled(part, theme.muted())));
@@ -1210,18 +1310,18 @@ fn party_block(
     columns: Columns,
     language: Language,
     theme: Theme,
-) -> Vec<Line<'static>> {
+) -> Vec<Vec<Line<'static>>> {
     // The party's one fact wraps under itself like every other row: cutting it lost the reader
     // what the sender kept, which is half of what the row was there to say.
-    let mut lines = folded_row(
+    let mut block = vec![folded_row(
         ("", theme.heading()),
         (name.text(language), theme.heading()),
         (&fact, theme.muted()),
         columns.name,
         columns.width,
-    );
+    )];
     for (label, text) in rows {
-        lines.extend(folded_row(
+        block.push(folded_row(
             ("", theme.muted()),
             (label.text(language), theme.muted()),
             (text, theme.plain()),
@@ -1229,31 +1329,39 @@ fn party_block(
             columns.width,
         ));
     }
-    lines
+    block
 }
 
-/// Trims the tallest block until every party still fits on one screen. At 80x24 in English nothing
-/// is trimmed; a narrower panel loses the tail of a list rather than a whole party.
+/// Trims the tallest block until every party still fits on one screen. A short panel loses the tail
+/// of a list rather than a whole party — at 80x24 that is already true in English, so the notice
+/// below is an ordinary sight rather than a rare one.
 ///
 /// Says whether it dropped anything, so the panel can end with a line admitting it. Rows that
 /// vanish with nothing on screen to say so read as a panel that has nothing more to show.
 ///
 /// `notice` is how many rows that admission takes at this width. They are held back before
 /// anything is dropped, so the notice is never the thing that has to be trimmed.
-fn fit(blocks: &mut [Vec<Line<'static>>], height: usize, notice: usize) -> bool {
-    let mut total: usize = blocks.iter().map(Vec::len).sum();
+///
+/// A block is a list of rows and a row may be several lines, because a long list wraps. Rows go
+/// whole: trimming line by line left the onlooker's "never" row in Korean ending on
+/// "받는 주소," — half a list, with the comma promising a rest that had been cut.
+fn fit(blocks: &mut [Vec<Vec<Line<'static>>>], height: usize, notice: usize) -> bool {
+    let lines = |block: &Vec<Vec<Line<'static>>>| block.iter().map(Vec::len).sum::<usize>();
+    let mut total: usize = blocks.iter().map(lines).sum();
     if height == 0 || total <= height {
         return false;
     }
     let room = height.saturating_sub(notice);
     let mut dropped = false;
     while total > room {
-        let Some(tallest) = blocks.iter_mut().max_by_key(|block| block.len()) else { break };
-        if tallest.len() <= 2 {
+        // A party's own line always stays, so every party is still on screen.
+        let Some(tallest) =
+            blocks.iter_mut().filter(|block| block.len() > 1).max_by_key(|block| lines(block))
+        else {
             break;
-        }
-        tallest.pop();
-        total -= 1;
+        };
+        let Some(row) = tallest.pop() else { break };
+        total -= row.len();
         dropped = true;
     }
     dropped
@@ -1269,7 +1377,11 @@ impl Session {
         self.stop_and_forget_the_telling();
         self.revealed = 0;
         self.log.clear();
-        self.reported = 0;
+        // What earlier stages measured is kept, but it is not news. Counting from zero here
+        // announced every run the reader had already watched as if it had just happened, on the
+        // second beat of the next stage, before that stage had run anything — the attack stage
+        // listed each system twice.
+        self.reported = self.outcomes.len();
         self.said_done = false;
     }
 
@@ -1425,7 +1537,7 @@ impl Session {
                     Msg::EventVerified.text(language),
                     time_in(*verify, self.unit_over(&Stage::ALL, |m| m.verify_nanos)),
                     Msg::EventSize.text(language),
-                    format::bytes(*bytes as u64),
+                    size_in(*bytes, self.size_unit_over(&Stage::ALL)),
                 ),
             ),
             Happening::Attack { stage, kind, accepted } => Beat::outcome(
@@ -1455,6 +1567,15 @@ impl Session {
                     Msg::EventOutsideRange.text(language),
                     Msg::EventSetTo.text(language),
                     to,
+                ),
+            ),
+            Happening::SystemPulledIn { current } => Beat::outcome(
+                State::Chosen,
+                format!(
+                    "{}  ·  {} {}",
+                    Msg::EventOutsideRange.text(language),
+                    Msg::EventSetTo.text(language),
+                    system_name(*current, language),
                 ),
             ),
             Happening::NotANumber => Beat::outcome(State::Bad, Msg::EventNotANumber.text(language)),
@@ -1581,6 +1702,13 @@ impl KqSession for Session {
                 // A number that goes nowhere reads as a broken key unless the screen says what
                 // happened to it.
                 match self.knobs[self.chosen].commit() {
+                    // The system knob is drawn as the system's name, so that is where it landed;
+                    // "set to 4" beside a panel reading "halo2" is two answers to one question.
+                    Typed::PulledIn { .. } if self.chosen == KNOB_STAGE => {
+                        if let KnobValue::Choice { current, .. } = self.knobs[KNOB_STAGE].value {
+                            self.say(Happening::SystemPulledIn { current });
+                        }
+                    }
                     Typed::PulledIn { to } => self.say(Happening::PulledIn { to }),
                     Typed::NotANumber => self.say(Happening::NotANumber),
                     Typed::Taken | Typed::Nothing => {}
@@ -1602,7 +1730,12 @@ impl KqSession for Session {
 
     fn tick(&mut self) {
         if let Some(runner) = &self.runner {
-            let (finished, failure) = runner.drain(&mut self.outcomes);
+            let mut fresh = Vec::new();
+            let (finished, failure) = runner.drain(&mut fresh);
+            for outcome in &fresh {
+                self.record.add(outcome);
+            }
+            self.outcomes.append(&mut fresh);
             if let Some(failure) = failure {
                 self.failure = Some(failure);
             }
@@ -1625,7 +1758,9 @@ impl KqSession for Session {
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: Theme, language: Language) {
         let title = match self.stage {
-            STAGE_RUN | STAGE_MESSAGES => Msg::RunTitle,
+            STAGE_RUN => Msg::RunTitle,
+            // This panel shows one message of the protocol, not four systems and three numbers.
+            STAGE_MESSAGES => Msg::MessagesTitle,
             STAGE_TUNE => Msg::TuneTitle,
             STAGE_BREAK => Msg::BreakTitle,
             STAGE_SIDES => Msg::RecapTitle,
@@ -1689,7 +1824,7 @@ impl KqSession for Session {
                 );
             }
             STAGE_TUNE => {
-                let mut knobs = self.knob_lines(language, theme);
+                let mut knobs = self.knob_lines(width, language, theme);
                 let stages = self.wanted();
                 knobs.push(Line::from(""));
                 knobs.extend(self.trust_lines(&stages, width, language, theme));
@@ -1757,8 +1892,10 @@ impl KqSession for Session {
 
     fn keys(&self, language: Language) -> Vec<(&'static str, &'static str)> {
         match self.stage {
+            // The arrows pick a value and change it. They were labelled "System", the name of the
+            // first knob, which is one of the three things they move.
             STAGE_TUNE => vec![
-                ("↑↓ ←→", Msg::KnobStage.text(language)),
+                ("↑↓ ←→", Msg::KeyChange.text(language)),
                 ("0-9", Msg::KeyTypeNumber.text(language)),
             ],
             STAGE_SIDES => vec![("↑↓", Msg::KeySystem.text(language))],
@@ -1777,6 +1914,14 @@ impl KqSession for Session {
 
     fn close(&mut self) {
         self.stop();
+    }
+}
+
+/// What position `current` of the system knob is called: all four, or one of them.
+fn system_name(current: usize, language: Language) -> &'static str {
+    match current {
+        1..=4 => phrases::stage(Stage::ALL[current - 1]).text(language),
+        _ => Msg::StageAll.text(language),
     }
 }
 
@@ -1851,6 +1996,41 @@ fn time_in(nanos: u64, unit: TimeUnit) -> String {
     let value = nanos as f64 / unit.divisor;
     let decimals = if value < 1.0 && nanos > 0 { unit.decimals.max(2) } else { unit.decimals };
     format!("{value:.decimals$} {}", unit.suffix)
+}
+
+/// A unit of size, and how a column of byte counts is written in it.
+///
+/// The size column read `96 B`, `64 B`, `40 B` and `1.44 KiB` — four units' worth of rule broken in
+/// one column, and the same trap as the times: 96 beside 1.44 invites the wrong comparison.
+#[derive(Clone, Copy)]
+struct SizeUnit {
+    divisor: f64,
+    suffix: &'static str,
+}
+
+const BYTES: SizeUnit = SizeUnit { divisor: 1.0, suffix: "B" };
+const KIBIBYTES: SizeUnit = SizeUnit { divisor: 1024.0, suffix: "KiB" };
+const MEBIBYTES: SizeUnit = SizeUnit { divisor: 1024.0 * 1024.0, suffix: "MiB" };
+
+/// The unit the largest size in a column wants, which is the unit the whole column gets. The same
+/// thresholds as `nmtk_core::format::bytes`, so a size alone in its column reads exactly as it does
+/// everywhere else in nmtk.
+fn size_unit_for(bytes: usize) -> SizeUnit {
+    if bytes < 1024 {
+        BYTES
+    } else if bytes < 1024 * 1024 {
+        KIBIBYTES
+    } else {
+        MEBIBYTES
+    }
+}
+
+fn size_in(bytes: usize, unit: SizeUnit) -> String {
+    if unit.divisor == 1.0 {
+        format!("{bytes} {}", unit.suffix)
+    } else {
+        format!("{:.2} {}", bytes as f64 / unit.divisor, unit.suffix)
+    }
 }
 
 /// The first bytes of a message, so a reader can see that it is bytes.
@@ -1966,10 +2146,28 @@ mod tests {
                         text.chars().count() <= 160,
                         "stage {stage} in {language} says too much at once: {text:?}"
                     );
+                    assert!(
+                        sentences(text) <= 2,
+                        "stage {stage} in {language} is more than two sentences: {text:?}"
+                    );
                     assert!(!text.is_empty(), "stage {stage} has a blank beat in {language}");
                 }
             }
         }
+    }
+
+    /// Sentences in a beat: a full stop, question or exclamation mark that ends the text or is
+    /// followed by a space. `0.14` and `s = r + c` are not sentence ends.
+    fn sentences(text: &str) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        chars
+            .iter()
+            .enumerate()
+            .filter(|(index, c)| {
+                matches!(c, '.' | '?' | '!')
+                    && chars.get(index + 1).is_none_or(|next| next.is_whitespace())
+            })
+            .count()
     }
 
     /// The other three quests end on the reader's own numbers. This one ended on a panel of
@@ -2027,6 +2225,31 @@ mod tests {
         let said = cut.iter().map(drawn).collect::<Vec<_>>().join(" ");
         let head: String = Msg::PanelTrimmed.text(Language::KOREAN).chars().take(10).collect();
         assert!(said.contains(&head), "the panel said nothing about the rows it dropped: {said:?}");
+    }
+
+    /// Trimming went line by line, so a wrapped list lost its tail and kept a comma promising more.
+    #[test]
+    fn a_short_recap_drops_whole_rows_and_never_half_a_list() {
+        let session = finished();
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        for language in [Language::ENGLISH, Language::KOREAN] {
+            for height in 10..=24 {
+                let lines: Vec<String> =
+                    session.recap_lines(width, height, language, theme).iter().map(drawn).collect();
+                // A list that wraps ends a line on a comma, and the line under it carries on,
+                // indented. A comma with no indented line after it is a list cut in half.
+                for (index, line) in lines.iter().enumerate() {
+                    if line.trim_end().ends_with(',') {
+                        let next = lines.get(index + 1).map(String::as_str).unwrap_or("");
+                        assert!(
+                            next.starts_with(' '),
+                            "{language} at {height} rows cut a list in half: {lines:#?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A label wider than its column was cut where it ran out: `The unchanged verifier sa…` is
@@ -2210,6 +2433,264 @@ mod tests {
                     assert!(
                         top.ends_with("\u{2500}\u{2500}\u{256e}"),
                         "{total} columns in {language}: the title ate the border: {top:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Runs whatever this session's stage starts, the way the shell does, until it is done.
+    fn run_through(session: &mut Session) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        for _ in 0..60 {
+            if KqSession::can_advance(session) {
+                KqSession::on(session, Action::Go);
+            }
+            KqSession::tick(session);
+            if session.at_end() && session.state != RunState::Running {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the run never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        while session.state == RunState::Running {
+            assert!(std::time::Instant::now() < deadline, "the run never finished");
+            KqSession::tick(session);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        KqSession::tick(session);
+    }
+
+    fn said(session: &Session, language: Language) -> Vec<String> {
+        KqSession::transcript(session, language).into_iter().map(|beat| beat.text).collect()
+    }
+
+    /// Walking into a stage announced every run the reader had already watched as if it had just
+    /// happened: the attack stage listed each system twice, and the tuning stage reported four
+    /// measurements on its second beat, before it had run anything.
+    #[test]
+    fn a_new_stage_does_not_announce_the_runs_before_it() {
+        let mut session = finished();
+        for stage in [STAGE_MESSAGES, STAGE_TUNE, STAGE_BREAK] {
+            KqSession::go_to(&mut session, stage);
+            KqSession::tick(&mut session);
+            KqSession::on(&mut session, Action::Go);
+            KqSession::tick(&mut session);
+            let beats = said(&session, Language::ENGLISH);
+            assert!(
+                !beats.iter().any(|beat| beat
+                    .contains(&format!("·  {} ", Msg::EventProved.text(Language::ENGLISH)))),
+                "stage {stage} announced an old run: {beats:?}"
+            );
+        }
+    }
+
+    /// The system knob belongs to the tuning stage. Read everywhere, it made the attack stage run
+    /// one system and still say two attacks got through.
+    #[test]
+    fn the_system_chosen_while_tuning_does_not_follow_the_reader_elsewhere() {
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        KqSession::on(&mut session, Action::Nudge(1)); // Sigma alone
+        assert_eq!(session.wanted(), vec![Stage::Sigma]);
+        KqSession::go_to(&mut session, STAGE_BREAK);
+        assert_eq!(session.wanted(), Stage::ALL.to_vec());
+        KqSession::go_to(&mut session, STAGE_SIDES);
+        assert_eq!(session.wanted(), Stage::ALL.to_vec());
+    }
+
+    /// The attack stage's count is read off the run, and it agrees with what the engine did.
+    #[test]
+    fn the_attack_stage_says_how_many_got_through_from_the_run_itself() {
+        let session = finished();
+        let accepted: usize = session
+            .outcomes
+            .iter()
+            .map(|o| o.forgery.attempts.iter().filter(|a| a.accepted).count())
+            .sum();
+        let tried: usize = session.outcomes.iter().map(|o| o.forgery.attempts.len()).sum();
+        // The three quick systems: the weak Fiat-Shamir hash and the toxic waste get through.
+        assert_eq!((accepted, tried), (2, 5));
+        let through = session.tell(Topic::Through, Language::ENGLISH);
+        assert_eq!(through, "got through 2  ·  tried 5");
+    }
+
+    /// "Only halo2 moved" was said about runs halo2 was not in.
+    #[test]
+    fn what_the_width_did_is_said_from_the_run() {
+        let session = finished();
+        assert_eq!(
+            session.tell(Topic::Widened, Language::ENGLISH),
+            Msg::TuneNoHalo2.text(Language::ENGLISH)
+        );
+
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        for _ in 0..4 {
+            KqSession::on(&mut session, Action::Nudge(1)); // halo2 alone
+        }
+        KqSession::on(&mut session, Action::Next);
+        for c in "24".chars() {
+            KqSession::on(&mut session, Action::Type(c));
+        }
+        KqSession::on(&mut session, Action::Commit);
+        run_through(&mut session);
+        let widened = session.tell(Topic::Widened, Language::ENGLISH);
+        assert!(widened.starts_with("halo2  ·  Circuit size 24 bits"), "{widened:?}");
+        session.close();
+    }
+
+    /// The closing stage runs everything again, and it used to read only that last run, so the
+    /// reader's own numbers were the ones the recap had just made for itself.
+    #[test]
+    fn the_recap_reads_the_whole_quest_and_not_the_last_run() {
+        let mut session = finished();
+        let first = session.record;
+        assert_eq!(first.runs, 3);
+        assert_eq!(first.tried, 5);
+        // A second, smaller run: Sigma alone.
+        session.start(vec![Stage::Sigma]);
+        while session.state != RunState::Done {
+            KqSession::tick(&mut session);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(session.outcomes.len(), 1, "the last run is one system");
+        assert_eq!(session.record.runs, 4);
+        assert_eq!(session.record.tried, 6);
+        let attacks = session.tell(Topic::Attacks, Language::ENGLISH);
+        assert!(attacks.starts_with("tried 6  ·  accepted 2"), "{attacks:?}");
+        let spread = session.tell(Topic::Spread, Language::ENGLISH);
+        assert!(spread.contains("40 B → 96 B"), "{spread:?}");
+        assert!(spread.contains("systems run 4"), "{spread:?}");
+
+        // Walking between stages keeps the record; `r` is what forgets it.
+        KqSession::go_to(&mut session, STAGE_SIDES);
+        assert_eq!(session.record.runs, 4);
+        KqSession::on(&mut session, Action::Reset);
+        assert_eq!(session.record, Record::default());
+    }
+
+    /// One unit per number column: the size column read `96 B` above `1.44 KiB`.
+    #[test]
+    fn the_size_column_carries_one_unit() {
+        let mut session = finished();
+        let slowest = session.outcomes.len() - 1;
+        session.outcomes[slowest].measurement.proof_bytes = 1_475;
+        let theme = Theme::new(true);
+        let width = panel_width(MIN_WIDTH, theme);
+        let table: Vec<String> =
+            session.table(&Stage::ALL, width, Language::ENGLISH, theme).iter().map(drawn).collect();
+        let sizes: Vec<&String> =
+            table.iter().filter(|line| line.trim_end().ends_with('B')).collect();
+        assert_eq!(sizes.len(), 3, "{table:?}");
+        for line in &sizes {
+            assert!(line.trim_end().ends_with("KiB"), "a size in another unit: {table:?}");
+        }
+        assert!(table.iter().any(|line| line.contains("0.09 KiB")), "{table:?}");
+        // Alone in its column a size reads as it does everywhere else.
+        assert_eq!(size_in(96, size_unit_for(96)), format::bytes(96));
+        assert_eq!(size_in(1_475, size_unit_for(1_475)), format::bytes(1_475));
+    }
+
+    /// A runner dropped without `stop` left its thread proving on with nobody to read the answer.
+    #[test]
+    fn a_dropped_runner_takes_its_thread_with_it() {
+        let runner = Runner::start(vec![Stage::Sigma, Stage::FiatShamir], 1, 16, machine());
+        let shared = Arc::clone(&runner.shared);
+        drop(runner);
+        assert_eq!(Arc::strong_count(&shared), 1, "the worker thread outlived its runner");
+    }
+
+    /// The system knob is drawn as a name, so a number typed past its end lands on a name.
+    #[test]
+    fn a_system_typed_past_the_end_says_which_system_it_landed_on() {
+        let mut session = Session::new(&machine());
+        KqSession::go_to(&mut session, STAGE_TUNE);
+        KqSession::on(&mut session, Action::Type('9'));
+        KqSession::on(&mut session, Action::Commit);
+        for language in Language::ALL {
+            let beats = said(&session, *language);
+            let landed = phrases::stage(Stage::Halo2).text(*language);
+            assert!(
+                beats
+                    .iter()
+                    .any(|beat| beat
+                        .ends_with(&format!("{} {landed}", Msg::EventSetTo.text(*language)))),
+                "{language}: {beats:?}"
+            );
+        }
+    }
+
+    /// Every word a reader has to know is said before it is leaned on, in the stage it is used in,
+    /// because a stage can be the first one a reader opens.
+    #[test]
+    fn every_word_is_explained_before_it_is_used_in_its_stage() {
+        // A word, and the beats that explain it.
+        let words: &[(&str, &[Msg])] = &[
+            ("node", &[Msg::WhatFour]),
+            ("verifier", &[Msg::Roles]),
+            ("hash", &[Msg::FourHash, Msg::BreakWeakHash]),
+            ("circuit", &[Msg::FourCircuit, Msg::RunAsk, Msg::TuneCircuit]),
+            ("bit", &[Msg::TuneBitIs]),
+            ("byte", &[Msg::RunBytes]),
+            ("note", &[Msg::SidesNote]),
+            ("commitment", &[Msg::WhatACommitmentIs, Msg::BreakRecall, Msg::SidesCommitment]),
+            ("nullifier", &[Msg::SidesNullifier]),
+            ("ceremony", &[Msg::BreakCeremonyIs]),
+        ];
+        for (stage, script) in SCRIPTS.iter().enumerate() {
+            // Stage-relative: the tuning stage's "the prover must get right" is about a circuit,
+            // and the attack stage says who the prover is before it matters.
+            let spoken: Vec<Msg> = script
+                .iter()
+                .filter_map(|step| match step {
+                    Say(msg) | Ask(msg) => Some(*msg),
+                    _ => None,
+                })
+                .collect();
+            for (word, explained_by) in words {
+                let first = spoken.iter().position(|msg| {
+                    msg.text(Language::ENGLISH)
+                        .to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|token| token.starts_with(word))
+                });
+                if let Some(first) = first {
+                    assert!(
+                        explained_by.contains(&spoken[first]),
+                        "stage {stage} uses {word:?} before explaining it: {:?}",
+                        spoken[first].text(Language::ENGLISH)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tuning and message panels padded their labels to a width that fitted English, which
+    /// `pad` never narrows; measured columns keep the gap in Korean too.
+    #[test]
+    fn the_tuning_and_message_panels_keep_their_columns_in_both_languages() {
+        let mut session = finished();
+        session.stage = STAGE_TUNE;
+        let theme = Theme::new(true);
+        for total in [MIN_WIDTH, 100] {
+            let width = panel_width(total, theme);
+            for language in [Language::ENGLISH, Language::KOREAN] {
+                let mut lines = session.knob_lines(width, language, theme);
+                lines.extend(session.trust_lines(&[Stage::Sigma], width, language, theme));
+                for index in 0..5 {
+                    session.message = index;
+                    lines.extend(session.message_lines(width, language, theme));
+                }
+                for line in &lines {
+                    let line_text = drawn(line);
+                    assert!(
+                        text::width(&line_text) <= width,
+                        "{total} columns in {language}: {line_text:?} is wider than {width}"
+                    );
+                    assert!(
+                        columns_keep_their_gap(line),
+                        "{total} columns in {language}: {line_text:?} has no gap after its label"
                     );
                 }
             }
