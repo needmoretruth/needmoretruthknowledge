@@ -51,7 +51,7 @@ There are three voices:
 | Voice | Drawn | Used for |
 |---|---|---|
 | `Say` | plain | The quest explaining. |
-| `Event(state)` | `+ x ~ >` and the state colour | Something that happened in the run. |
+| `Event(state)` | `+ x ~ >` and the state colour, or a muted `·` with no state | Something that happened in the run. |
 | `Ask` | `▸` | Something the reader has to do first. |
 
 A quest builds its conversation in `transcript(language)`, on demand, from the work it has already
@@ -64,18 +64,23 @@ on when the thing it was about to describe has happened. Two methods keep that h
 
 | | |
 |---|---|
-| `can_advance()` | Enter does something right now. False while a run is being waited on. |
+| `can_advance()` | Enter carries the conversation on right now. False while a run is being waited on. |
 | `at_end()` | This stage has said everything it has to say. |
+
+Both are false in the middle of a run, and the shell needs to tell those apart: at the end of a
+stage Enter walks into the next one — unless the stage has values to run again (§11) — and in the
+middle of a run it does nothing, which is what the reader is being told. A quest never walks itself
+into the next stage — only the shell knows there is one.
 
 **Walking to another stage stops the work and keeps the numbers.** One heavy run at a time is a
 hard rule, so entering a stage stops whatever the last one started. What that run *measured* is
-not the run: a recap reached with Tab has to show the reader their own numbers, and `r` on a stage
-is the only thing that throws them away.
+not the run: a recap reached with Tab has to show the reader their own numbers. Tab forgets
+nothing. `r` is the only thing that throws numbers away, and it throws away only what the stage
+showing produced.
 
-Both are false in the middle of a run, and the shell needs to tell those apart: at the end of a
-stage Enter walks into the next one, and in the middle of a run it does nothing, which is what the
-reader is being told. A quest never walks itself into the next stage — only the shell knows there
-is one.
+**Entering a stage never announces again a run an earlier stage made.** Its numbers are kept, but
+they are not news: an attack stage that listed every system a second time was reporting a run
+nobody had just started.
 
 ## 2. What a quest declares
 
@@ -166,7 +171,8 @@ three.
 - **typed digits**, for the reader who wants *their* number.
 
 A knob that only offers presets has decided for the reader what is worth trying, which is the
-opposite of the point. Out-of-range typing is refused and the old value stays.
+opposite of the point. A typed number outside the range lands on the nearest end, and the screen
+says where it landed (§11).
 
 Because digits belong to the values, **stages are walked with Tab**, not with number keys. Where a
 stage has no values to turn, `1`–`9` reach the first nine stages directly.
@@ -180,6 +186,8 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
 - **What the quest says must match what the engine said.** If prose names a reason — "the coin is
   already gone" — a test asserts the engine really returns that reason. Prose that drifts from the
   machine is the worst bug this program can have, because it is invisible.
+- **A number exactly on a line the prose draws gets its own words.** Exactly half is neither above
+  half nor below it, and "above half it catches up" is not true of a tie.
 - **A number column carries one unit, chosen from its largest value.** A column reading 166 µs,
   21 µs and 27.5 ms invites the reader to compare 166 with 27.5 and conclude that the slowest row
   is the fastest.
@@ -193,7 +201,9 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
 - Black and white. Red, yellow, blue and green carry **state only**: `State::{Good, Bad, Working,
   Chosen}`, each with a one-column mark (`+ x ~ >`) so the screen reads with colour off.
 - **Korean and Japanese glyphs take two columns.** Never use `str::len()` or `format!("{:<10}")` on
-  anything a reader will see. Use `nmtk_kq::text::{width, pad, column, truncate, wrap}`.
+  anything a reader will see. Use `nmtk_kq::text::{width, pad, column, truncate, wrap}`. Their
+  widths come from the drawing library itself, never from a table kept beside it, so a column
+  measured there is the column drawn.
 - **A table column is built with `column`, never with `pad`.** `pad` widens and never narrows, so
   a label wider than its column runs straight into the value beside it. Korean reaches that width
   on labels English never does, which is why this is written down rather than left to judgement.
@@ -211,7 +221,12 @@ stage has no values to turn, `1`–`9` reach the first nine stages directly.
   other run first.
 - Work happens on worker threads; `tick()` is called about ten times a second on the drawing
   thread and only reads their latest state. It never blocks and never does the work.
-- `close()` stops every thread and is always called before a session is dropped.
+- `close()` stops every thread and is always called before a session is dropped. A session stops
+  its threads when it is dropped as well: whatever owns a worker thread stops it in its own `Drop`,
+  so an error, a panic or a signal that never reaches `close()` leaves nothing running.
+- **A thread split is rounded so a share stays on the same side of any line the prose draws** — 51%
+  never runs as 50%. A run that needs more threads than the reader allowed takes turns within the
+  allowance rather than taking more of the machine.
 - A quest with no worker threads reports `RunState::Idle` and draws no status mark. A mark nobody
   can explain is clutter.
 
@@ -224,7 +239,8 @@ crates/kq-<topic>/src/
     session.rs    the stage scripts, the deeds, the right-hand panel
 ```
 
-A stage's script is a list of steps. Four kinds cover every quest written so far:
+A stage's script is a list of steps, kept in the quest's own `session.rs`. These are the kinds the
+quests are built from:
 
 ```rust
 Say(Msg)        // one sentence
@@ -240,6 +256,10 @@ for the suggested values then states a result that did not occur — "Smaller, f
 over a model the reader had just made bigger. A `Tell` reads the numbers instead, and says so when
 the run was not the one the conversation asked for.
 
+**A `Tell` reads the world as it was at its own step, not as the latest run left it.** A stage that
+runs twice says two things about two runs, not the same thing twice. A `Tell` with nothing to say
+is left out rather than drawn as an empty beat.
+
 A `Run` followed by an `Await` is one move: the reader presses Enter once and the waiting begins,
 because a key whose only effect is to skip the answer is not worth offering.
 
@@ -248,6 +268,8 @@ to say, Enter runs the work again with the values now on screen — and it does 
 reader turns a knob while the work is running. Walking to another stage is Tab's job, and only
 Tab's. A reader who follows "set it to 51% and press Enter" and is carried into the next stage
 instead has been told a lie by the key bar; a quest names what Enter does with `go_name`.
+Where the next step is a run of its own — "now give the attacker 51% and press Enter again" — the
+values on screen are for that run, and Enter starts it rather than redoing the run before.
 
 **A recap is composed from the whole quest, never from the last snapshot lying around.** Keep a
 record that every run writes into — blocks mined, fastest rate, each attack and how it ended — and
@@ -263,7 +285,8 @@ cannot add.
 
 **Every word on screen is explained at or before its first appearance**, in the same stage, in one
 sentence: hash, bit, byte, nonce, node, gradient. A reader who meets an unexplained word stops
-reading the screen and starts guessing.
+reading the screen and starts guessing. The panel follows the same rule: it shows a word only once
+the conversation has explained it, so a label arrives with its sentence, not before.
 
 The engine it drives is a separate crate and knows nothing about any of this.
 
@@ -281,4 +304,5 @@ The engine it drives is a separate crate and knows nothing about any of this.
 - [ ] Every claim the prose makes about the engine is covered by a test.
 - [ ] The quest reads at 80×24, and in every language it declares.
 - [ ] `Requirements` are honest on a small machine.
-- [ ] No `unsafe`, no network, no file written outside `~/.config/nmtk`.
+- [ ] No `unsafe`, no network, no file written outside the settings directory
+      (`$XDG_CONFIG_HOME/nmtk`, or `~/.config/nmtk`).

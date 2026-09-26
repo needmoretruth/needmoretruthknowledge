@@ -51,58 +51,68 @@ Four quests ship today.
 
 Mine real Bitcoin block headers — 80 bytes, double SHA-256, compared against a real target — at a
 practice difficulty, so blocks arrive in seconds. Your measured hash rate sits beside what it would
-mean at Bitcoin's difficulty 1, and beside the hash rate the protocol implies for early 2009. A
-laptop today is worth several times the whole network of January 2009.
+mean at Bitcoin's difficulty 1, and beside the hash rate the protocol implies for early 2009, and
+the screen works out how many times that whole network your machine is worth.
 
 Then split your cores between miners whose shares you choose, and attack the chain. At 30% the
-attacker falls behind, gives up, and the payment stands. Type `51` and run the same attack again:
-this one is a **51% attack that actually succeeds** — the payment reaches the confirmations you set,
-the merchant hands over the goods, and the attacker's private chain erases it.
+attacker usually falls behind, gives up, and the payment stands. Type `51` and run the same attack
+again: this one is a **51% attack that can actually succeed**, and usually does — the payment
+reaches the confirmations you set, the merchant hands over the goods, and the attacker's private
+chain erases it. It is a race, so either one can go the other way, and the quest says so when it
+does. The attack keeps to the thread count you allowed, and the panel shows the share the attacker
+really holds.
 
 ### 📒 Ledger models · *Ledgers · 20 min*
 
 Send one coin under three sets of rules at once — **UTXO** (Bitcoin), **account-based** (Ethereum),
-**object-based** (Sui) — and watch them disagree about everything except the balance. One transfer
-grows the UTXO state by nothing, the account state by a whole new account, the object state by
-nothing again.
+**object-based** (Sui) — and watch them disagree about everything except the balance. One whole
+coin sent to someone new grows the UTXO state by nothing, the account state by a whole new account,
+the object state by nothing again. Send part of a coin and the UTXO and object states grow too: the
+coin is broken in two.
 
-Then spend the same coin twice. All three stop it, at three different steps, for three different
-reasons: the coin is already spent, the counter has moved on, the object is at a newer version.
+Then spend the same coin twice. All three stop it, for three different reasons: the coin is already
+spent, the counter has moved on, the object is at a newer version. The UTXO rules notice when they
+look the coin up; the other two when they check the transfer is current.
 
 ### 🧠 Transformer · *Machine learning · 45 min*
 
 A real transformer, written out by hand — embeddings, causal attention, feed-forward, layer norm,
-and the backward pass — with no machine-learning framework underneath. Around a hundred thousand
-weights, trained here in half a minute, until asking it `nmtk` gets back
-`need more truth knowledge`.
+and the backward pass — with no machine-learning framework underneath. It is sized to your
+machine: on eight cores it has about a hundred thousand weights and trains in under a minute, until
+asking it `nmtk` gets back `need more truth knowledge`.
 
 Watch the loss fall and the attention grid fill in. Then change the depth, the heads, the width and
 the learning rate and train it again — and in **Break**, turn the learning rate up three thousand
-times and watch the same model collapse into one repeated letter.
+times and watch the same model collapse into one character over and over, most often the space.
 
 ### 🔒 Zero-knowledge proofs · *Cryptography · 50 min*
 
 Walk the real lineage, each system running here: an interactive **sigma protocol** (stepped through
 message by message), the same proof made non-interactive with **Fiat-Shamir**, a system whose
 soundness rests on **setup randomness being destroyed**, and **halo2**, which needs no such setup.
-Proving time, verification time and proof size side by side — 96 bytes and a fraction of a
-millisecond at one end, 1.5 KiB and tens of milliseconds at the other.
+Proving time, verification time and proof size side by side — under a millisecond and under a
+hundred bytes for the first three, about 1.5 KiB and tens of milliseconds to prove for halo2.
 
 Then attack all four. A guessed response is rejected. A Fiat-Shamir challenge that skips the
 commitment is forged and **accepted**. And the holder of a trusted setup's leftover randomness opens
-a commitment at a value it does not hold — the unchanged verifier accepts that too, which is why
-anyone ever asks whether a ceremony was honest.
+a commitment of its own at a value it never committed to — the unchanged verifier accepts that too,
+which is why anyone ever asks whether a ceremony was honest.
 
 Finally, the same shielded payment from four sides at once: sender, receiver, onlooker, attacker.
 
 ## Install
 
-Paste this into a terminal on Fedora or Ubuntu. It installs what nmtk needs and starts it, and asks
-you nothing.
+Paste this into a terminal on Fedora or Ubuntu. It installs what nmtk needs, builds it and starts
+it. It asks you nothing, except that `sudo` may want your password if a C compiler or `curl` has to
+be installed.
 
 ```sh
 git clone https://github.com/needmoretruth/needmoretruthknowledge.git && cd needmoretruthknowledge && ./install.sh
 ```
+
+After that, `nmtk` starts it. It takes `--help` (`-h`) and `--version` (`-V`) and nothing else;
+anything else prints a short usage and exits with status 2. It needs a terminal, and will not start
+with its output piped or redirected.
 
 Details, other ways to do it, and what to do when something goes wrong: **[INSTALL.md](INSTALL.md)**.
 
@@ -112,10 +122,10 @@ The only key you need to start is `Enter`.
 
 | Key | What it does |
 |---|---|
-| `Enter` | carry the conversation on — and, where the stage has values to set, run it with the ones on screen |
+| `Enter` | on the list, open a quest; in a quest, carry the conversation on — and, where the stage has values to set, run it with the ones on screen |
 | `Tab` | the next stage of the quest (`Shift+Tab` for the one before) |
-| `↑` `↓` | choose a value to change |
-| `←` `→` or `0`–`9` | change it, by arrow or by typing the number you want |
+| `↑` `↓` | move through a list; in a quest, choose a value to change |
+| `←` `→` or `0`–`9` | change it, by arrow or by typing the number you want; on a stage with no values, `1`–`9` go straight to that stage |
 | `PgUp` `PgDn` | scroll back through what has been said |
 | `Space` | pause and resume a run |
 | `r` | start this stage over |
@@ -124,8 +134,15 @@ The only key you need to start is `Enter`.
 | `s` | settings |
 | `?` | every key, grouped by where it works |
 | `q` or `Esc` | back, and quit from the shelf |
+| `Ctrl+C` | quit, from anywhere |
 
-A terminal of at least 80×24 is required.
+Held down, the arrows and `PgUp` `PgDn` keep going. `Esc` also throws away a number you are
+halfway through typing. However nmtk ends — `q` on the shelf, `Ctrl+C`, or a kill, hangup or
+interrupt from outside — it gives the terminal back as it found it and stops every run.
+
+nmtk needs a terminal of at least 80×24. Shrunk below that, it says
+`This screen needs 80x24. Make the terminal larger.` and keeps your place; until the terminal is big
+enough again, only `q`, `Esc` and `Ctrl+C` do anything.
 
 ## Language
 
@@ -142,10 +159,16 @@ run that takes an hour. Every quest states a **minimum** and a **recommended** m
 shelf says where yours sits against both. A quest under the minimum still opens and sizes itself
 down; it says so rather than refusing.
 
-You can change the thread count, the language and colour under `s`, and your choices are kept in
-`~/.config/nmtk/settings.toml`. That file also holds the ids of the quests you have finished, so
-the list can mark them. It is the only thing nmtk records about what you did, and it never leaves
-your machine.
+You can change the thread count, the language and colour under `s`. A new thread count reaches the
+next quest you open; one already open keeps the count it opened with. Your choices are kept in
+`$XDG_CONFIG_HOME/nmtk/settings.toml`, or `~/.config/nmtk/settings.toml` when `XDG_CONFIG_HOME` is
+not set. That file also holds the ids of the quests you have finished, so the list can mark them.
+It is the only thing nmtk records about what you did, and it never leaves your machine.
+
+If `NO_COLOR` is set, nmtk starts with colour off unless you have turned colour on yourself under
+`s`. If part of the file cannot be read, nmtk keeps every setting it can read, puts the rest back to
+their defaults, copies the file as it was to `settings.toml.bad` beside it, and says so on the
+list.
 
 Quests carry their version, and a release carries one version of each: the newest. Nothing is
 kept around from before. If you want the version you learned from, check out that release of this
