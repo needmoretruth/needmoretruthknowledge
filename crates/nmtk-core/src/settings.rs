@@ -5,7 +5,7 @@
 //! not an error: nmtk starts with defaults sized for the machine and says nothing.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,9 +51,10 @@ impl Settings {
     /// stopping to ask them what language they read in. Afterwards the file exists and the
     /// question is never asked again.
     pub fn load_saying_whether_it_is_the_first_time() -> (Self, bool) {
-        match Self::path().and_then(|path| Self::read_from(&path)) {
-            Some(settings) => (settings, false),
-            None => (Self::default(), true),
+        let colour = !no_color_requested(std::env::var_os("NO_COLOR").as_deref());
+        match Self::path().and_then(|path| fs::read_to_string(path).ok()) {
+            Some(text) => (Self::parse(&text, colour), false),
+            None => (Self { colour, ..Self::default() }, true),
         }
     }
 
@@ -61,9 +62,43 @@ impl Settings {
     ///
     /// A file that exists but does not parse is not a first launch: the reader has been here
     /// before, and asking them to set nmtk up again because a line got damaged would be rude.
-    fn read_from(path: &Path) -> Option<Self> {
+    #[cfg(test)]
+    fn read_from(path: &std::path::Path) -> Option<Self> {
         let text = fs::read_to_string(path).ok()?;
-        Some(toml::from_str(&text).unwrap_or_default())
+        Some(Self::parse(&text, true))
+    }
+
+    /// Settings from the text of a settings file, one field at a time.
+    ///
+    /// Each field that reads is kept and each that does not falls back on its own. Reading the
+    /// file as one whole used to mean that one bad line — a language this build does not have, a
+    /// thread count written as `-1` — threw every other line away with it, including the list of
+    /// quests the reader had finished, and the next save wrote the loss to disk.
+    ///
+    /// `colour` is what colour is when the file does not say: off when the terminal asked for no
+    /// colour with `NO_COLOR`, on otherwise. A file that does say is the reader's own choice, and
+    /// wins.
+    fn parse(text: &str, colour: bool) -> Self {
+        let mut settings = Self { colour, ..Self::default() };
+        let Ok(table) = toml::from_str::<toml::Table>(text) else { return settings };
+        let field = |key: &str| table.get(key).cloned();
+        if let Some(language) = field("language").and_then(|value| value.try_into().ok()) {
+            settings.language = language;
+        }
+        if let Some(threads) = field("worker-threads").and_then(|value| value.as_integer()) {
+            // Negative is nonsense and reads as "decide from the machine"; anything past the
+            // largest machine anyone has is held there rather than trusted.
+            settings.worker_threads = usize::try_from(threads).unwrap_or(0).min(MAX_THREADS);
+        }
+        if let Some(colour) = field("colour").and_then(|value| value.as_bool()) {
+            settings.colour = colour;
+        }
+        if let Some(toml::Value::Array(done)) = field("finished") {
+            // One entry that is not a quest id does not cost the reader the others.
+            settings.finished =
+                done.iter().filter_map(|id| id.as_str().map(str::to_string)).collect();
+        }
+        settings
     }
 
     /// Writes the settings, creating the directory if needed.
@@ -112,9 +147,22 @@ impl Settings {
         if self.worker_threads == 0 {
             machine.default_worker_threads()
         } else {
-            self.worker_threads.min(machine.logical_cores)
+            // At least one: a profile built by hand, or read from a machine that reported
+            // nothing, can say zero cores, and zero threads is a run that never starts.
+            self.worker_threads.min(machine.logical_cores).max(1)
         }
     }
+}
+
+/// The most threads a settings file is believed about. Past this the number is a typo.
+pub const MAX_THREADS: usize = 1024;
+
+/// Whether the `NO_COLOR` convention asks for no colour: the variable is set and not empty.
+///
+/// See <https://no-color.org>. Only the first launch and a file that does not mention colour
+/// listen to it; once the reader has chosen in settings, the choice is theirs.
+pub fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
 /// Why settings could not be written. Reading never produces an error — it produces defaults.
@@ -162,8 +210,9 @@ mod tests {
 
     #[test]
     fn a_damaged_file_gives_defaults_rather_than_a_crash() {
-        let parsed: Settings = toml::from_str("language = \"klingon\"").unwrap_or_default();
+        let parsed = Settings::parse("language = \"klingon\"", true);
         assert_eq!(parsed, Settings::default());
+        assert_eq!(Settings::parse("this is not toml at all", true), Settings::default());
     }
 
     #[test]
@@ -206,5 +255,52 @@ mod tests {
         let text = "language = \"ko\"\nfuture-option = 7\n";
         let parsed: Settings = toml::from_str(text).unwrap();
         assert_eq!(parsed.language, Language::KOREAN);
+    }
+
+    /// One damaged line used to throw away every other line, the finished quests included.
+    #[test]
+    fn one_bad_line_keeps_the_rest_of_the_file() {
+        let text = "language = \"klingon\"\nworker-threads = 3\ncolour = false\n\
+                    finished = [\"consensus.proof-of-work\", 7]\n";
+        let parsed = Settings::parse(text, true);
+        assert_eq!(parsed.language, Language::ENGLISH);
+        assert_eq!(parsed.worker_threads, 3);
+        assert!(!parsed.colour);
+        assert_eq!(parsed.finished, vec!["consensus.proof-of-work".to_string()]);
+
+        let parsed = Settings::parse("language = \"ko\"\nworker-threads = -4\n", true);
+        assert_eq!(parsed.language, Language::KOREAN);
+        assert_eq!(parsed.worker_threads, 0, "a negative count reads as automatic");
+        let parsed = Settings::parse("worker-threads = 99999999\n", true);
+        assert_eq!(parsed.worker_threads, MAX_THREADS);
+    }
+
+    #[test]
+    fn no_color_decides_only_what_the_file_does_not() {
+        assert!(!Settings::parse("language = \"ko\"\n", false).colour);
+        assert!(Settings::parse("colour = true\n", false).colour, "the reader's choice wins");
+        assert!(no_color_requested(Some(std::ffi::OsStr::new("1"))));
+        assert!(!no_color_requested(Some(std::ffi::OsStr::new(""))), "empty means unset");
+        assert!(!no_color_requested(None));
+    }
+
+    #[test]
+    fn a_thread_count_is_never_zero_even_on_a_machine_that_reports_none() {
+        let settings = Settings { worker_threads: 4, ..Settings::default() };
+        assert_eq!(settings.resolved_worker_threads(&machine(0)), 1);
+        assert_eq!(Settings::default().resolved_worker_threads(&machine(0)), 1);
+    }
+
+    /// What `save` writes, `parse` reads back whole.
+    #[test]
+    fn what_is_written_is_what_is_read() {
+        let settings = Settings {
+            language: Language::KOREAN,
+            worker_threads: 5,
+            colour: false,
+            finished: vec!["a.b".to_string(), "c.d".to_string()],
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(Settings::parse(&text, true), settings);
     }
 }

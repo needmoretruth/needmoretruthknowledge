@@ -15,7 +15,7 @@ use nmtk_kq::Theme;
 ///
 /// A key that works and is not here is the same failure as a key that is here and does nothing:
 /// the reader who never finds Space concludes a run cannot be paused.
-const KEYS: [(Option<&str>, Msg); 20] = [
+const KEYS: [(Option<&str>, Msg); 21] = [
     (None, Msg::HelpEverywhere),
     (Some("l"), Msg::KeyLanguage),
     (Some("s"), Msg::KeySettings),
@@ -26,6 +26,8 @@ const KEYS: [(Option<&str>, Msg); 20] = [
     (Some("Enter"), Msg::KeyOpen),
     (Some("o"), Msg::LabelSort),
     (Some("f"), Msg::LabelFilter),
+    // On the shelf there is nothing to go back to, and the same keys end the program.
+    (Some("q  Esc"), Msg::KeyQuit),
     (None, Msg::HelpInAQuest),
     (Some("Enter"), Msg::KeyContinue),
     (Some("Tab"), Msg::KeyStage),
@@ -40,9 +42,16 @@ const KEYS: [(Option<&str>, Msg); 20] = [
 
 pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, theme: Theme) {
     // The promise at the bottom is asked for by height first: a help screen that pushes its own
-    // last box off a 24-row terminal has hidden the one line it exists to repeat.
-    let [keys_area, note_area] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(area);
+    // last box off a 24-row terminal has hidden the one line it exists to repeat. Its box is as
+    // tall as the promise wrapped to it: a fixed single row held the English and cut the Korean,
+    // which is wider, off at "이 컴퓨터에서" — before the verb that says what happens there.
+    let note_text = t(Msg::HelpOffline, language);
+    let note_rows = nmtk_kq::text::wrap(note_text, area.width.saturating_sub(4) as usize).len();
+    let [keys_area, note_area] = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(note_rows.clamp(1, 4) as u16 + 2),
+    ])
+    .areas(area);
 
     let rows: Vec<Line> = KEYS
         .iter()
@@ -74,8 +83,7 @@ pub fn render(frame: &mut Frame, area: Rect, language: nmtk_core::Language, them
         frame.render_widget(Paragraph::new(rows).block(block), keys_area);
     }
 
-    let note =
-        Paragraph::new(t(Msg::HelpOffline, language)).style(theme.good()).wrap(Wrap { trim: true });
+    let note = Paragraph::new(note_text).style(theme.good()).wrap(Wrap { trim: true });
     frame.render_widget(note.block(theme.panel()), note_area);
 }
 

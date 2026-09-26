@@ -12,9 +12,11 @@ mod logo;
 mod quest;
 mod quests;
 mod settings_screen;
+mod terminal;
 mod welcome;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
@@ -26,7 +28,7 @@ use ratatui::layout::{Constraint, Layout};
 
 use crate::app::{App, Screen};
 
-/// Every quest the program ships with, newest version and older ones alike.
+/// Every quest the program ships with: the newest version of each, and nothing older.
 fn catalogue() -> Catalogue {
     Catalogue::new(vec![
         Box::new(kq_proof_of_work::ProofOfWork),
@@ -37,36 +39,72 @@ fn catalogue() -> Catalogue {
 }
 
 /// Runs nmtk until the reader quits, restoring the terminal whatever happens.
+///
+/// A stop from outside — `kill`, a closed terminal — ends it the way `q` does, and comes back as
+/// an [`io::ErrorKind::Interrupted`] error so the caller can say so.
 pub fn run() -> io::Result<()> {
+    let stop = terminal::stop_signal();
     let mut app = App::new(catalogue());
-    let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, &mut app);
-    ratatui::try_restore()?;
-    result
+    let mut screen = terminal::take()?;
+    let result = event_loop(&mut screen, &mut app, &stop);
+    // The terminal first, so the reader has their shell back while the quest's threads wind
+    // down; then the quest, whose drop stops them.
+    let restored = terminal::give_back();
+    drop(app);
+    for message in terminal::deferred_panics() {
+        eprintln!("{message}");
+    }
+    result?;
+    restored
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> io::Result<()> {
+fn event_loop(screen: &mut terminal::Screen, app: &mut App, stop: &AtomicBool) -> io::Result<()> {
     while !app.quit {
+        if stop.load(Ordering::SeqCst) {
+            app.shut_down();
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped by a signal"));
+        }
         // The open quest reads its workers' latest state here, on this thread, before drawing.
         if let Some(quest) = &mut app.open {
             quest.session.tick();
         }
-        terminal.draw(|frame| draw(frame, app))?;
+        // Drawing measures the terminal first, so a resize is answered by the next frame: the
+        // resize event wakes the wait below, and the frame after it is drawn at the new size.
+        screen.draw(|frame| draw(frame, app))?;
         // Waking ten times a second is enough for a screen and leaves the cores to the work.
-        if event::poll(Duration::from_millis(FRAME_MILLIS))?
-            && let Event::Key(key) = event::read()?
-        {
-            app.on_key(key);
+        if !wait_for_event(Duration::from_millis(FRAME_MILLIS))? {
+            continue;
+        }
+        // Everything already waiting is handled before the next frame, not one event per frame:
+        // a pasted number or a held arrow otherwise drew a whole screen per keypress and fell
+        // further behind the longer the key was held.
+        loop {
+            if let Event::Key(key) = event::read()? {
+                app.on_key(key);
+            }
+            if app.quit || !wait_for_event(Duration::ZERO)? {
+                break;
+            }
         }
     }
     Ok(())
+}
+
+/// Whether an event is waiting, treating a wait cut short by a signal as "nothing yet". The
+/// signal itself is read from its flag at the top of the next frame.
+fn wait_for_event(timeout: Duration) -> io::Result<bool> {
+    match event::poll(timeout) {
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(false),
+        other => other,
+    }
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
     let theme = Theme::new(app.settings.colour);
     let language = app.language();
     let area = frame.area();
-    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+    app.too_small = area.width < MIN_WIDTH || area.height < MIN_HEIGHT;
+    if app.too_small {
         chrome::too_small(frame, theme, language);
         return;
     }
@@ -108,8 +146,8 @@ fn screen_title(app: &App, language: nmtk_core::Language) -> String {
         Screen::Settings => t(Msg::MenuSettings, language).to_string(),
         Screen::Help => t(Msg::HelpTitle, language).to_string(),
         Screen::Languages => t(Msg::SettingsLanguage, language).to_string(),
-        Screen::Quest => match &app.open {
-            Some(quest) => quest.title.to_string(),
+        Screen::Quest => match app.open_title() {
+            Some(title) => title.to_string(),
             None => t(Msg::Quests, language).to_string(),
         },
     }
@@ -124,6 +162,7 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
             say("↑↓", Msg::KeyMove),
             say("←→", Msg::KeyChange),
             say("l", Msg::KeyLanguage),
+            say("?", Msg::KeyHelp),
         ],
         // Ordered by how badly a reader needs it: a narrow terminal keeps the front of the list
         // and drops the back, so the key that reveals every other key comes early.
@@ -140,12 +179,16 @@ fn keys_for(app: &App, language: nmtk_core::Language) -> Vec<(&'static str, Stri
             say("↑↓", Msg::KeyMove),
             say("←→", Msg::KeyChange),
             say("q", Msg::KeyBack),
+            say("?", Msg::KeyHelp),
             say("l", Msg::KeyLanguage),
         ],
         Screen::Help => vec![say("q", Msg::KeyBack)],
-        Screen::Languages => {
-            vec![say("↑↓", Msg::KeyMove), say("Enter", Msg::KeyOpen), say("q", Msg::KeyBack)]
-        }
+        Screen::Languages => vec![
+            say("↑↓", Msg::KeyMove),
+            say("Enter", Msg::KeyOpen),
+            say("q", Msg::KeyBack),
+            say("?", Msg::KeyHelp),
+        ],
         Screen::Quest => {
             // Ordered by how badly a reader needs it, because a narrow terminal keeps the front
             // of this list and drops the back.
@@ -521,15 +564,106 @@ mod tests {
         assert!(bar.contains("Enter continue"), "the way on is missing: {bar:?}");
     }
 
+    /// The help screen, read as the keys in its left-hand column: the first word of every row
+    /// that is not a group heading. Matching the whole screen for a letter found `v` inside
+    /// "move", which is how this test passed for a key that does not exist.
+    fn help_keys(text: &str) -> Vec<String> {
+        text.lines()
+            .flat_map(|line| line.split('│').map(str::to_string).collect::<Vec<_>>())
+            .filter(|cell| cell.starts_with("  ") && !cell.trim().is_empty())
+            .flat_map(|cell| {
+                // The key column is 12 cells wide after two spaces of indent.
+                let keys: String = cell.chars().skip(2).take(12).collect();
+                keys.split_whitespace().map(str::to_string).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     #[test]
     fn help_names_only_keys_that_do_something() {
         let mut app = app_in(Language::ENGLISH);
         press(&mut app, KeyCode::Char('?'));
         let text = shot(&mut app, 100, 30);
         println!("\n===== help (100x30) =====\n{text}");
-        for key in ["Tab", "PgUp", "o", "f", "v"] {
-            assert!(text.contains(key), "help left out {key}:\n{text}");
+        let keys = help_keys(&text);
+        // Every key in the README's table, as the help screen writes it.
+        for key in [
+            "Enter",
+            "Tab",
+            "Shift+Tab",
+            "↑",
+            "↓",
+            "←",
+            "→",
+            "0-9",
+            "PgUp",
+            "PgDn",
+            "Space",
+            "r",
+            "o",
+            "f",
+            "l",
+            "s",
+            "?",
+            "q",
+            "Esc",
+        ] {
+            assert!(keys.iter().any(|k| k == key), "help left out {key}: {keys:?}");
         }
+        // No key does anything as `v`: there is one version of each quest and nothing to pick.
+        assert!(!keys.iter().any(|k| k == "v"), "help names a key that does nothing: {keys:?}");
+    }
+
+    /// What help files under "everywhere" has to work everywhere, including on the help screen
+    /// and the language list, where `l`, `s` and `?` used to do nothing.
+    #[test]
+    fn the_keys_help_calls_everywhere_work_on_every_screen() {
+        let screens =
+            [Screen::Quests, Screen::Quest, Screen::Settings, Screen::Help, Screen::Languages];
+        let reach = |screen: Screen| {
+            let mut app = app_in(Language::ENGLISH);
+            match screen {
+                Screen::Quest => press(&mut app, KeyCode::Enter),
+                Screen::Settings => press(&mut app, KeyCode::Char('s')),
+                Screen::Help => press(&mut app, KeyCode::Char('?')),
+                Screen::Languages => press(&mut app, KeyCode::Char('l')),
+                _ => {}
+            }
+            assert_eq!(app.screen, screen, "could not reach {screen:?}");
+            app
+        };
+        for from in screens {
+            for (key, lands) in
+                [('l', Screen::Languages), ('s', Screen::Settings), ('?', Screen::Help)]
+            {
+                if from == lands {
+                    continue;
+                }
+                let mut app = reach(from);
+                press(&mut app, KeyCode::Char(key));
+                assert_eq!(app.screen, lands, "{key} on {from:?} did not open {lands:?}");
+                // And `q` from there goes back somewhere that is not the screen it was on.
+                press(&mut app, KeyCode::Char('q'));
+                assert_ne!(app.screen, lands, "q did not leave {lands:?} opened from {from:?}");
+                assert!(!app.quit, "q from {lands:?} quit the program");
+            }
+        }
+        // The first launch keeps its own flow: help from it goes back to it, `s` included,
+        // because leaving it for the settings screen would skip writing the file.
+        let mut app = app_in(Language::ENGLISH);
+        app.screen = Screen::Welcome;
+        press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.screen, Screen::Help);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.screen, Screen::Welcome);
+        // Two screens deep: welcome, the language list, help, then `s`.
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.screen, Screen::Welcome, "s skipped the first launch");
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.screen, Screen::Languages, "s from the list skipped the first launch");
     }
 
     /// The one screen a reader who has never run nmtk sees. It has to say what this is, and it
@@ -617,5 +751,412 @@ mod tests {
         }
         press(&mut app, KeyCode::Char('f'));
         assert!(!app.visible().is_empty(), "filtering to a real category emptied the shelf");
+    }
+
+    // ---- A quest that counts what the shell does to it --------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
+    use nmtk_kq::meta::{
+        Category, Difficulty, KqId, KqMeta, Requirements, StageRole, StageSpec, Stamp, Version,
+    };
+    use nmtk_kq::session::{Action, Beat, Kq, KqSession, Reaction, RunState};
+    use nmtk_kq::{Knob, Theme};
+
+    const PROBE_STAGES: [StageSpec; 3] = [
+        StageSpec::new("one", StageRole::Explain, Difficulty::Easy),
+        StageSpec::new("two", StageRole::Run, Difficulty::Easy),
+        StageSpec::new("three", StageRole::Recap, Difficulty::Easy),
+    ];
+
+    /// What the probe saw: how many sessions were closed, and the machine each was opened with.
+    #[derive(Default)]
+    struct Seen {
+        closed: AtomicUsize,
+        opened_with: Mutex<Vec<MachineProfile>>,
+    }
+
+    struct Probe(Arc<Seen>, &'static str);
+
+    impl Kq for Probe {
+        fn meta(&self) -> KqMeta {
+            KqMeta {
+                id: KqId(self.1),
+                version: Version::new(0, 4, 0),
+                released: Stamp::new(2026, 1, 1, 0, 0, 0),
+                updated: Stamp::new(2026, 1, 1, 0, 0, 0),
+                category: Category::Systems,
+                subcategory: "probe",
+                difficulty: Difficulty::Easy,
+                minutes: 1,
+                needs: Requirements::ANY,
+                stages: &PROBE_STAGES,
+                tags: &[],
+            }
+        }
+        fn title(&self, language: Language) -> &'static str {
+            if language == Language::KOREAN { "탐침" } else { "Probe" }
+        }
+        fn summary(&self, _: Language) -> &'static str {
+            "A quest that counts."
+        }
+        fn subcategory(&self, _: Language) -> &'static str {
+            "probe"
+        }
+        fn stage_name(&self, key: &str, _: Language) -> &'static str {
+            PROBE_STAGES.iter().find(|stage| stage.key == key).map_or("", |stage| stage.key)
+        }
+        fn open(&self, machine: &MachineProfile) -> Box<dyn KqSession> {
+            self.0.opened_with.lock().unwrap().push(*machine);
+            Box::new(ProbeSession { seen: self.0.clone(), stage: 0, said: 1 })
+        }
+    }
+
+    struct ProbeSession {
+        seen: Arc<Seen>,
+        stage: usize,
+        said: usize,
+    }
+
+    impl KqSession for ProbeSession {
+        fn stage(&self) -> usize {
+            self.stage
+        }
+        fn go_to(&mut self, stage: usize) {
+            self.stage = stage.min(2);
+        }
+        fn transcript(&self, _: Language) -> Vec<Beat> {
+            (0..self.said).map(|n| Beat::say(format!("beat {n}"))).collect()
+        }
+        fn can_advance(&self) -> bool {
+            self.said < 3
+        }
+        fn at_end(&self) -> bool {
+            self.said >= 3
+        }
+        fn knobs(&self) -> &[Knob] {
+            &[]
+        }
+        fn chosen_knob(&self) -> Option<usize> {
+            None
+        }
+        fn on(&mut self, action: Action) -> Reaction {
+            match action {
+                Action::Go if self.said < 3 => {
+                    self.said += 1;
+                    Reaction::Handled
+                }
+                Action::Stage(stage) => {
+                    self.go_to(stage);
+                    self.said = 1;
+                    Reaction::Handled
+                }
+                _ => Reaction::Ignored,
+            }
+        }
+        fn tick(&mut self) {}
+        fn run_state(&self) -> RunState {
+            RunState::Running
+        }
+        fn render(&self, _: &mut Frame, _: ratatui::layout::Rect, _: Theme, _: Language) {}
+        fn keys(&self, _: Language) -> Vec<(&'static str, &'static str)> {
+            Vec::new()
+        }
+        fn close(&mut self) {
+            self.seen.closed.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    fn probed(settings: Settings) -> (App, Arc<Seen>) {
+        let seen = Arc::new(Seen::default());
+        let catalogue = Catalogue::new(vec![
+            Box::new(Probe(seen.clone(), "systems.probe-a")),
+            Box::new(Probe(seen.clone(), "systems.probe-b")),
+        ]);
+        let machine =
+            MachineProfile { logical_cores: 8, total_memory_bytes: 0, available_memory_bytes: 0 };
+        (App::detached(catalogue, settings, machine), seen)
+    }
+
+    fn key(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: crossterm::event::KeyEventKind,
+    ) -> KeyEvent {
+        KeyEvent::new_with_kind(code, modifiers, kind)
+    }
+
+    /// `close()` stops a quest's threads, and every way out of a quest has to reach it — back,
+    /// another quest, Ctrl+C, and the app simply going away after an error.
+    #[test]
+    fn every_way_out_of_a_quest_closes_it_exactly_once() {
+        let (mut app, seen) = probed(Settings::default());
+        let closed = || seen.closed.load(AtomicOrdering::SeqCst);
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.open.is_some());
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(closed(), 1, "back did not close the quest");
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(closed(), 2, "Esc did not close the quest");
+
+        press(&mut app, KeyCode::Enter);
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit && app.open.is_none());
+        assert_eq!(closed(), 3, "Ctrl+C did not close the quest");
+
+        let (mut app, seen) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        drop(app);
+        assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1, "dropping the app leaked it");
+    }
+
+    #[test]
+    fn a_signal_from_outside_closes_the_quest_and_quits() {
+        let (mut app, seen) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        app.shut_down();
+        assert!(app.quit && app.open.is_none());
+        assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    /// The thread count in settings used to reach no quest at all: each was opened with the bare
+    /// machine and took every core but one.
+    #[test]
+    fn the_thread_count_in_settings_reaches_the_quest() {
+        let (mut app, seen) = probed(Settings { worker_threads: 3, ..Settings::default() });
+        press(&mut app, KeyCode::Enter);
+        let machine = seen.opened_with.lock().unwrap()[0];
+        assert_eq!(machine.default_worker_threads(), 3, "the quest was not told 3 threads");
+
+        let (mut app, seen) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        let machine = seen.opened_with.lock().unwrap()[0];
+        assert_eq!(machine.default_worker_threads(), 7, "auto is every core but one");
+    }
+
+    #[test]
+    fn a_thread_count_from_a_bigger_machine_is_shown_and_stepped_as_this_one() {
+        let (mut app, _) = probed(Settings { worker_threads: 64, ..Settings::default() });
+        press(&mut app, KeyCode::Char('s'));
+        app.settings_index = 1;
+        let text = shot(&mut app, 80, 24);
+        assert!(text.contains("[ 8 ]"), "64 is shown on an 8-core machine:\n{text}");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.settings.worker_threads, 7, "left from 64 on 8 cores is 7");
+    }
+
+    #[test]
+    fn changing_threads_inside_a_quest_says_when_it_applies() {
+        let (mut app, _) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('s'));
+        app.settings_index = 1;
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.status, Some(Msg::SettingsThreadsNextQuest));
+    }
+
+    /// Held arrows keep moving on terminals that report repeats; nothing else repeats, and a
+    /// release never acts.
+    #[test]
+    fn a_held_arrow_repeats_and_a_held_enter_does_not() {
+        use crossterm::event::KeyEventKind::{Release, Repeat};
+        let (mut app, seen) = probed(Settings::default());
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE, Repeat));
+        assert_eq!(app.list_index, 1, "a repeated ↓ did not move");
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE, Release));
+        assert_eq!(app.list_index, 1, "a release moved the list");
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE, Repeat));
+        assert!(app.open.is_none(), "a repeated Enter opened a quest");
+        app.on_key(key(KeyCode::Enter, KeyModifiers::NONE, Release));
+        assert!(app.open.is_none(), "a released Enter opened a quest");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(seen.opened_with.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_title_bar_follows_the_language_inside_a_quest() {
+        let (mut app, _) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        assert!(shot(&mut app, 80, 24).lines().next().unwrap().contains("Probe"));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.screen, Screen::Quest);
+        let title = shot(&mut app, 80, 24).lines().next().unwrap().replace(' ', "");
+        assert!(title.contains("탐침"), "the title stayed in English: {title:?}");
+    }
+
+    /// A terminal shrunk below 80x24 in the middle of a quest shows a message, the quest keeps
+    /// its place, and keys pressed blind do nothing — except the way out.
+    #[test]
+    fn a_terminal_shrunk_mid_quest_holds_the_quest_until_it_grows() {
+        let (mut app, seen) = probed(Settings::default());
+        press(&mut app, KeyCode::Enter);
+        let text = shot(&mut app, 60, 20);
+        assert!(text.contains("80x24"), "{text}");
+        for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Char('l'), KeyCode::Char('?')] {
+            press(&mut app, code);
+        }
+        let session = &app.open.as_ref().expect("the quest is still open").session;
+        assert_eq!(session.stage(), 0, "a blind Tab changed the stage");
+        assert_eq!(session.transcript(Language::ENGLISH).len(), 1, "a blind Enter said more");
+        assert_eq!(app.screen, Screen::Quest);
+        let text = shot(&mut app, 80, 24);
+        assert!(text.contains("beat 0"), "the quest did not come back:\n{text}");
+        shot(&mut app, 40, 10);
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(app.screen, Screen::Quests, "q does not go back on a small screen");
+        assert_eq!(seen.closed.load(AtomicOrdering::SeqCst), 1);
+        // Tiny terminals, and the Korean message on one, never panic or lose the size.
+        for (w, h) in [(1u16, 1u16), (10, 3), (40, 10), (79, 24), (80, 23)] {
+            for language in Language::ALL {
+                app.settings.language = *language;
+                let text = shot(&mut app, w, h);
+                if h >= 4 && w >= 5 {
+                    assert!(text.contains(&format!("{w}x{h}")), "{w}x{h}:\n{text}");
+                }
+            }
+        }
+    }
+
+    /// Colour off means no colour on any cell of any screen, not only on the four state colours.
+    #[test]
+    fn colour_off_draws_no_colour_on_any_screen() {
+        for language in Language::ALL {
+            let shelf = app_in(*language).visible().len();
+            // Every shell screen, and every quest's opening screen, which is where the shell and
+            // the quest's own panel meet.
+            let screens = [
+                Screen::Welcome,
+                Screen::Quests,
+                Screen::Settings,
+                Screen::Help,
+                Screen::Languages,
+            ]
+            .into_iter()
+            .map(|screen| (screen, 0))
+            .chain((0..shelf).map(|at| (Screen::Quest, at)));
+            for (screen, at) in screens {
+                let mut app = app_in(*language);
+                app.settings.colour = false;
+                app.list_index = at;
+                if screen == Screen::Quest {
+                    press(&mut app, KeyCode::Enter);
+                }
+                app.screen = screen;
+                let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("backend");
+                terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
+                let buffer = terminal.backend().buffer();
+                for cell in buffer.content() {
+                    assert_eq!(
+                        (cell.fg, cell.bg),
+                        (ratatui::style::Color::Reset, ratatui::style::Color::Reset),
+                        "{screen:?} ({language}) drew {:?} in colour with colour off",
+                        cell.symbol()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The first `n` characters of `text`.
+    fn head(text: &str, n: usize) -> String {
+        text.chars().take(n).collect()
+    }
+
+    /// The last `n` characters of `text`: the part of a sentence that goes first when a box is
+    /// too small for it.
+    fn tail(text: &str, n: usize) -> String {
+        let count = text.chars().count();
+        text.chars().skip(count.saturating_sub(n)).collect()
+    }
+
+    /// Each screen at the smallest size and a large one, in both languages, keeps what it exists
+    /// to show: nothing that matters falls off the bottom or the edge.
+    #[test]
+    fn every_screen_keeps_its_content_at_the_smallest_and_a_large_size() {
+        for language in Language::ALL {
+            let say = |message: Msg| t(message, *language).replace(' ', "");
+            for (width, height) in [(80u16, 24u16), (200, 60)] {
+                // The first launch: every setting row and the sentence explaining the chosen one.
+                let mut app = app_in(*language);
+                app.screen = Screen::Welcome;
+                let flat = shot(&mut app, width, height).replace(' ', "");
+                for item in SettingItem::ALL {
+                    assert!(flat.contains(&say(item.title())), "welcome lost {item:?}:\n{flat}");
+                }
+                let about = say(SettingItem::Language.about());
+                assert!(flat.contains(&head(&about, 12)), "welcome lost its hint:\n{flat}");
+
+                // Help: every key label, and the whole promise at the bottom.
+                let mut app = app_in(*language);
+                press(&mut app, KeyCode::Char('?'));
+                let flat = shot(&mut app, width, height).replace([' ', '│'], "");
+                for message in [Msg::KeyScroll, Msg::KeyReset, Msg::KeyQuit, Msg::HelpInAQuest] {
+                    assert!(flat.contains(&say(message)), "help lost {message:?}:\n{flat}");
+                }
+                let promise = say(Msg::HelpOffline);
+                let end = tail(&promise, 6);
+                assert!(
+                    flat.contains(&end),
+                    "help cut its promise short ({language}, {width}):\n{flat}"
+                );
+
+                // The shelf, with the chosen quest finished: the fit sentence still ends on screen.
+                let mut app = app_in(*language);
+                let id = app.visible()[0].meta().id.to_string();
+                app.settings.remember_finished(&id);
+                let flat = shot(&mut app, width, height).replace([' ', '│'], "");
+                let fit = say(Msg::FitRecommended);
+                let end = tail(&fit, 3);
+                assert!(flat.contains(&end), "the fit fell off a finished quest:\n{flat}");
+                let done = say(Msg::QuestFinished);
+                assert!(flat.contains(&head(&done, 6)), "finished lost:\n{flat}");
+                assert!(flat.contains(&tail(&done, 3)), "finished cut short:\n{flat}");
+
+                // Settings and languages: every row.
+                let mut app = app_in(*language);
+                press(&mut app, KeyCode::Char('s'));
+                let flat = shot(&mut app, width, height).replace(' ', "");
+                for item in SettingItem::ALL {
+                    assert!(flat.contains(&say(item.title())), "settings lost {item:?}");
+                }
+                press(&mut app, KeyCode::Char('l'));
+                let text = shot(&mut app, width, height);
+                assert!(text.contains("English") && text.contains('한'), "a language is missing");
+
+                // A quest: the stage strip, the first beat's prompt, and the way out.
+                let mut app = app_in(*language);
+                press(&mut app, KeyCode::Enter);
+                let text = shot(&mut app, width, height);
+                let flat = text.replace(' ', "");
+                assert!(flat.contains("1/"), "the stage strip is missing:\n{text}");
+                let bar = text.lines().last().unwrap_or_default().replace(' ', "");
+                assert!(bar.contains(&say(Msg::KeyBack)), "the way out is missing: {bar}");
+            }
+        }
+    }
+
+    /// The key bar measures its separators in cells. Counted in bytes, the two-byte dot cost an
+    /// extra cell per gap and a key that fitted was dropped.
+    #[test]
+    fn the_key_bar_fills_the_row_it_has() {
+        let keys: Vec<(&str, String)> = (0..6).map(|_| ("k", "abcdefgh".to_string())).collect();
+        // Six pairs of 10 cells and five gaps of 5: 1 + 60 + 25 = 86 cells exactly.
+        let mut terminal = Terminal::new(TestBackend::new(86, 1)).expect("backend");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                chrome::key_bar(frame, area, Theme::new(false), &keys)
+            })
+            .expect("draw");
+        let row: String =
+            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert_eq!(row.matches("abcdefgh").count(), 6, "a key that fits was dropped: {row:?}");
     }
 }

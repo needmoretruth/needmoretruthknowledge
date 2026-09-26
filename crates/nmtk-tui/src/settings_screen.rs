@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(about.block(theme.panel()), about_area);
 
     if let Some(status) = app.status {
-        let style = if status == Msg::SettingsSaved { theme.good() } else { theme.bad() };
+        let style = if status == Msg::SettingsNotSaved { theme.bad() } else { theme.good() };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(format!(" {}", t(status, language)), style))),
             status_area,
@@ -70,7 +70,9 @@ pub fn value_of(item: SettingItem, app: &App, language: nmtk_core::Language) -> 
             if app.settings.worker_threads == 0 {
                 format!("[ {} ({}) ]", t(Msg::SettingsAuto, language), app.threads())
             } else {
-                format!("[ {} ]", app.settings.worker_threads)
+                // The count that will be used, not the one in the file: a file written on a
+                // bigger machine said 64 here on an 8-core laptop that was running 8.
+                format!("[ {} ]", app.threads())
             }
         }
         SettingItem::Colour => format!(

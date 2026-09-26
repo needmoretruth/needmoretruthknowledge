@@ -4,8 +4,9 @@ use nmtk_core::{Language, MachineProfile, format};
 use nmtk_i18n::{Msg, t};
 use nmtk_kq::meta::{Category, Difficulty, Fit, MachineNeeds, Requirements};
 use nmtk_kq::session::Kq;
-use nmtk_kq::text::{column, pad, truncate};
+use nmtk_kq::text::{column, truncate};
 use nmtk_kq::theme::{State, Theme};
+use nmtk_kq::widgets::wrapped;
 use nmtk_kq::{Filter, SortKey};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -148,13 +149,16 @@ fn render_detail(
     theme: Theme,
     language: Language,
 ) {
-    let meta = quest.meta();
     let block = theme.panel();
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let facts = facts(quest, app, theme, language, inner.width as usize);
+    // As tall as the facts are, measured rather than fixed. Nine rows held them until a finished
+    // quest added its line, and then the last row — where this machine sits against the bars —
+    // was the one that fell off the bottom of an 80x24 screen.
     let [summary_area, facts_area] =
-        Layout::vertical([Constraint::Min(4), Constraint::Length(9)]).areas(inner);
+        Layout::vertical([Constraint::Min(4), Constraint::Length(facts.len() as u16)]).areas(inner);
 
     let summary = Paragraph::new(vec![
         Line::from(Span::styled(quest.title(language), theme.heading())),
@@ -163,7 +167,20 @@ fn render_detail(
     ])
     .wrap(Wrap { trim: true });
     frame.render_widget(summary, summary_area);
+    frame.render_widget(Paragraph::new(facts), facts_area);
+}
 
+/// The facts under a quest's summary, one entry per row on screen, so the panel can be sized from
+/// them. The sentences long enough to wrap are wrapped here to `width`; every other fact is a
+/// short row that fits the narrowest panel.
+fn facts(
+    quest: &dyn Kq,
+    app: &App,
+    theme: Theme,
+    language: Language,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let meta = quest.meta();
     let mut facts = vec![
         Line::from(vec![
             Span::styled(t(category(meta.category), language), theme.muted()),
@@ -196,13 +213,12 @@ fn render_detail(
     ];
     // The mark beside a finished quest is a mark; this is the sentence that says what it means.
     if app.settings.has_finished(meta.id.as_str()) {
-        facts.push(Line::from(vec![
-            Span::styled(format!("{} ", State::Good.mark()), theme.state(State::Good)),
-            Span::styled(t(Msg::QuestFinished, language), theme.plain()),
-        ]));
+        let lead = format!("{} ", State::Good.mark());
+        let sentence = t(Msg::QuestFinished, language);
+        facts.extend(wrapped(&lead, sentence, width, theme.state(State::Good), theme.plain()));
     }
-    facts.extend(needs_lines(&meta.needs, &app.machine, language, theme));
-    frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: true }), facts_area);
+    facts.extend(needs_lines(&meta.needs, &app.machine, language, theme, width));
+    facts
 }
 
 /// The two bars a quest sets, and where this machine sits against them.
@@ -214,9 +230,10 @@ fn needs_lines(
     machine: &MachineProfile,
     language: Language,
     theme: Theme,
+    width: usize,
 ) -> Vec<Line<'static>> {
     if *needs == Requirements::ANY {
-        return vec![Line::from(Span::styled(t(Msg::NeedsAny, language), theme.muted()))];
+        return wrapped("", t(Msg::NeedsAny, language), width, theme.muted(), theme.muted());
     }
     let fit = needs.fit(machine);
     let (state, word) = match fit {
@@ -224,14 +241,15 @@ fn needs_lines(
         Fit::Minimum => (State::Working, Msg::FitMinimum),
         Fit::Below => (State::Bad, Msg::FitBelow),
     };
-    vec![
+    let mut lines = vec![
         bar_line(Msg::LabelMinimum, needs.minimum, language, theme),
         bar_line(Msg::LabelRecommended, needs.recommended, language, theme),
-        Line::from(vec![
-            Span::styled(format!("{} ", state.mark()), theme.state(state)),
-            Span::styled(t(word, language), theme.state(state)),
-        ]),
-    ]
+    ];
+    // The sentence is the longest thing in the panel and wraps at 80 columns in both languages,
+    // so it is wrapped here, under its own mark, where its height can be counted.
+    let lead = format!("{} ", state.mark());
+    lines.extend(wrapped(&lead, t(word, language), width, theme.state(state), theme.state(state)));
+    lines
 }
 
 /// `Minimum      4 cores   2.0 GiB`, with the memory left off when the quest does not care.
@@ -242,8 +260,9 @@ fn bar_line(label: Msg, needs: MachineNeeds, language: Language, theme: Theme) -
         t(if needs.cores == 1 { Msg::LabelCore } else { Msg::LabelCores }, language)
     );
     let mut spans = vec![
-        Span::styled(pad(t(label, language), 13), theme.muted()),
-        Span::styled(pad(&cores, 10), theme.plain()),
+        // Columns, not padding: a label wider than its column must not run into the number.
+        Span::styled(column(t(label, language), 13), theme.muted()),
+        Span::styled(column(&cores, 10), theme.plain()),
     ];
     if needs.memory_bytes > 0 {
         spans.push(Span::styled(format::bytes(needs.memory_bytes), theme.plain()));

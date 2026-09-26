@@ -82,8 +82,16 @@ pub fn duration(d: Duration) -> String {
     let (days, hours, minutes, secs) =
         (total / 86_400, (total % 86_400) / 3600, (total % 3600) / 60, total % 60);
     if days >= 365 {
+        // A unit letter, like every other unit here. "years" was the one English word this
+        // module wrote, and it reached Korean screens as "1.1 years" beside "3d 2h" — which the
+        // phrase tables could not reach, because the word was baked into the number.
         let years = days as f64 / 365.25;
-        format!("{years:.1} years")
+        if years >= 1000.0 {
+            // Thirty million years written out as 31709791.9 is a number nobody can read.
+            format!("{}y", count(years.round() as u64))
+        } else {
+            format!("{years:.1}y")
+        }
     } else if days > 0 {
         format!("{days}d {hours}h")
     } else if hours > 0 {
@@ -130,7 +138,8 @@ mod tests {
 
     #[test]
     fn long_spans_read_as_years() {
-        assert_eq!(duration(Duration::from_secs(86_400 * 400)), "1.1 years");
+        assert_eq!(duration(Duration::from_secs(86_400 * 400)), "1.1y");
+        assert_eq!(duration(Duration::from_secs(1_000_000_000_000_000)), "31,688,088y");
         assert_eq!(duration(Duration::from_secs(86_400 * 3 + 7200)), "3d 2h");
     }
 

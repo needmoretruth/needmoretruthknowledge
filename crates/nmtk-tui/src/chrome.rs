@@ -35,7 +35,9 @@ pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, Strin
     let mut used = 1;
     for (key, label) in keys {
         let pair = width(key) + 1 + width(label);
-        let gap = if used > 1 { GAP.len() } else { 0 };
+        // Cells, not bytes: the dot is two bytes and one cell, and counting it as two dropped
+        // a key that fitted whenever the row came within a cell per gap of the edge.
+        let gap = if used > 1 { width(GAP) } else { 0 };
         // Stop rather than skip. Carrying on would keep whichever later key happened to be short
         // enough, which is how "? help" came to vanish at 80 columns while "v version" stayed.
         if used + gap + pair > room {
@@ -55,11 +57,14 @@ pub fn key_bar(frame: &mut Frame, area: Rect, theme: Theme, keys: &[(&str, Strin
 /// The whole screen when the terminal is smaller than nmtk can draw on.
 pub fn too_small(frame: &mut Frame, theme: Theme, language: Language) {
     let area = frame.area();
-    let message = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(t(Msg::TerminalTooSmall, language), theme.bad())),
-        Line::from(Span::styled(format!("{}x{}", area.width, area.height), theme.muted())),
-    ])
-    .alignment(Alignment::Center);
+    // Wrapped to the terminal, because the terminal this is shown on is by definition narrow: a
+    // Korean sentence 50 cells wide on a 40-column terminal lost its end, and its end is the part
+    // that says what to do.
+    let mut lines = vec![Line::from("")];
+    for row in nmtk_kq::text::wrap(t(Msg::TerminalTooSmall, language), area.width as usize) {
+        lines.push(Line::from(Span::styled(row, theme.bad())));
+    }
+    lines.push(Line::from(Span::styled(format!("{}x{}", area.width, area.height), theme.muted())));
+    let message = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(message, area);
 }

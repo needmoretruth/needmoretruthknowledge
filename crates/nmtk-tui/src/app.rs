@@ -63,6 +63,19 @@ pub struct OpenQuest {
     pub session: Box<dyn KqSession>,
 }
 
+/// A quest is closed when it is dropped, whichever way it goes.
+///
+/// `close()` stops the quest's worker threads, and the standard says it is always called before a
+/// session is dropped. Calling it by hand at each place a quest can end — back, quit, opening
+/// another, Ctrl+C — left the places nobody thought of: an error from the terminal, a panic, a
+/// signal. Each of those dropped a session with its miners still hashing. Tying it to the drop
+/// makes the rule hold on every path, including the ones added later.
+impl Drop for OpenQuest {
+    fn drop(&mut self) {
+        self.session.close();
+    }
+}
+
 /// The whole interface state.
 pub struct App {
     pub settings: Settings,
@@ -88,6 +101,11 @@ pub struct App {
     behind_languages: Option<Screen>,
     pub status: Option<Msg>,
     pub quit: bool,
+    /// Whether the last draw found the terminal smaller than nmtk can draw on. While it is, the
+    /// only keys that work are the ways out: a reader looking at "make the terminal larger"
+    /// cannot see what Enter would do, and a key pressed blind in a quest said something they
+    /// never read.
+    pub too_small: bool,
     /// Whether settings are written to disk. Off for an app built by a test, which must never
     /// read or rewrite the settings of whoever runs `cargo test`.
     persist: bool,
@@ -123,6 +141,7 @@ impl App {
             behind_languages: None,
             status: None,
             quit: false,
+            too_small: false,
             persist: false,
         }
     }
@@ -145,14 +164,25 @@ impl App {
         self.catalogue.list(&self.filter, self.sort, self.language())
     }
 
-    /// Handles one key. Releases and repeats are ignored: a held key must not open a quest twice.
+    /// Handles one key.
+    ///
+    /// Releases are ignored, and so are repeats of every key but the ones that move: a held key
+    /// must not open a quest twice, but a held arrow on a terminal that reports repeats — Windows,
+    /// and any terminal with the keyboard protocol on — has to keep moving, or holding ↓ through
+    /// a long list does nothing at all past the first row.
     pub fn on_key(&mut self, key: KeyEvent) {
-        if key.kind != KeyEventKind::Press {
+        match key.kind {
+            KeyEventKind::Press => {}
+            KeyEventKind::Repeat if repeats(key.code) => {}
+            _ => return,
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            self.shut_down();
             return;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            self.close_quest();
-            self.quit = true;
+        if self.too_small && !matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
             return;
         }
         self.status = None;
@@ -180,6 +210,7 @@ impl App {
             KeyCode::Left | KeyCode::Char('h') => self.adjust_setting(-1),
             KeyCode::Right => self.adjust_setting(1),
             KeyCode::Char('l') => self.toggle_language(),
+            KeyCode::Char('?') => self.open_help(),
             KeyCode::Enter => {
                 self.remember();
                 self.screen = Screen::Quests;
@@ -193,9 +224,38 @@ impl App {
         }
     }
 
+    /// The help screen lists `l` and `s` under "everywhere", so they work here too. They used to
+    /// be the two keys on this screen that did nothing, and a reader reading the list tries the
+    /// list on the screen it is written on.
     fn on_key_help(&mut self, code: KeyCode) {
-        if matches!(code, KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
-            self.screen = self.behind_help.take().unwrap_or(Screen::Quests);
+        match code {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                self.screen = self.behind_help.take().unwrap_or(Screen::Quests);
+            }
+            KeyCode::Char('l') => self.open_languages(),
+            KeyCode::Char('s') => self.open_settings_from_help(),
+            _ => {}
+        }
+    }
+
+    /// `s` from the help screen. Opened from the first launch, help goes back to it instead: that
+    /// screen is the settings, and leaving it for the settings screen would skip the step that
+    /// writes the file, so the first launch would be asked again next time.
+    fn open_settings_from_help(&mut self) {
+        let first_launch = self.within_first_launch();
+        self.behind_help = None;
+        self.screen = if first_launch { Screen::Welcome } else { Screen::Settings };
+    }
+
+    /// Whether the screens stacked up behind this one lead back to the first launch, which has
+    /// to be finished with Enter rather than walked away from.
+    fn within_first_launch(&self) -> bool {
+        let behind_languages = self.behind_languages == Some(Screen::Welcome);
+        match (self.screen, self.behind_help) {
+            (Screen::Help, Some(Screen::Welcome)) => true,
+            (Screen::Help, Some(Screen::Languages)) => behind_languages,
+            (Screen::Languages, _) => behind_languages,
+            _ => false,
         }
     }
 
@@ -215,6 +275,12 @@ impl App {
                 self.close_languages();
             }
             KeyCode::Char('q') | KeyCode::Esc => self.close_languages(),
+            // Listed under "everywhere", so they work here as well.
+            KeyCode::Char('?') => self.open_help(),
+            KeyCode::Char('s') if !self.within_first_launch() => {
+                self.behind_languages = None;
+                self.screen = Screen::Settings;
+            }
             _ => {}
         }
     }
@@ -409,12 +475,14 @@ impl App {
             })
         };
         let Some((id, version, stages)) = chosen else { return };
+        // The quest before it stops first. One heavy run at a time: opening the next one while
+        // the last still held its threads would have the two share the machine for a moment.
+        self.close_quest();
         let opened = self
             .catalogue
             .find(id)
-            .map(|quest| (quest.title(self.settings.language), quest.open(&self.machine)));
+            .map(|quest| (quest.title(self.settings.language), quest.open(&self.work_machine())));
         if let Some((title, session)) = opened {
-            self.close_quest();
             self.open = Some(OpenQuest { id, version, title, stages, session });
             self.transcript_scroll = 0;
             self.transcript_furthest = 0;
@@ -423,12 +491,38 @@ impl App {
         }
     }
 
-    /// Stops the open quest's threads. Always called before one is dropped.
+    /// Stops the open quest's threads. Dropping it is what closes it; see [`OpenQuest`].
     fn close_quest(&mut self) {
-        if let Some(quest) = &mut self.open {
-            quest.session.close();
-        }
         self.open = None;
+    }
+
+    /// Stops everything and asks the program to end: Ctrl+C, or a signal from outside.
+    pub fn shut_down(&mut self) {
+        self.close_quest();
+        self.quit = true;
+    }
+
+    /// The open quest's name in the language on screen.
+    ///
+    /// The name kept when the quest was opened is in the language it was opened in, so switching
+    /// language inside a quest used to rewrite the whole conversation and leave the title bar in
+    /// the old language.
+    pub fn open_title(&self) -> Option<&'static str> {
+        let open = self.open.as_ref()?;
+        Some(self.open_definition().map_or(open.title, |quest| quest.title(self.language())))
+    }
+
+    /// The machine as the work should see it, with the thread count from settings applied.
+    ///
+    /// Quests size their threads from the profile they are opened with. Handed the bare machine,
+    /// every quest took all cores but one whatever the settings said, so the one setting that
+    /// exists to change how hard nmtk works on this machine changed nothing.
+    pub fn work_machine(&self) -> MachineProfile {
+        if self.settings.worker_threads == 0 {
+            self.machine
+        } else {
+            self.machine.with_worker_threads(self.threads())
+        }
     }
 
     fn cycle_sort(&mut self) {
@@ -478,11 +572,15 @@ impl App {
     /// top of the run. With it at the bottom, pressing right on `auto (11)` dropped the machine
     /// to one thread, which reads as the key doing the opposite of what it says.
     fn step_threads(&mut self, step: i32) {
-        let cores = self.machine.logical_cores.max(1) as i32;
-        let at = match self.settings.worker_threads as i32 {
+        let cores = self.machine.logical_cores.max(1);
+        // A settings file can hold more threads than this machine has — it was written on a
+        // bigger one, or by hand. Counted as every core, so left steps down from there rather
+        // than from a number that was never on screen.
+        let at = match self.settings.worker_threads.min(cores) {
             0 => cores,
             threads => threads - 1,
-        };
+        } as i32;
+        let cores = cores as i32;
         let next = (at + step).clamp(0, cores);
         self.settings.worker_threads = if next == cores { 0 } else { (next + 1) as usize };
     }
@@ -498,6 +596,14 @@ impl App {
         // leftmost value tells the reader something happened when nothing did.
         if self.settings != before {
             self.remember();
+            // A quest already open was sized when it opened. Saying "saved" and nothing else
+            // lets the reader believe the run in front of them just changed.
+            if self.settings.worker_threads != before.worker_threads
+                && self.open.is_some()
+                && self.status == Some(Msg::SettingsSaved)
+            {
+                self.status = Some(Msg::SettingsThreadsNextQuest);
+            }
         }
     }
 
@@ -534,6 +640,21 @@ fn action_for(code: KeyCode, typing: bool, tunable: bool, stages: &[StageSpec]) 
         }
         _ => None,
     }
+}
+
+/// Keys that keep acting while held: the ones that move, scroll or step a value.
+fn repeats(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Backspace
+            | KeyCode::Char('j' | 'k')
+    )
 }
 
 fn next(index: usize, len: usize) -> usize {

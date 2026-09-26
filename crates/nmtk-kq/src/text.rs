@@ -3,35 +3,60 @@
 //! A Korean or Japanese glyph fills two cells, so `format!("{:<10}")` — which counts characters —
 //! lines a table up in English and pulls it apart in Korean. Every quest that aligns a column uses
 //! these instead.
+//!
+//! The unit everything here works in is the **grapheme**: what a reader sees as one character.
+//! `é` written as `e` plus a combining accent is two `char`s and one grapheme, a flag is two
+//! `char`s and one grapheme, and a family emoji is seven. Cutting between the `char`s of one
+//! grapheme leaves a bare accent or half a flag on screen, so nothing here ever does.
+//!
+//! Widths are the drawing library's own, not a table kept beside it. The first version of this
+//! module had its own list of wide ranges, and wherever it disagreed with the library — `⛏`, `🚀`,
+//! a combining accent, a zero-width joiner — a column that measured right here was drawn one cell
+//! off there. Asking the library the same question it asks when it draws is the only way the two
+//! can never disagree.
 
-/// Cells a character occupies: two for the wide ranges, one for everything else.
+use ratatui::buffer::CellWidth;
+use ratatui::text::Span;
+
+/// Cells a character occupies on its own: two for wide glyphs, none for combining marks,
+/// zero-width characters and control characters, one for everything else.
 ///
-/// This covers the ranges nmtk actually shows — Hangul, CJK ideographs, kana, fullwidth forms and
-/// emoji. It is not a full implementation of the Unicode width tables, and it does not try to be:
-/// a quest that needs one should say so rather than widen this quietly.
+/// A combining mark has no width of its own because it sits on the character before it, and a
+/// control character is never drawn at all — the drawing library throws it away.
 pub fn char_width(c: char) -> usize {
-    match c as u32 {
-        0x1100..=0x115F
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE6F
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
-        | 0x1F300..=0x1F64F
-        | 0x1F900..=0x1F9FF
-        | 0x20000..=0x3FFFD => 2,
-        _ => 1,
+    if c.is_control() {
+        return 0;
     }
+    let mut buffer = [0u8; 4];
+    let text: &str = c.encode_utf8(&mut buffer);
+    usize::from(text.cell_width())
+}
+
+/// The graphemes of `text` as the drawing library will draw them: each one's byte range in
+/// `text` and the cells it takes. Graphemes the library drops — control characters, and anything
+/// with no width of its own — are left out, exactly as they are left off the screen.
+fn graphemes(text: &str) -> Vec<(usize, usize, usize)> {
+    let span = Span::raw(text);
+    let base = text.as_ptr() as usize;
+    span.styled_graphemes(ratatui::style::Style::default())
+        .filter_map(|grapheme| {
+            let symbol = grapheme.symbol;
+            let cells = usize::from(symbol.cell_width());
+            // Byte offset of this grapheme in `text`: the library hands back slices of the text
+            // it was given, so the distance between the two starts is the offset.
+            let start = symbol.as_ptr() as usize - base;
+            (cells > 0).then_some((start, symbol.len(), cells))
+        })
+        .collect()
 }
 
 /// Cells a string occupies.
 pub fn width(text: &str) -> usize {
-    text.chars().map(char_width).sum()
+    // The common case — plain ASCII with no control characters — needs no segmentation at all.
+    if text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return text.len();
+    }
+    graphemes(text).iter().map(|(_, _, cells)| cells).sum()
 }
 
 /// `text` padded with spaces to `columns` cells. Text already that wide is returned unchanged.
@@ -66,6 +91,9 @@ pub fn column(text: &str, columns: usize) -> String {
 }
 
 /// `text` cut to at most `columns` cells, ending in `…` when something was removed.
+///
+/// The cut falls between graphemes, never inside one, so an accent is never left without its
+/// letter and a wide glyph is never drawn half in the column.
 pub fn truncate(text: &str, columns: usize) -> String {
     if width(text) <= columns {
         return text.to_string();
@@ -73,15 +101,16 @@ pub fn truncate(text: &str, columns: usize) -> String {
     if columns == 0 {
         return String::new();
     }
+    // One cell is kept for the mark that says something was cut.
+    let room = columns - 1;
     let mut out = String::new();
     let mut used = 0;
-    for c in text.chars() {
-        let next = used + char_width(c);
-        if next > columns.saturating_sub(1) {
+    for (start, len, cells) in graphemes(text) {
+        if used + cells > room {
             break;
         }
-        out.push(c);
-        used = next;
+        out.push_str(&text[start..start + len]);
+        used += cells;
     }
     out.push('…');
     out
@@ -94,20 +123,34 @@ pub fn truncate(text: &str, columns: usize) -> String {
 /// beat exact rather than approximate.
 ///
 /// Words are kept whole where they fit. A word longer than the whole width is cut rather than
-/// allowed to run off the edge. Korean and Japanese have no spaces to break on, so a run of wide
-/// glyphs breaks wherever it must.
+/// allowed to run off the edge, and the cut falls between graphemes. Korean and Japanese have no
+/// spaces to break on, so a run of wide glyphs breaks wherever it must. A line break in the text
+/// is kept as a line break: the drawing library drops the character, and without this the two
+/// lines it separated were drawn run together.
 pub fn wrap(text: &str, columns: usize) -> Vec<String> {
     if columns == 0 {
         return Vec::new();
     }
     let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        wrap_paragraph(paragraph.trim_end_matches('\r'), columns, &mut lines);
+    }
+    // A text that ended in a line break does not owe the reader an empty line after it.
+    while lines.len() > 1 && lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// One paragraph of [`wrap`]: text with no line breaks in it. Always adds at least one line, so a
+/// blank line in the text stays a blank line on screen.
+fn wrap_paragraph(text: &str, columns: usize, lines: &mut Vec<String>) {
     let mut line = String::new();
     let mut used = 0;
-
-    let mut flush = |line: &mut String, used: &mut usize| {
-        lines.push(std::mem::take(line));
-        *used = 0;
-    };
+    let first = lines.len();
 
     for word in text.split(' ') {
         if word.is_empty() {
@@ -125,30 +168,32 @@ pub fn wrap(text: &str, columns: usize) -> Vec<String> {
             continue;
         }
         if !line.is_empty() {
-            flush(&mut line, &mut used);
+            lines.push(std::mem::take(&mut line));
+            used = 0;
         }
         if word_width <= columns {
             line.push_str(word);
             used = word_width;
             continue;
         }
-        // Longer than a whole line: break it wherever the width runs out.
-        for c in word.chars() {
-            let w = char_width(c);
-            if used + w > columns {
-                flush(&mut line, &mut used);
+        // Longer than a whole line: break it wherever the width runs out, between graphemes.
+        for (start, len, cells) in graphemes(word) {
+            // A glyph wider than the whole line cannot be drawn in it at all. The drawing library
+            // would drop it too; dropping it here keeps every line inside its width.
+            if cells > columns {
+                continue;
             }
-            line.push(c);
-            used += w;
+            if used + cells > columns {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push_str(&word[start..start + len]);
+            used += cells;
         }
     }
-    if !line.is_empty() {
+    if !line.is_empty() || lines.len() == first {
         lines.push(line);
     }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
 }
 
 #[cfg(test)]
@@ -238,5 +283,126 @@ mod tests {
         assert!(width(&truncate("Zero-knowledge proofs", 10)) <= 10);
         assert!(width(&truncate("영지식 증명 퀘스트", 9)) <= 9);
         assert_eq!(truncate("short", 10), "short");
+    }
+
+    /// Every string here is measured by drawing it and counting the cells the drawing library
+    /// actually filled, so the test cannot agree with a mistake in this module.
+    fn drawn_width(text: &str) -> usize {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 200, 1));
+        let (end, _) = buffer.set_stringn(0, 0, text, 200, ratatui::style::Style::default());
+        usize::from(end)
+    }
+
+    /// Every byte offset at which the drawing library would break `text` between graphemes.
+    fn boundaries(text: &str) -> Vec<usize> {
+        let span = Span::raw(text);
+        let base = text.as_ptr() as usize;
+        let mut ends = vec![0];
+        ends.extend(
+            span.styled_graphemes(ratatui::style::Style::default())
+                .map(|g| g.symbol.as_ptr() as usize - base + g.symbol.len()),
+        );
+        ends
+    }
+
+    const AWKWARD: [&str; 10] = [
+        "e\u{301}te\u{301}",        // accents written as separate combining marks
+        "\u{26cf} Proof of work",   // the pick on the shelf, which the old table called narrow
+        "\u{1f680} launch",         // an emoji the old table did not list
+        "\u{1f1f0}\u{1f1f7} Korea", // a flag: two code points, one glyph
+        "a\u{200b}b\u{200d}c",      // zero-width space and joiner
+        "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} family",
+        "tab\there", // a control character the library never draws
+        "한국어 English 日本語",
+        "ｆｕｌｌｗｉｄｔｈ",
+        "plain ascii",
+    ];
+
+    #[test]
+    fn width_agrees_with_what_the_drawing_library_draws() {
+        for text in AWKWARD {
+            assert_eq!(width(text), drawn_width(text), "{text:?} is measured wrong");
+        }
+    }
+
+    #[test]
+    fn combining_and_zero_width_characters_take_no_cells() {
+        assert_eq!(width("e\u{301}"), 1);
+        assert_eq!(char_width('\u{301}'), 0);
+        assert_eq!(char_width('\u{200b}'), 0);
+        assert_eq!(char_width('\n'), 0);
+        assert_eq!(char_width('한'), 2);
+        assert_eq!(char_width('a'), 1);
+    }
+
+    #[test]
+    fn truncation_never_splits_a_grapheme_or_overruns() {
+        for text in AWKWARD {
+            for columns in 0..=width(text) + 1 {
+                let cut = truncate(text, columns);
+                assert!(width(&cut) <= columns, "{text:?} at {columns}: {cut:?} is too wide");
+                // What was kept is whole graphemes from the front of the text: its length is one
+                // of the places the drawing library would have broken the text itself.
+                let kept: String =
+                    cut.trim_end_matches('…').chars().filter(|c| !c.is_control()).collect();
+                let kept = kept.as_str();
+                let drawn: String = text.chars().filter(|c| !c.is_control()).collect();
+                assert!(drawn.starts_with(kept), "{text:?} at {columns}: {cut:?} is not a prefix");
+                assert!(
+                    boundaries(&drawn).contains(&kept.len()),
+                    "{text:?} at {columns}: cut inside a grapheme: {cut:?}"
+                );
+            }
+        }
+        // The accent stays on its letter or goes with it.
+        assert_eq!(truncate("e\u{301}e\u{301}e\u{301}", 2), "e\u{301}…");
+        // Half a flag is never drawn.
+        assert_eq!(truncate("\u{1f1f0}\u{1f1f7}\u{1f1ef}\u{1f1f5}", 3), "\u{1f1f0}\u{1f1f7}…");
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_grapheme_or_overruns() {
+        for text in AWKWARD {
+            for columns in 1..=12 {
+                let lines = wrap(text, columns);
+                for line in &lines {
+                    assert!(width(line) <= columns, "{text:?} at {columns}: {line:?} too wide");
+                    let whole = boundaries(line);
+                    assert!(
+                        whole.contains(&line.len())
+                            && !line
+                                .starts_with(|c| matches!(c, '\u{300}'..='\u{36f}' | '\u{200d}')),
+                        "{text:?} at {columns}: a line holds half a grapheme: {line:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(wrap("e\u{301}e\u{301}e\u{301}", 2), vec!["e\u{301}e\u{301}", "e\u{301}"]);
+    }
+
+    #[test]
+    fn a_wide_glyph_never_lands_in_a_one_cell_line() {
+        for line in wrap("한국어", 1) {
+            assert!(width(&line) <= 1, "{line:?}");
+        }
+        assert_eq!(wrap("한국어", 3), vec!["한", "국", "어"]);
+    }
+
+    #[test]
+    fn a_line_break_in_the_text_is_kept() {
+        assert_eq!(wrap("first line\nsecond", 40), vec!["first line", "second"]);
+        assert_eq!(wrap("a\n\nb", 40), vec!["a", "", "b"]);
+        assert_eq!(wrap("trailing\n", 40), vec!["trailing"]);
+    }
+
+    #[test]
+    fn columns_hold_their_width_for_awkward_text() {
+        for text in AWKWARD {
+            for columns in 0..20 {
+                assert_eq!(width(&column(text, columns)), columns, "{text:?} at {columns}");
+            }
+        }
     }
 }

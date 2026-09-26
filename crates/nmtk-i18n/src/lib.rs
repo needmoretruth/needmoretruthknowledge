@@ -98,7 +98,7 @@ messages! {
     SortByShortest { en: "shortest first", ko: "짧은 순" },
     FilterAll { en: "all", ko: "전체" },
     LabelSort { en: "sort", ko: "정렬" },
-    LabelFilter { en: "filter", ko: "분류" },
+    LabelFilter { en: "filter", ko: "거르기" },
     LabelUpdated { en: "Updated", ko: "갱신" },
     LabelReleased { en: "Released", ko: "처음 나온 날" },
     LabelLength { en: "About", ko: "예상 시간" },
@@ -106,12 +106,12 @@ messages! {
     LabelMinutes { en: "min", ko: "분" },
     LabelCores { en: "cores", ko: "코어" },
     LabelCore { en: "core", ko: "코어" },
-    NeedsAny { en: "runs on any machine", ko: "어떤 컴퓨터에서나 돕니다" },
+    NeedsAny { en: "runs on any machine", ko: "어떤 컴퓨터에서나 돌아갑니다" },
     LabelMinimum { en: "Minimum", ko: "최소" },
     LabelRecommended { en: "Recommended", ko: "권장" },
     FitRecommended { en: "this machine is above the recommended bar", ko: "이 컴퓨터는 권장 사양을 넘습니다" },
-    FitMinimum { en: "this machine clears the minimum; some of it will be slow", ko: "이 컴퓨터는 최소 사양을 넘습니다. 일부는 느리게 돕니다" },
-    FitBelow { en: "below the minimum — it still opens and sizes itself down", ko: "최소 사양에 못 미칩니다. 그래도 열리고 크기를 줄여 돕니다" },
+    FitMinimum { en: "this machine clears the minimum; some of it will be slow", ko: "이 컴퓨터는 최소 사양은 넘지만, 일부는 느리게 돌아갑니다" },
+    FitBelow { en: "below the minimum — it still opens and sizes itself down", ko: "최소 사양에 못 미칩니다. 그래도 열리고, 규모를 줄여 돌아갑니다" },
     LabelMemory { en: "memory", ko: "메모리" },
     LabelStages { en: "stages", ko: "단계" },
     RoleExplain { en: "Why", ko: "왜" },
@@ -153,6 +153,7 @@ messages! {
     SettingsOn { en: "on", ko: "켬" },
     SettingsOff { en: "off", ko: "끔" },
     SettingsSaved { en: "Saved to your settings file.", ko: "설정 파일에 저장했습니다." },
+    SettingsThreadsNextQuest { en: "Saved. The quest already open keeps its threads until it is opened again.", ko: "저장했습니다. 이미 열린 퀘스트는 다시 열 때부터 이 값을 씁니다." },
     SettingsNotSaved { en: "Could not save settings; this run keeps the change.", ko: "설정을 저장하지 못했습니다. 이번 실행에서는 바뀐 값이 유지됩니다." },
     // ---- This machine ---------------------------------------------------------
     MachineTitle { en: "This machine", ko: "이 컴퓨터" },
@@ -165,7 +166,7 @@ messages! {
     HelpOnTheShelf { en: "On the quest list", ko: "퀘스트 목록에서" },
     HelpInAQuest { en: "Inside a quest", ko: "퀘스트 안에서" },
     QuestFinished { en: "You have read this one to the end.", ko: "이 퀘스트는 끝까지 읽었습니다." },
-    HelpOffline { en: "nmtk never touches the network. Everything here runs on this machine.", ko: "nmtk는 네트워크를 전혀 쓰지 않습니다. 여기 있는 것은 전부 이 컴퓨터에서 돕니다." },
+    HelpOffline { en: "nmtk never touches the network. Everything here runs on this machine.", ko: "nmtk는 네트워크를 전혀 쓰지 않습니다. 여기 있는 것은 전부 이 컴퓨터에서 돌아갑니다." },
 }
 
 /// A convenience for screens: `t(Msg::MenuQuit, language)`.
@@ -197,5 +198,39 @@ mod tests {
             Msg::Motto.text(Language::ENGLISH),
             "Study that isn't fun is labour. I hate labour."
         );
+    }
+
+    /// A Korean screen with an English line on it is a missing translation that nobody sees,
+    /// because the fallback that keeps a screen from going blank also hides the gap. Every line
+    /// in the shell's own table is translated, so every Korean line has Korean in it.
+    #[test]
+    fn every_line_of_the_shell_is_translated_into_korean() {
+        for msg in Msg::ALL {
+            let korean = msg.text(Language::KOREAN);
+            assert_ne!(korean, msg.text(Language::ENGLISH), "{msg:?} has no Korean column");
+            assert!(
+                korean.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)),
+                "{msg:?} reads {korean:?} in Korean, with no Korean in it"
+            );
+        }
+    }
+
+    /// "돕니다" is 돌다 (to run) and 돕다 (to help) at once, and a reader meets the second first:
+    /// "it helps on any machine". Every line that means "it runs" says 돌아갑니다.
+    #[test]
+    fn running_is_never_written_the_way_helping_is() {
+        for msg in Msg::ALL {
+            let korean = msg.text(Language::KOREAN);
+            assert!(!korean.contains("돕니다"), "{msg:?} reads as helping: {korean:?}");
+        }
+    }
+
+    /// The key bar names the key by what it does, and the same word never does two jobs: `o`
+    /// sorts "by category" and `f` narrows, and both used to read 분류 in Korean.
+    #[test]
+    fn sorting_and_filtering_are_two_different_words() {
+        let filter = Msg::LabelFilter.text(Language::KOREAN);
+        assert_ne!(filter, Msg::LabelSort.text(Language::KOREAN));
+        assert!(!Msg::SortByCategory.text(Language::KOREAN).starts_with(filter));
     }
 }

@@ -1044,6 +1044,7 @@ dependencies = [
  "nmtk-i18n",
  "nmtk-kq",
  "ratatui",
+ "signal-hook",
 ]
 
 [[package]]

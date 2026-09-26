@@ -16,3 +16,8 @@ kq-transformer = { workspace = true }
 kq-zero-knowledge = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+
+# Already in the tree under crossterm, which uses it for resize events. nmtk uses it to leave the
+# terminal as it found it when it is told to stop from outside.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3.18"

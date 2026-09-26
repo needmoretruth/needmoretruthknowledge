@@ -92,8 +92,22 @@ impl Theme {
     }
 
     /// Borders, units, hints — present but never competing.
+    ///
+    /// Grey is a colour too. With colour off this used to stay dark grey, so a reader who had
+    /// asked for no colour — or whose terminal set `NO_COLOR` — still got a coloured screen, and
+    /// on a monochrome terminal dark grey can come out as nothing at all. Off, it is dimmed text:
+    /// a weight, like bold, which every terminal either draws or ignores.
     pub fn muted(self) -> Style {
-        Style::new().fg(Color::DarkGray)
+        if self.colour {
+            Style::new().fg(Color::DarkGray)
+        } else {
+            Style::new().add_modifier(Modifier::DIM)
+        }
+    }
+
+    /// Whether this theme uses colour at all.
+    pub fn colour(self) -> bool {
+        self.colour
     }
 
     /// The row under the cursor: reversed, so it stands out on any terminal.
@@ -174,4 +188,34 @@ pub const TITLE_BORDER: u16 = 2;
 /// this first and drops the second rather than handing over a title that is cut in half.
 pub fn title_room(width: u16) -> usize {
     (width as usize).saturating_sub(2 + TITLE_BORDER as usize + 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Colour off means no colour anywhere — not four state colours gone and grey left behind.
+    #[test]
+    fn colour_off_sets_no_colour_on_any_style() {
+        let theme = Theme::new(false);
+        let styles = [
+            theme.plain(),
+            theme.heading(),
+            theme.muted(),
+            theme.selected(),
+            theme.good(),
+            theme.bad(),
+            theme.working(),
+            theme.chosen(),
+        ];
+        for style in styles {
+            assert_eq!(style.fg, None, "{style:?} still carries a colour");
+            assert_eq!(style.bg, None, "{style:?} still carries a colour");
+        }
+    }
+
+    #[test]
+    fn colour_on_keeps_the_quiet_grey() {
+        assert_eq!(Theme::new(true).muted().fg, Some(Color::DarkGray));
+    }
 }
